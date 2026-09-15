@@ -29,14 +29,26 @@ Hermes integration is out of scope.
 
 ## Quick start
 
-```bash
-# Build and configure an existing project for both clients.
-bash launch.sh --project /path/to/project
+Install with the recommended shell installer:
 
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/releases/latest/download/skillvolution-installer.sh | sh
+```
+
+Then configure a project:
+
+```bash
+cd /path/to/project
+skillvolution setup
+```
+
+To verify the installation:
+
+```bash
 # Inspect what was installed.
-ls /path/to/project/.mcp.json /path/to/project/opencode.json \
-   /path/to/project/.claude/skills/evolution/SKILL.md \
-   /path/to/project/.opencode/skills/evolution/SKILL.md
+ls .mcp.json opencode.json \
+   .claude/skills/evolution/SKILL.md \
+   .opencode/skills/evolution/SKILL.md
 
 # Review any drafts after a session.
 skillvolution drafts
@@ -44,10 +56,26 @@ skillvolution diff my-skill --version 1
 skillvolution publish my-skill --version 1
 ```
 
-`launch.sh` honours `XDG_DATA_HOME` for the default database location. Pass `--db`, `--bin-dir`,
-`--client {both,opencode,claude-code}`, `--project-key`, or `--install-rust` to override. Use
-`--help` for the full set; the launcher exits with usage information without touching the
-filesystem.
+For security-conscious users, download the installer script, verify it against the SHA256 checksum, and run it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/releases/latest/download/skillvolution-installer.sh -o skillvolution-installer.sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/releases/latest/download/sha256.sum | grep skillvolution-installer.sh | sha256sum -c
+sh skillvolution-installer.sh
+```
+
+Updating to the latest version is as simple as rerunning the installer; the binary path remains the same.
+
+**Alternative: Build from source**
+
+Requires Rust. Use this to build and configure an existing project:
+
+```bash
+bash launch.sh --project /path/to/project
+```
+
+`launch.sh` honours `XDG_DATA_HOME` for the default database location and supports `--db`, `--bin-dir`,
+`--client {both,opencode,claude-code}`, `--project-key`, and `--install-rust`. Use `--help` for all options.
 
 ## CLI
 
@@ -70,12 +98,18 @@ Commands
   hook session-start [--project KEY]
                              Print the skill catalog as session context
   hook stop                  Ask for a review after unreviewed work (exit 2 blocks the stop)
-  setup --project PATH --bin PATH --db PATH
-        --client both|opencode|claude-code
-        --project-key KEY    Configure a project to use the vault
+  setup [OPTIONS]            Configure a project to use the vault
+
+Setup options:
+  --project PATH             Project directory to configure (default: current directory)
+  --bin PATH                 Path to the skillvolution binary (default: current executable)
+  --db PATH                  Database path (default: $XDG_DATA_HOME/skillvolution/skills.db
+                             or ~/.local/share/skillvolution/skills.db)
+  --client CHOICE            Client to configure: both, opencode, claude-code (default: both)
+  --project-key KEY          Project scope key for the MCP server (default: project directory name)
 ```
 
-Run `skillvolution <command> --help` for the exact flags. The default database path is
+Run `skillvolution <command> --help` for exact flags and defaults. The default database path is
 `$XDG_DATA_HOME/skillvolution/skills.db`, falling back to `$HOME/.local/share/skillvolution/skills.db`
 when `XDG_DATA_HOME` is unset.
 
@@ -134,7 +168,7 @@ See `docs/architecture.md` for module boundaries and `docs/integrations.md` for 
 ## Development
 
 ```bash
-cargo test --locked            # full suite (79 tests)
+cargo test --locked            # full suite (82 tests)
 cargo clippy --all-targets --locked -- -D warnings
 cargo build --release --locked
 ```
@@ -148,6 +182,16 @@ writers), `tests/hook.rs` (session-start catalog, Stop transcript scanning), `te
 
 The build is reproducible via `Cargo.lock`. The launcher uses `--locked` as well; if a
 developer changes dependencies they must regenerate `Cargo.lock`.
+
+## Releasing
+
+Maintainers publish binary releases to GitHub Releases via cargo-dist:
+
+1. Bump the version in `Cargo.toml` and commit.
+2. Tag the commit: `git tag vX.Y.Z && git push origin vX.Y.Z`
+3. The Release workflow builds platform-specific binaries (x86_64-linux-gnu, x86_64-linux-musl, aarch64-linux-gnu) and publishes them to GitHub Releases with checksums.
+
+To preview the artifacts locally, run `dist plan`. The shell installer and SHA256 checksums are generated automatically.
 
 ## Limitations
 

@@ -8,7 +8,10 @@ pub use search::{SearchPage, SkillMetadata};
 
 use anyhow::{Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension};
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA: &str = include_str!("schema.sql");
@@ -86,6 +89,25 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+/// `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an absolute, nonempty path;
+/// otherwise `$HOME/.local/share/skillvolution/skills.db` (`$USERPROFILE` if `$HOME` is unset).
+pub fn default_database() -> Result<PathBuf> {
+    let nonempty_env = |name| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let base = nonempty_env("XDG_DATA_HOME")
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            nonempty_env("HOME")
+                .or_else(|| nonempty_env("USERPROFILE"))
+                .map(|home| home.join(".local/share"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("set --db, XDG_DATA_HOME, or HOME"))?;
+    Ok(base.join("skillvolution/skills.db"))
 }
 
 pub fn validate_id(id: &str) -> Result<()> {

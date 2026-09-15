@@ -2,6 +2,7 @@ mod claude;
 mod fs_safe;
 mod opencode;
 
+use crate::vault::Vault;
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
@@ -12,26 +13,49 @@ pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
+    /// Project directory to configure; defaults to the current directory.
     #[arg(long)]
-    project: PathBuf,
+    project: Option<PathBuf>,
     #[arg(long, default_value = "both", value_parser = ["both", "opencode", "claude-code"])]
     client: String,
+    /// Path to the skillvolution binary; defaults to the currently running executable.
     #[arg(long)]
-    bin: PathBuf,
+    bin: Option<PathBuf>,
+    /// Database path; defaults to the global --db, then the standard data directory.
     #[arg(long)]
-    db: PathBuf,
+    db: Option<PathBuf>,
     /// Project scope key for the MCP server; defaults to the project directory name.
     #[arg(long)]
     project_key: Option<String>,
 }
 
+impl SetupArgs {
+    /// Fills in `--db` from the global `--db` flag when `setup` wasn't given its own.
+    pub fn with_default_db(mut self, db: Option<PathBuf>) -> Self {
+        self.db = self.db.or(db);
+        self
+    }
+}
+
 pub fn run(args: SetupArgs) -> Result<()> {
-    for path in [&args.project, &args.bin, &args.db] {
+    let project = args
+        .project
+        .map(Ok)
+        .unwrap_or_else(|| std::env::current_dir().context("determine current directory"))?;
+    let bin = match args.bin {
+        Some(bin) => bin,
+        None => std::env::current_exe().context("determine current executable")?,
+    };
+    let db = match args.db {
+        Some(db) => db,
+        None => crate::vault::default_database()?,
+    };
+    for path in [&project, &bin, &db] {
         fs_safe::check_path(path)?;
     }
-    let project = fs::canonicalize(&args.project).context("project must exist")?;
-    let bin = fs::canonicalize(&args.bin).context("binary must exist")?;
-    let db = std::path::absolute(&args.db)?;
+    let project = fs::canonicalize(&project).context("project must exist")?;
+    let bin = fs::canonicalize(&bin).context("binary must exist")?;
+    let db = std::path::absolute(&db)?;
     ensure!(project.is_dir(), "project must be a directory");
     ensure!(bin.is_file(), "binary must be a regular file");
     ensure!(
@@ -68,6 +92,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
             )
         })?;
     }
+    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     Ok(())
 }
 

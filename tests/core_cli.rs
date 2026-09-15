@@ -2,7 +2,10 @@
 mod support;
 
 use skillvolution::vault::Vault;
-use std::process::{Command, Output};
+use std::{
+    fs,
+    process::{Command, Output},
+};
 use support::Draft;
 
 fn run(db: &std::path::Path, args: &[&str]) -> Output {
@@ -233,6 +236,75 @@ fn default_database_respects_xdg_then_home() {
         );
         assert!(base.join("skillvolution/skills.db").exists());
     }
+}
+
+#[test]
+fn setup_defaults_bin_project_and_xdg_database() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg_base = home.path().join("xdg data");
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("my-project");
+    fs::create_dir(&project).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_skillvolution");
+    let canonical_bin = fs::canonicalize(bin).unwrap();
+
+    let output = Command::new(bin)
+        .arg("setup")
+        .arg("--client")
+        .arg("claude-code")
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", &xdg_base)
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let mcp: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    let server = &mcp["mcpServers"]["skillvolution"];
+    // --bin defaulted to this test's own binary, canonicalized.
+    assert_eq!(
+        server["command"].as_str().unwrap(),
+        canonical_bin.to_str().unwrap()
+    );
+    // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db.
+    let db_path = xdg_base.join("skillvolution/skills.db");
+    assert_eq!(
+        server["args"][1].as_str().unwrap(),
+        db_path.to_str().unwrap()
+    );
+    assert!(db_path.is_file(), "setup must initialize the database");
+    // --project defaulted to the current directory, so the key comes from its name.
+    assert_eq!(server["args"][4], "my-project");
+}
+
+#[test]
+fn setup_honours_global_db_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let db = dir.path().join("global.db");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("--db")
+        .arg(&db)
+        .arg("setup")
+        .arg("--project")
+        .arg(&project)
+        .arg("--client")
+        .arg("claude-code")
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let mcp: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    let args = mcp["mcpServers"]["skillvolution"]["args"]
+        .as_array()
+        .unwrap();
+    assert_eq!(args[1].as_str().unwrap(), db.to_str().unwrap());
+    assert!(db.is_file());
 }
 
 #[test]

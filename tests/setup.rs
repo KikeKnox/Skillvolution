@@ -456,3 +456,29 @@ fn removes_legacy_opencode_instructions_entry_without_creating_key() {
     let config2 = read_json(temp2.path().join("opencode.json"));
     assert!(config2.get("instructions").is_none());
 }
+
+#[test]
+fn bin_defaults_to_current_exe() {
+    let temp = tempfile::tempdir().unwrap();
+    let argv = vec![
+        "setup".to_owned(),
+        "--project".to_owned(),
+        temp.path().to_string_lossy().into_owned(),
+        "--client".to_owned(),
+        "claude-code".to_owned(),
+        "--db".to_owned(),
+        temp.path()
+            .join("vault.sqlite3")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let cc = read_json(temp.path().join(".mcp.json"));
+    let command = cc["mcpServers"]["skillvolution"]["command"]
+        .as_str()
+        .unwrap();
+    let expected = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(Path::new(command), expected);
+    assert!(Path::new(command).is_absolute());
+    assert!(Path::new(command).is_file());
+}

@@ -85,23 +85,6 @@ enum HookEvent {
     Stop,
 }
 
-fn default_database() -> Result<PathBuf> {
-    let nonempty_env = |name| {
-        std::env::var_os(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    };
-    let base = nonempty_env("XDG_DATA_HOME")
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            nonempty_env("HOME")
-                .or_else(|| nonempty_env("USERPROFILE"))
-                .map(|home| home.join(".local/share"))
-        })
-        .ok_or_else(|| anyhow::anyhow!("set --db, XDG_DATA_HOME, or HOME"))?;
-    Ok(base.join("skillvolution/skills.db"))
-}
-
 fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -117,9 +100,12 @@ fn validate_project(project: &Option<String>) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Command::Setup(args) = cli.command {
-        return setup::run(args);
+        return setup::run(args.with_default_db(cli.db));
     }
-    let db = cli.db.map(Ok).unwrap_or_else(default_database)?;
+    let db = cli
+        .db
+        .map(Ok)
+        .unwrap_or_else(skillvolution::vault::default_database)?;
     let open = || Vault::open(&db).with_context(|| format!("open {}", db.display()));
     match cli.command {
         Command::Init => {

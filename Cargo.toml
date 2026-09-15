@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A shared, human-published procedural skill vault"
 license = "MIT"
+repository = "https://github.com/KikeKnox/Skillvolution"
 
 [dependencies]
 anyhow = "1"
@@ -15,3 +16,8 @@ similar = "3.2.0"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

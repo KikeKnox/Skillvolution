@@ -2,6 +2,27 @@
 
 This document describes how Skillvolution configures OpenCode and Claude Code for a project.
 
+## Installation methods
+
+### Recommended: Prebuilt installer
+
+Install the latest binary release directly:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/releases/latest/download/skillvolution-installer.sh | sh
+```
+
+The installer:
+- Downloads the appropriate binary for your platform (x86_64-linux-gnu, x86_64-linux-musl, aarch64-linux-gnu)
+- Installs it to `~/.local/bin`
+- Is idempotent; rerunning updates to the latest version
+
+For security verification, save the script and check it against the SHA256 checksum before running.
+
+### Alternative: Build from source
+
+The `launch.sh` script builds Skillvolution from source using Rust.
+
 ## What `launch.sh` does
 
 1. Verifies or installs Rust.
@@ -195,7 +216,7 @@ cargo test --locked --test setup
 cargo test --locked --test setup_launch
 ```
 
-`cargo test --locked` runs 79 tests across these files plus the crate's own unit tests. The
+`cargo test --locked` runs 82 tests across these files plus the crate's own unit tests. The
 launcher test runs `launch.sh` against a disposable directory tree and verifies the binary,
 database, MCP entries, hooks, and skill files land in the expected shape. The MCP test spawns a
 real `skillvolution serve` subprocess, drives `initialize` / `tools/list` / `tools/call` for all
