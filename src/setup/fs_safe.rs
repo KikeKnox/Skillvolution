@@ -78,10 +78,16 @@ pub fn parse_strict_object(text: &str) -> Result<Value> {
 /// Refuses an existing skill file that doesn't carry our managed marker, so we never
 /// clobber a user's own file at that path.
 pub fn check_skill(path: &Path) -> Result<()> {
+    check_owner(path, SKILL_OWNER_PREFIX, "Evolution skill")
+}
+
+/// Refuses an existing file at `path` that doesn't carry `marker`, so we never clobber
+/// a user's own file there. `what` names the file kind in the error message.
+pub fn check_owner(path: &Path, marker: &str, what: &str) -> Result<()> {
     if let Some(text) = read_optional(path)? {
         ensure!(
-            text.contains(SKILL_OWNER_PREFIX),
-            "unowned Evolution skill conflict: {}",
+            text.contains(marker),
+            "unowned {what} conflict: {}",
             path.display()
         );
     }

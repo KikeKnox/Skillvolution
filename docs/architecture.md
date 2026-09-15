@@ -12,17 +12,25 @@
 - `src/mcp.rs` — JSON-RPC framing over stdio, protocol negotiation, tool dispatch.
 - `src/hook.rs` — the SessionStart catalog text and the Stop transcript scan, independent of stdio
   so both are unit-testable against fixture transcripts.
-- `src/main.rs` — CLI parsing and dispatch (`clap`); opens the vault, creating the database file on
-  first use.
-- `src/setup/mod.rs` — resolves paths and the project key, collects each client's changes, then
-  writes them.
-- `src/setup/fs_safe.rs` — shared filesystem/JSON helpers: load JSON, merge a marker block, refuse
-  an unowned skill file, write-with-backup.
-- `src/setup/claude.rs` — Claude Code changes: `.mcp.json` entry, `.claude/settings.local.json`
-  hooks, native skill file.
-- `src/setup/opencode.rs` — OpenCode changes: `opencode.json` entry, `AGENTS.md` marker block,
-  native skill file.
+- `src/main.rs` — CLI parsing and dispatch (`clap`); `resolve_project` picks `--project` when
+  given, else `CLAUDE_PROJECT_DIR` or the working directory, for `serve` and `hook session-start`.
+- `src/project.rs` — derives a project key from a directory's enclosing git repository root
+  (lowercased, non-alphanumeric runs collapsed to `-`, ≤64 bytes); `None` outside a git repo. Used
+  for runtime auto-detection and to default `setup --project`'s `--project-key`.
+- `src/setup/mod.rs` — resolves the binary/database paths and dispatches to project setup
+  (`--project PATH`) or global, per-user setup (no `--project`).
+- `src/setup/fs_safe.rs` — shared filesystem/JSON helpers: strict-JSON parsing with duplicate-key
+  rejection, marker-block merge, managed-file ownership checks, backup-before-write.
+- `src/setup/hooks.rs` — merges SessionStart/Stop hook entries into a settings JSON value, shared
+  by project (`.claude/settings.local.json`) and global (`~/.claude/settings.json`) setup.
+- `src/setup/plugin.rs` — renders the OpenCode plugin asset with `--bin`/`--db` substituted.
+- `src/setup/claude.rs` / `src/setup/opencode.rs` — per-project changes; `src/setup/global.rs`,
+  `global_claude.rs`, `global_opencode.rs` — the global equivalents. The global Claude Code side
+  registers its MCP server via the `claude` CLI (`src/setup/claude_cli.rs`) instead of editing
+  `~/.claude.json` directly, which Claude Code itself rewrites.
 - `assets/evolution/SKILL.md` — the native `evolution` skill installed for both clients.
+- `assets/opencode/skillvolution.js` — the OpenCode plugin template: catalog injection plus the
+  idle review prompt.
 
 ## Data model
 

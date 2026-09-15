@@ -213,12 +213,13 @@ fn default_database_respects_xdg_then_home() {
 }
 
 #[test]
-fn setup_defaults_bin_project_and_xdg_database() {
+fn setup_without_project_defaults_bin_and_xdg_database_globally() {
+    // `setup` without `--project` now configures the user's global config instead of
+    // defaulting the project to the current directory.
     let home = tempfile::tempdir().unwrap();
     let xdg_base = home.path().join("xdg data");
+    let empty_path = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let project = workspace.path().join("my-project");
-    fs::create_dir(&project).unwrap();
 
     let bin = env!("CARGO_BIN_EXE_skillvolution");
     let canonical_bin = fs::canonicalize(bin).unwrap();
@@ -227,30 +228,29 @@ fn setup_defaults_bin_project_and_xdg_database() {
         .arg("setup")
         .arg("--client")
         .arg("claude-code")
-        .current_dir(&project)
+        .current_dir(workspace.path())
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &xdg_base)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("PATH", empty_path.path())
         .output()
         .unwrap();
     assert_success(&output);
 
-    let mcp: serde_json::Value =
-        serde_json::from_slice(&fs::read(project.join(".mcp.json")).unwrap()).unwrap();
-    let server = &mcp["mcpServers"]["skillvolution"];
+    assert!(!workspace.path().join(".mcp.json").exists());
+
+    let settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.path().join(".claude/settings.json")).unwrap())
+            .unwrap();
+    let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
     // --bin defaulted to this test's own binary, canonicalized.
-    assert_eq!(
-        server["command"].as_str().unwrap(),
-        canonical_bin.to_str().unwrap()
-    );
+    assert!(command.contains(canonical_bin.to_str().unwrap()));
     // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db.
     let db_path = xdg_base.join("skillvolution/skills.db");
-    assert_eq!(
-        server["args"][1].as_str().unwrap(),
-        db_path.to_str().unwrap()
-    );
+    assert!(command.contains(db_path.to_str().unwrap()));
     assert!(db_path.is_file(), "setup must initialize the database");
-    // --project defaulted to the current directory, so the key comes from its name.
-    assert_eq!(server["args"][4], "my-project");
 }
 
 #[test]

@@ -1,13 +1,13 @@
 //! OpenCode: opencode.json MCP entry, AGENTS.md trigger block, and the native skill file.
 
-use super::fs_safe;
+use super::{fs_safe, plugin};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const START: &str = "<!-- skillvolution:start -->";
-const END: &str = "<!-- skillvolution:end -->";
-const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, propose verified lessons).\n<!-- skillvolution:end -->";
+pub(super) const START: &str = "<!-- skillvolution:start -->";
+pub(super) const END: &str = "<!-- skillvolution:end -->";
+pub(super) const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, propose verified lessons).\n<!-- skillvolution:end -->";
 const LEGACY_INSTRUCTION: &str = ".opencode/skills/evolution/SKILL.md";
 
 pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(PathBuf, String)>> {
@@ -37,6 +37,10 @@ pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(
     let text = fs_safe::read_optional(&agents_path)?.unwrap_or_default();
     let updated = fs_safe::merge_marker_block(text, START, END, AGENTS_BLOCK)?;
     changes.push((agents_path, updated));
+
+    let plugin_path = project.join(".opencode/plugins/skillvolution.js");
+    plugin::check_owner(&plugin_path)?;
+    changes.push((plugin_path, plugin::content(bin, db)?));
 
     Ok(changes)
 }

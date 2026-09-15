@@ -18,6 +18,7 @@ enum Command {
     /// Start the MCP server on stdio.
     Serve {
         /// Project key used for project-scoped skills and outcome records.
+        /// Detected automatically from the working directory's git root when omitted.
         #[arg(long)]
         project: Option<String>,
     },
@@ -73,6 +74,8 @@ enum Command {
 enum HookEvent {
     /// Print the skill catalog as session context.
     SessionStart {
+        /// Project key for project-scoped skills.
+        /// Detected automatically from the working directory's git root when omitted.
         #[arg(long)]
         project: Option<String>,
     },
@@ -92,6 +95,21 @@ fn validate_project(project: &Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Resolves the project key for `serve` and `hook session-start`: an explicit
+/// `--project` wins (already validated by `validate_project`); otherwise the
+/// project is detected from `CLAUDE_PROJECT_DIR` (set by Claude Code for MCP
+/// servers and hooks) or, failing that, the current directory.
+fn resolve_project(explicit: Option<String>) -> Result<Option<String>> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    let dir = match std::env::var("CLAUDE_PROJECT_DIR") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => std::env::current_dir().context("determine current directory")?,
+    };
+    Ok(skillvolution::project::detect(&dir))
+}
+
 /// Opens the database at `--db`, or the default location (setup and every
 /// command create it on first open, so there is no separate init step).
 fn open(db: &Option<PathBuf>) -> Result<Vault> {
@@ -108,6 +126,11 @@ fn main() -> Result<()> {
         Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
         Command::Serve { project } => {
             validate_project(&project)?;
+            let project = resolve_project(project)?;
+            eprintln!(
+                "skillvolution: project = {}",
+                project.as_deref().unwrap_or("none")
+            );
             skillvolution::mcp::serve(open(&cli.db)?, project)?;
         }
         Command::Drafts { json } => {
@@ -197,6 +220,7 @@ fn main() -> Result<()> {
         }
         Command::Hook(HookEvent::SessionStart { project }) => {
             validate_project(&project)?;
+            let project = resolve_project(project)?;
             print!(
                 "{}",
                 hook::session_start(&open(&cli.db)?, project.as_deref())?

@@ -24,15 +24,28 @@ before installing, adds `~/.local/bin` to `PATH` in your shell profile (skip wit
 cargo install --locked --path .
 ```
 
-## Set up a project
+## Setup
+
+Run once, after installing:
 
 ```bash
-cd /path/to/project
 skillvolution setup
 ```
 
-This configures Claude Code and/or OpenCode (`--client both|opencode|claude-code`) to use the
-vault. See `docs/integrations.md` for exactly what it writes.
+With no `--project`, this configures Claude Code and/or OpenCode (`--client both|opencode|claude-code`)
+**globally, for the current user**: every project then works with no per-project step. Claude Code
+gets the `evolution` skill, `SessionStart`/`Stop` hooks merged into `settings.json`, and the MCP
+server registered at user scope via `claude mcp add-json` (setup prints the command to run
+manually if `claude` isn't on `PATH`). OpenCode gets the skill, an `AGENTS.md` reminder, and a
+plugin that injects the skill catalog into every session and prompts for review once a session
+goes idle after doing work. Each project is then identified at runtime by its git repository's
+directory name (outside a git repo, only global skills are visible).
+
+Pass `--project PATH [--project-key KEY]` instead to configure a single project's own files rather
+than the shared, global config. See `docs/integrations.md` for exactly what each mode writes.
+
+Updating the binary later: rerun the installer. `skillvolution setup` doesn't need to run again —
+the registered config already points at `~/.local/bin/skillvolution`.
 
 ## Human review
 
@@ -65,7 +78,7 @@ reject ID --version N [--note TEXT]  Reject a draft revision
 deprecate ID / undeprecate ID        Toggle a skill's visibility in search
 outcomes [ID] [--failing] [--json]   Summarize outcomes, or list one skill's outcome log
 hook session-start / hook stop       Claude Code hook entry points
-setup [OPTIONS]                      Configure a project to use the vault
+setup [OPTIONS]                      Configure Skillvolution for Claude Code and/or OpenCode
 ```
 
 Run `skillvolution <command> --help` for exact flags. The database defaults to
@@ -73,17 +86,18 @@ Run `skillvolution <command> --help` for exact flags. The database defaults to
 it is created automatically on first use, no separate init step.
 
 See `docs/architecture.md` for modules and data model, and `docs/integrations.md` for what `setup`
-writes and how the review hooks and evolution skill work.
+writes and how the review hooks, the OpenCode plugin, and the evolution skill work.
 
 ## Limitations
 
 - Evidence attached to a proposal is supplied by the proposing agent and is not independently
   verified by the vault; review it before publishing.
-- Automatic review hooks (SessionStart catalog, Stop review reminder) exist for Claude Code only;
-  OpenCode gets the `evolution` skill and an `AGENTS.md` reminder but no lifecycle enforcement.
-- Live, end-to-end sessions against real Claude Code / OpenCode clients have not been verified in
-  this repository; tests cover the CLI, the MCP protocol over a real subprocess, and the files
-  `setup` writes, not an authenticated client actually reading them.
+- The project key is the sanitized name of the enclosing git repository's root directory, so two
+  unrelated repositories that happen to share a directory name share project scope.
+- Live, end-to-end sessions against real Claude Code / OpenCode clients have not been fully
+  verified in this repository — in particular, Claude Code hooks actually firing and blocking a
+  live session. Tests cover the CLI, the MCP protocol over a real subprocess, the OpenCode
+  plugin's logic, and the files `setup` writes, not an authenticated client actually reading them.
 
 ## Development
 

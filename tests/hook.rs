@@ -6,9 +6,20 @@ use skillvolution::{hook, vault::Vault};
 use std::{
     fs,
     io::Write,
+    path::Path,
     process::{Command, Stdio},
 };
 use support::Draft;
+
+/// Creates `parent/name` as a git repository root (just enough for
+/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
+/// returns its path. `name` should already be a valid project key so the
+/// detected key matches it exactly.
+fn git_repo(parent: &Path, name: &str) -> std::path::PathBuf {
+    let repo = parent.join(name);
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    repo
+}
 
 fn assistant_tool_use(name: &str) -> String {
     json!({"type":"assistant","message":{"role":"assistant","content":[
@@ -204,6 +215,33 @@ fn cli_hook_stop_exits_2_with_a_reason_when_blocking_and_0_otherwise() {
     assert!(clean.stderr.is_empty());
 }
 
+/// Runs `hook session-start`, isolated from this test binary's own cwd and
+/// environment: `cwd` and `env` (applied after clearing `CLAUDE_PROJECT_DIR`)
+/// are the only inputs to runtime project detection. `project` sets `--project`
+/// when given.
+fn run_hook_session_start(
+    db: &Path,
+    project: Option<&str>,
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+    command
+        .arg("--db")
+        .arg(db)
+        .arg("hook")
+        .arg("session-start")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .current_dir(cwd);
+    if let Some(project) = project {
+        command.arg("--project").arg(project);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
 #[test]
 fn cli_hook_session_start_prints_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,13 +249,93 @@ fn cli_hook_session_start_prints_the_catalog() {
     let mut vault = Vault::open(&db).unwrap();
     Draft::new("rust-tests").publish(&mut vault);
     drop(vault);
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-        .arg("--db")
-        .arg(&db)
-        .arg("hook")
-        .arg("session-start")
-        .output()
-        .unwrap();
+    let output = run_hook_session_start(&db, None, dir.path(), &[]);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("rust-tests"));
+}
+
+// --- runtime project detection (no --project flag) ------------------------
+
+#[test]
+fn session_start_without_project_detects_the_git_root_and_scopes_by_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let repo_b = git_repo(dir.path(), "projb");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    let in_a = run_hook_session_start(&db, None, &repo_a, &[]);
+    assert!(in_a.status.success());
+    assert!(String::from_utf8_lossy(&in_a.stdout).contains("proj-only"));
+
+    let in_b = run_hook_session_start(&db, None, &repo_b, &[]);
+    assert!(in_b.status.success());
+    assert!(!String::from_utf8_lossy(&in_b.stdout).contains("proj-only"));
+}
+
+#[test]
+fn session_start_claude_project_dir_env_takes_precedence_over_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let repo_b = git_repo(dir.path(), "projb");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    // cwd is repo_b (would detect "projb"), but CLAUDE_PROJECT_DIR points at repo_a.
+    let output = run_hook_session_start(
+        &db,
+        None,
+        &repo_b,
+        &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("proj-only"));
+}
+
+#[test]
+fn session_start_outside_a_git_repo_only_shows_global_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let outside = dir.path().join("no-git");
+    fs::create_dir_all(&outside).unwrap();
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("global-skill").publish(&mut vault);
+    Draft::new("proj-skill")
+        .scope("someproj")
+        .publish(&mut vault);
+    drop(vault);
+
+    let output = run_hook_session_start(&db, None, &outside, &[]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("global-skill"));
+    assert!(!stdout.contains("proj-skill"));
+}
+
+#[test]
+fn session_start_explicit_project_overrides_detection() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    // repo's own name would detect as "proja"; --project asks for "override" instead.
+    let repo_a = git_repo(dir.path(), "proja");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proja-skill").scope("proja").publish(&mut vault);
+    Draft::new("override-skill")
+        .scope("override")
+        .publish(&mut vault);
+    drop(vault);
+
+    let output = run_hook_session_start(&db, Some("override"), &repo_a, &[]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("override-skill"));
+    assert!(!stdout.contains("proja-skill"));
 }

@@ -1,52 +1,65 @@
 # Client integrations
 
-What `skillvolution setup` writes into a project, for each client selected with
-`--client both|opencode|claude-code` (default `both`).
+What `skillvolution setup` writes, for each client selected with `--client both|opencode|claude-code`
+(default `both`). With no `--project`, setup configures each client **globally, once per user**;
+`--project PATH [--project-key KEY]` instead configures one project's own files (`--project-key`
+requires `--project`).
 
-## Claude Code
+## Global setup (default)
 
-- `.mcp.json` — inserts or updates `mcpServers.skillvolution`:
-  ```json
-  {"type": "stdio", "command": "<absolute-bin>", "args": ["--db", "<absolute-db>", "serve", "--project", "<key>"]}
-  ```
-- `.claude/skills/evolution/SKILL.md` — the native skill (see below).
-- `.claude/settings.local.json` — merges a `SessionStart` and a `Stop` hook, each invoking
-  `<bin> --db <db> hook ...` with the path and project key shell-quoted in. Hooks go in the
-  **local** settings file, not the shared `settings.json`, because the commands embed this
-  machine's absolute binary and database paths, which should not be committed or shared.
+**Claude Code** — skill at `$CLAUDE_CONFIG_DIR/skills/evolution/SKILL.md` (`~/.claude/...` if
+unset); `SessionStart`/`Stop` hooks merged into that directory's shared `settings.json` (existing
+hooks and settings preserved); MCP server registered at user scope via `claude mcp add-json
+--scope user` — if `claude` isn't on `PATH`, setup prints that command instead of failing.
 
-## OpenCode
+**OpenCode** — config directory `$XDG_CONFIG_HOME/opencode` (`~/.config/opencode` if unset);
+`mcp.skillvolution` entry merged into whichever of `opencode.json`/`opencode.jsonc` already exists
+there (both present is refused; `opencode.json` is created if neither exists; a `.jsonc` file must
+already be free of comments and trailing commas, since it's parsed as strict JSON, or setup
+refuses); skill at `<config dir>/skills/evolution/SKILL.md`; `AGENTS.md` marker block; plugin at
+`<config dir>/plugins/skillvolution.js` (below).
 
-- `opencode.json` — inserts or updates `mcp.skillvolution`:
-  ```json
-  {"type": "local", "command": ["<absolute-bin>", "--db", "<absolute-db>", "serve", "--project", "<key>"], "enabled": true}
-  ```
-- `.opencode/skills/evolution/SKILL.md` — the native skill (see below).
-- `AGENTS.md` — merges a marker block (`<!-- skillvolution:start -->` / `:end`) reminding the agent
-  to use the `evolution` skill; OpenCode has no hook mechanism, so this is its only trigger.
+Neither global MCP entry passes `--project`; `serve` detects it per-invocation instead (below).
+
+## Project setup (`--project PATH`)
+
+- `.mcp.json` / `opencode.json` — `skillvolution` entry running `serve --project <key>`, `<key>`
+  defaulting to the project directory's sanitized name (`--project-key` to override).
+- `.claude/skills/evolution/SKILL.md` / `.opencode/skills/evolution/SKILL.md` — the native skill.
+- `.claude/settings.local.json` — hooks with `--project <key>` baked in; the **local** file, not
+  the shared `settings.json`, since the commands embed this machine's absolute paths.
+- `AGENTS.md` (OpenCode) — the same marker-block reminder as global setup.
+- `.opencode/plugins/skillvolution.js` (OpenCode) — the plugin.
+- `opencode.jsonc` is unsupported here: merge it into a strict `opencode.json` first.
+
+## Runtime project detection
+
+`serve` and `hook session-start` use an explicit `--project KEY` if given; otherwise
+`CLAUDE_PROJECT_DIR` (set by Claude Code for MCP servers and hooks) if set, else the working
+directory — and derive the key from the sanitized name of that directory's enclosing git
+repository root. Outside a git repository, no key is detected and only global skills are visible.
+Two unrelated repositories checked out under directories with the same name therefore share
+project scope. OpenCode launches each local MCP server with the project directory as its working
+directory, so this resolves correctly per project despite the global config having no `--project`.
 
 ## Setup safety
 
-- Every planned change is validated before anything is written, so a failing check (a malformed
-  config, a conflicting entry) leaves the project untouched.
-- Config files must be strict JSON with unique keys; duplicate keys are rejected.
-- Merging an MCP entry only touches the `skillvolution` key, preserving any other server entries
-  and foreign keys in the file.
-- Each changed file gets numbered backups (`.skillvolution.bak`, `.skillvolution.bak.1`, etc.)
-  before being modified; backups are created once and never overwritten by later setup runs.
-- Setup refuses to write through a config file that itself is a symlink (symlinked ancestor
-  directories are fine).
+- Every planned change is validated before anything is written, so a failing check leaves the
+  target untouched.
+- Config files must be strict JSON with unique keys (global OpenCode setup accepts `opencode.jsonc`
+  on the same strict-JSON terms; project setup does not).
+- Merging an MCP entry only touches the `skillvolution` key, preserving other entries in the file.
+- Each changed file gets numbered backups (`.skillvolution.bak`, `.bak.1`, ...) before being
+  modified, created once and never overwritten by later runs.
+- Setup refuses to write through a config file that is itself a symlink, and refuses an existing
+  `SKILL.md` or plugin file that isn't already Skillvolution-managed.
 - A write that would produce byte-identical content is skipped, so repeated setup makes no changes.
-- Setup removes the legacy `CLAUDE.md` `@import` marker block if present and removes any legacy
-  `.opencode/skills/evolution/SKILL.md` entry from the `instructions` array in `opencode.json`.
-- Setup refuses an existing `SKILL.md` at the target path that isn't already Skillvolution-managed,
-  and refuses a project using `opencode.jsonc` (merge it into a strict `opencode.json` first).
 
 ## Hooks
 
 `hook session-start` prints a short reminder plus a catalog of up to 30 published skills visible
-to the project (id, version, description, helped/failed counts) so discovery doesn't need an
-explicit search for trivial tasks.
+to the project (id, version, description, helped/failed counts). Global hooks omit `--project` and
+rely on the same auto-detection as `serve`; project-mode hooks bake in `--project <key>`.
 
 `hook stop` reads the Claude Code Stop payload from stdin and scans the transcript since the
 offset last recorded for that session in `hook_state`. If that span used a work tool (`Edit`,
@@ -55,6 +68,18 @@ offset last recorded for that session in `hook_state`. If that span used a work 
 "block the stop and show the model this reason." The reviewed offset always advances to the last
 complete transcript line, so a given unreviewed span blocks at most once, and `stop_hook_active` is
 honored so a stop already continued by this hook is never blocked again.
+
+## OpenCode plugin
+
+`plugins/skillvolution.js` (global) or `.opencode/plugins/skillvolution.js` (project) does two
+things: injects the skill catalog into the system prompt once per session by running
+`skillvolution hook session-start` in the project directory; and, once a session goes idle after
+doing work (`edit`, `write`, `patch`/`apply_patch`, `bash`) without a `report_skill_outcome` or
+`propose_skill_change` call, sends one review prompt for the evolution skill's report/reflect
+steps. It doesn't loop — the turn that prompt itself causes is never re-reviewed — skips subagent
+(task) sessions (their work is attributed to the parent instead), and skips a session that just
+errored or aborted, so the next idle starts clean. `opencode run` (one-shot) exits on idle before
+any review prompt is sent, so non-interactive runs never see one.
 
 ## Evolution skill
 

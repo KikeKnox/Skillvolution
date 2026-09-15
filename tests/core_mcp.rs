@@ -4,11 +4,22 @@ mod support;
 use serde_json::{Value, json};
 use skillvolution::vault::Vault;
 use std::{
+    fs,
     io::{BufRead, BufReader, Write},
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
 };
 use support::Draft;
+
+/// Creates `parent/name` as a git repository root (just enough for
+/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
+/// returns its path. `name` should already be a valid project key so the
+/// detected key matches it exactly.
+fn git_repo(parent: &Path, name: &str) -> std::path::PathBuf {
+    let repo = parent.join(name);
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    repo
+}
 
 /// A long-lived `skillvolution serve` subprocess, driven one JSON-RPC line at a time
 /// so a test can interleave requests with out-of-process CLI writes.
@@ -19,19 +30,35 @@ struct McpServer {
 }
 
 impl McpServer {
+    /// Spawns with `--project` (if given) and, so runtime detection never sees
+    /// this test binary's own working directory or environment, a cwd of
+    /// `db`'s (git-free) temp directory and `CLAUDE_PROJECT_DIR` cleared.
     fn spawn(db: &Path, project: Option<&str>) -> Self {
-        let mut args = vec!["--db", db.to_str().unwrap(), "serve"];
-        if let Some(project) = project {
-            args.push("--project");
-            args.push(project);
-        }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-            .args(&args)
+        Self::spawn_in(db, project, db.parent().unwrap(), &[])
+    }
+
+    /// Spawns without `--project`, in `cwd`, with `env` applied after clearing
+    /// `CLAUDE_PROJECT_DIR` — exercises runtime project detection.
+    fn spawn_detecting(db: &Path, cwd: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_in(db, None, cwd, env)
+    }
+
+    fn spawn_in(db: &Path, project: Option<&str>, cwd: &Path, env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        command
+            .args(["--db", db.to_str().unwrap(), "serve"])
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn skillvolution serve");
+            .stderr(Stdio::piped());
+        if let Some(project) = project {
+            command.args(["--project", project]);
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn skillvolution serve");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
@@ -277,4 +304,96 @@ fn unknown_arguments_are_rejected_as_tool_errors() {
     server.initialize("2025-06-18");
     let response = server.call(2, "search_skills", json!({"query": "x", "bogus": true}));
     assert_eq!(response["result"]["isError"], true);
+}
+
+// --- runtime project detection (no --project flag) ------------------------
+
+#[test]
+fn serve_without_project_detects_the_git_root_and_scopes_by_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let repo_b = git_repo(dir.path(), "projb");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    let mut server_a = McpServer::spawn_detecting(&db, &repo_a, &[]);
+    server_a.initialize("2025-06-18");
+    let visible = server_a.call(2, "search_skills", json!({}));
+    assert_eq!(text_of(&visible)["total"], 1);
+    assert_eq!(text_of(&visible)["skills"][0]["id"], "proj-only");
+
+    let mut server_b = McpServer::spawn_detecting(&db, &repo_b, &[]);
+    server_b.initialize("2025-06-18");
+    assert_eq!(
+        text_of(&server_b.call(2, "search_skills", json!({})))["total"],
+        0
+    );
+}
+
+#[test]
+fn claude_project_dir_env_takes_precedence_over_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let repo_b = git_repo(dir.path(), "projb");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    // cwd is repo_b (would detect "projb"), but CLAUDE_PROJECT_DIR points at repo_a.
+    let mut server = McpServer::spawn_detecting(
+        &db,
+        &repo_b,
+        &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
+    );
+    server.initialize("2025-06-18");
+    let visible = server.call(2, "search_skills", json!({}));
+    assert_eq!(text_of(&visible)["total"], 1);
+    assert_eq!(text_of(&visible)["skills"][0]["id"], "proj-only");
+}
+
+#[test]
+fn outside_a_git_repo_only_global_skills_are_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let outside = dir.path().join("no-git");
+    fs::create_dir_all(&outside).unwrap();
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("global-skill").publish(&mut vault);
+    Draft::new("proj-skill")
+        .scope("someproj")
+        .publish(&mut vault);
+    drop(vault);
+
+    let mut server = McpServer::spawn_detecting(&db, &outside, &[]);
+    server.initialize("2025-06-18");
+    let visible = server.call(2, "search_skills", json!({}));
+    assert_eq!(text_of(&visible)["total"], 1);
+    assert_eq!(text_of(&visible)["skills"][0]["id"], "global-skill");
+}
+
+#[test]
+fn explicit_project_overrides_detection() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    // repo's own name would detect as "proja"; --project asks for "override" instead.
+    let repo_a = git_repo(dir.path(), "proja");
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proja-skill").scope("proja").publish(&mut vault);
+    Draft::new("override-skill")
+        .scope("override")
+        .publish(&mut vault);
+    drop(vault);
+
+    let mut server = McpServer::spawn_in(&db, Some("override"), &repo_a, &[]);
+    server.initialize("2025-06-18");
+    let visible = server.call(2, "search_skills", json!({}));
+    assert_eq!(text_of(&visible)["total"], 1);
+    assert_eq!(text_of(&visible)["skills"][0]["id"], "override-skill");
 }

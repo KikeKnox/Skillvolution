@@ -471,3 +471,49 @@ fn removes_legacy_opencode_instructions_entry_without_creating_key() {
     let config2 = read_json(temp2.path().join("opencode.json"));
     assert!(config2.get("instructions").is_none());
 }
+
+#[test]
+fn project_key_without_project_flag_is_an_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let argv = vec![
+        "setup".to_owned(),
+        "--project-key".to_owned(),
+        "custom-key".to_owned(),
+        "--bin".to_owned(),
+        temp.path().join("bin").to_string_lossy().into_owned(),
+    ];
+    fs::write(temp.path().join("bin"), "test binary").unwrap();
+    let result = setup::run(Cli::parse_from(argv).setup);
+    assert!(result.is_err());
+    assert!(format!("{:#}", result.unwrap_err()).contains("--project-key requires --project"));
+}
+
+#[test]
+fn installs_opencode_plugin_with_placeholders_replaced() {
+    let temp = tempfile::tempdir().unwrap();
+    install(temp.path(), "opencode").unwrap();
+    let plugin =
+        fs::read_to_string(temp.path().join(".opencode/plugins/skillvolution.js")).unwrap();
+    assert!(plugin.contains("skillvolution-managed:opencode-plugin"));
+    assert!(!plugin.contains("__SKILLVOLUTION_"));
+
+    let oc = read_json(temp.path().join("opencode.json"));
+    let command = oc["mcp"]["skillvolution"]["command"].as_array().unwrap();
+    let bin = command[0].as_str().unwrap();
+    let db = command[2].as_str().unwrap();
+    assert!(plugin.contains(&serde_json::to_string(bin).unwrap()));
+    assert!(plugin.contains(&serde_json::to_string(db).unwrap()));
+}
+
+#[test]
+fn unowned_opencode_plugin_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let plugin_path = temp.path().join(".opencode/plugins/skillvolution.js");
+    fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+    let original = "// not ours\n";
+    fs::write(&plugin_path, original).unwrap();
+    let result = install(temp.path(), "opencode");
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(&plugin_path).unwrap(), original);
+    assert!(!temp.path().join("opencode.json").exists());
+}

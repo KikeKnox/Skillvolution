@@ -1,6 +1,12 @@
 mod claude;
+mod claude_cli;
 mod fs_safe;
+mod global;
+mod global_claude;
+mod global_opencode;
+mod hooks;
 mod opencode;
+mod plugin;
 
 use crate::vault::Vault;
 use anyhow::{Context, Result, ensure};
@@ -13,7 +19,8 @@ pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
-    /// Project directory to configure; defaults to the current directory.
+    /// Project directory to configure. Omit for global (per-user) setup, which every
+    /// project then shares.
     #[arg(long)]
     project: Option<PathBuf>,
     #[arg(long, default_value = "both", value_parser = ["both", "opencode", "claude-code"])]
@@ -25,6 +32,7 @@ pub struct SetupArgs {
     #[arg(long)]
     db: Option<PathBuf>,
     /// Project scope key for the MCP server; defaults to the project directory name.
+    /// Requires --project.
     #[arg(long)]
     project_key: Option<String>,
 }
@@ -37,38 +45,80 @@ impl SetupArgs {
     }
 }
 
+/// Configures one project when `--project` is given, or the current user's global
+/// (per-user, shared by every project) setup when it's omitted.
 pub fn run(args: SetupArgs) -> Result<()> {
-    let project = match args.project {
-        Some(project) => project,
-        None => std::env::current_dir().context("determine current directory")?,
-    };
-    let bin = match args.bin {
+    ensure!(
+        args.project.is_some() || args.project_key.is_none(),
+        "--project-key requires --project"
+    );
+    let bin = resolve_bin(args.bin)?;
+    let db = resolve_db(args.db)?;
+
+    match args.project {
+        Some(project) => run_project(
+            project,
+            &args.client,
+            &bin,
+            &db,
+            args.project_key.as_deref(),
+        )?,
+        None => global::run(&args.client, &bin, &db)?,
+    }
+
+    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+    Ok(())
+}
+
+fn resolve_bin(bin: Option<PathBuf>) -> Result<PathBuf> {
+    let bin = match bin {
         Some(bin) => bin,
         None => std::env::current_exe().context("determine current executable")?,
     };
-    let db = match args.db {
+    let bin = fs::canonicalize(&bin).context("binary must exist")?;
+    ensure!(bin.is_file(), "binary must be a regular file");
+    Ok(bin)
+}
+
+fn resolve_db(db: Option<PathBuf>) -> Result<PathBuf> {
+    let db = match db {
         Some(db) => db,
         None => crate::vault::default_database()?,
     };
-    let project = fs::canonicalize(&project).context("project must exist")?;
-    let bin = fs::canonicalize(&bin).context("binary must exist")?;
     let db = absolutize(&db)?;
-    ensure!(project.is_dir(), "project must be a directory");
-    ensure!(bin.is_file(), "binary must be a regular file");
     ensure!(
         !db.exists() || db.is_file(),
         "database must be a regular file or a new path"
     );
-    let key = resolve_project_key(args.project_key.as_deref(), &project)?;
+    Ok(db)
+}
+
+fn run_project(
+    project: PathBuf,
+    client: &str,
+    bin: &Path,
+    db: &Path,
+    project_key: Option<&str>,
+) -> Result<()> {
+    let project = fs::canonicalize(&project).context("project must exist")?;
+    ensure!(project.is_dir(), "project must be a directory");
+    let key = resolve_project_key(project_key, &project)?;
 
     let mut changes = Vec::new();
-    if args.client != "claude-code" {
-        changes.extend(opencode::changes(&project, &bin, &db, &key)?);
+    if client != "claude-code" {
+        changes.extend(opencode::changes(&project, bin, db, &key)?);
     }
-    if args.client != "opencode" {
-        changes.extend(claude::changes(&project, &bin, &db, &key)?);
+    if client != "opencode" {
+        changes.extend(claude::changes(&project, bin, db, &key)?);
     }
+    write_all(changes)?;
+    println!("Configured {} for {}.", client, project.display());
+    Ok(())
+}
 
+/// Validates every write target before touching any of them, so a bad target further
+/// down the list leaves everything already-checked untouched.
+fn write_all(changes: Vec<(PathBuf, String)>) -> Result<()> {
     for (path, _) in &changes {
         fs_safe::check_target(path)?;
         if path.exists() {
@@ -88,7 +138,6 @@ pub fn run(args: SetupArgs) -> Result<()> {
             )
         })?;
     }
-    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     Ok(())
 }
 
