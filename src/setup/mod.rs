@@ -116,7 +116,7 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
 fn resolve_project_key(explicit: Option<&str>, project: &Path) -> Result<String> {
     let key = match explicit {
         Some(key) => key.to_owned(),
-        None => default_project_key(project).with_context(|| {
+        None => crate::project::key_from_dir(project).with_context(|| {
             format!(
                 "cannot derive a project key from {}; pass --project-key",
                 project.display()
@@ -125,46 +125,4 @@ fn resolve_project_key(explicit: Option<&str>, project: &Path) -> Result<String>
     };
     crate::vault::validate_id(&key).context("invalid --project-key")?;
     Ok(key)
-}
-
-/// Lowercases the directory name, collapses runs of non `[a-z0-9]` bytes into a single `-`,
-/// trims leading/trailing `-`, then truncates to 64 bytes and re-trims.
-fn default_project_key(project: &Path) -> Option<String> {
-    let name = project.file_name()?.to_str()?;
-    let mut key = String::new();
-    for ch in name.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
-            key.push(lower);
-        } else if !key.ends_with('-') {
-            key.push('-');
-        }
-    }
-    let key = key.trim_matches('-');
-    let mut truncated = key.as_bytes();
-    if truncated.len() > 64 {
-        truncated = &truncated[..64];
-    }
-    // Every byte is ASCII (a-z, 0-9, or '-'), so byte truncation never splits a char.
-    let key = std::str::from_utf8(truncated).unwrap().trim_matches('-');
-    (!key.is_empty()).then(|| key.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::default_project_key;
-    use std::path::Path;
-
-    #[test]
-    fn derives_default_keys() {
-        assert_eq!(
-            default_project_key(Path::new("/tmp/project with spaces")).as_deref(),
-            Some("project-with-spaces")
-        );
-        assert_eq!(
-            default_project_key(Path::new("/tmp/__café__")).as_deref(),
-            Some("caf")
-        );
-        assert_eq!(default_project_key(Path::new("/tmp/---")), None);
-    }
 }
