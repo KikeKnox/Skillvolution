@@ -14,7 +14,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/
 ```
 
 Rerunning the installer updates in place. For a look before you run it: download the script,
-inspect it, then `sh skillvolution-installer.sh`.
+inspect it, then `sh skillvolution-installer.sh`. The script verifies each archive's SHA-256
+before installing, adds `~/.local/bin` to `PATH` in your shell profile (skip with
+`SKILLVOLUTION_NO_MODIFY_PATH=1`), and writes an install receipt to `~/.config/skillvolution/`.
 
 **Build from source** (requires Rust):
 
