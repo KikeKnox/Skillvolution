@@ -13,15 +13,80 @@ fn open() -> (tempfile::TempDir, Vault) {
 // --- validation --------------------------------------------------------
 
 #[test]
-fn get_inspect_and_publish_return_not_found_for_unknown_or_malformed_ids() {
+fn get_inspect_and_publish_return_not_found_for_unknown_ids() {
     let (_dir, mut vault) = open();
-    for id in ["missing", "Upper", ""] {
+    for id in ["missing", "unknown-id"] {
         assert!(vault.get(id, None, None).is_err());
         assert!(vault.inspect(id, 1).is_err());
         assert!(vault.publish(id, 1).is_err());
     }
-    assert!(vault.get("missing", Some(-1), None).is_err());
-    assert!(vault.inspect("missing", 0).is_err());
+}
+
+#[test]
+fn get_inspect_publish_outcomes_and_deprecate_reject_malformed_ids() {
+    let (_dir, mut vault) = open();
+    let bad_id = "Upper";
+    assert!(
+        vault
+            .get(bad_id, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("id must")
+    );
+    assert!(
+        vault
+            .inspect(bad_id, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("id must")
+    );
+    assert!(
+        vault
+            .publish(bad_id, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("id must")
+    );
+    assert!(
+        vault
+            .outcomes(bad_id)
+            .unwrap_err()
+            .to_string()
+            .contains("id must")
+    );
+    assert!(
+        vault
+            .set_deprecated(bad_id, true)
+            .unwrap_err()
+            .to_string()
+            .contains("id must")
+    );
+}
+
+#[test]
+fn get_inspect_and_publish_reject_non_positive_versions() {
+    let (_dir, mut vault) = open();
+    assert!(
+        vault
+            .get("valid-id", Some(0), None)
+            .unwrap_err()
+            .to_string()
+            .contains("version must")
+    );
+    assert!(
+        vault
+            .inspect("valid-id", 0)
+            .unwrap_err()
+            .to_string()
+            .contains("version must")
+    );
+    assert!(
+        vault
+            .publish("valid-id", 0)
+            .unwrap_err()
+            .to_string()
+            .contains("version must")
+    );
 }
 
 #[test]

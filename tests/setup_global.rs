@@ -204,6 +204,94 @@ fn global_claude_code_without_claude_cli_still_writes_files_and_prints_note() {
 }
 
 #[test]
+fn global_detect_only_claude_present_configures_claude_and_skips_opencode() {
+    // No `--client`: setup must detect that only Claude Code is present (a fake `claude`
+    // on PATH, no OpenCode config dir) and configure just that client.
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = write_fake_claude(&env.home.path().join("bin"), &log, false);
+
+    let output = env.command().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+
+    assert!(env.claude_dir().join("skills/evolution/SKILL.md").exists());
+    assert!(env.claude_dir().join("settings.json").exists());
+    assert!(!env.opencode_dir().join("opencode.json").exists());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "Skipped OpenCode: not detected (run `skillvolution setup --client opencode` after installing it)."
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Skipped Claude Code"), "{stdout}");
+}
+
+#[test]
+fn global_detect_only_opencode_config_dir_present_configures_opencode_and_skips_claude() {
+    // No `--client`: no `claude`/`opencode` on PATH and no Claude config dir, but an
+    // OpenCode config dir already exists, so only OpenCode gets configured.
+    let env = Env::new();
+    fs::create_dir_all(env.opencode_dir()).unwrap();
+
+    let output = env.command().output().unwrap();
+    assert_success(&output);
+
+    assert!(env.opencode_dir().join("opencode.json").exists());
+    assert!(!env.claude_dir().join("settings.json").exists());
+    assert!(!env.claude_dir().join("skills/evolution/SKILL.md").exists());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "Skipped Claude Code: not detected (run `skillvolution setup --client claude-code` after installing it)."
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Skipped OpenCode"), "{stdout}");
+}
+
+#[test]
+fn global_detect_neither_present_exits_ok_without_writing_client_files() {
+    // No `--client` and neither client detected: setup must still exit 0, print a note,
+    // and write no client files (the database is created regardless).
+    let env = Env::new();
+
+    let output = env.command().output().unwrap();
+    assert_success(&output);
+
+    assert!(!env.claude_dir().exists());
+    assert!(!env.opencode_dir().exists());
+    assert!(env.db.is_file());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "No AI client detected; skipping setup (run `skillvolution setup --client <name>` after installing one)."
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn global_explicit_client_both_configures_both_even_when_neither_detected() {
+    // An explicit --client bypasses detection entirely, even when neither client would
+    // otherwise be detected.
+    let env = Env::new();
+
+    let output = env.command().arg("--client").arg("both").output().unwrap();
+    assert_success(&output);
+
+    assert!(env.claude_dir().join("skills/evolution/SKILL.md").exists());
+    assert!(env.claude_dir().join("settings.json").exists());
+    assert!(env.opencode_dir().join("opencode.json").exists());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("Skipped"), "{stdout}");
+}
+
+#[test]
 fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     let env = Env::new();
     let log = env.home.path().join("claude.log");

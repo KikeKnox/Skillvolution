@@ -1,7 +1,8 @@
 # Client integrations
 
-What `skillvolution setup` writes, for each client selected with `--client both|opencode|claude-code`
-(default `both`). With no `--project`, setup configures each client **globally, once per user**;
+What `skillvolution setup` writes, for each client selected with `--client both|opencode|claude-code`.
+Without `--client`, global setup configures only detected clients (executable on `PATH` or existing
+config directory) and project setup defaults to `both`. With no `--project`, setup configures each client **globally, once per user**;
 `--project PATH [--project-key KEY]` instead configures one project's own files (`--project-key`
 requires `--project`).
 

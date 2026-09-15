@@ -1,6 +1,6 @@
 [package]
 name = "skillvolution"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A shared, human-published procedural skill vault"
 license = "MIT"

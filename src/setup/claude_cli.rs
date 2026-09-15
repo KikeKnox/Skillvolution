@@ -29,9 +29,16 @@ pub fn add_json_command(bin: &Path, db: &Path) -> String {
 /// Finds `claude` on `PATH`, the same way a shell would: the first executable regular
 /// file named `claude` in a `PATH` entry.
 pub fn resolve() -> Option<PathBuf> {
+    find_on_path("claude")
+}
+
+/// Finds `name` on `PATH`, the same way a shell would: the first executable regular file
+/// named `name` in a `PATH` entry. Shared with `detect`, which uses it to look for other
+/// clients' CLIs (e.g. `opencode`).
+pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join("claude");
+        let candidate = dir.join(name);
         is_executable(&candidate).then_some(candidate)
     })
 }

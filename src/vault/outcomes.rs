@@ -82,6 +82,7 @@ impl Vault {
     }
 
     pub fn outcomes(&self, id: &str) -> Result<Vec<OutcomeRecord>> {
+        validate_id(id)?;
         let mut statement = self.conn.prepare(
             "SELECT id, version, result, note, project, created_at FROM outcomes
              WHERE id = ?1 ORDER BY rowid DESC",

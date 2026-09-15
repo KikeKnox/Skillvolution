@@ -7,16 +7,20 @@ human can publish.
 
 ## Install
 
-Prebuilt binaries (Linux x86_64 gnu/musl, aarch64 gnu) install to `~/.local/bin`:
+One command installs the prebuilt binary (Linux x86_64 gnu/musl, aarch64 gnu) to `~/.local/bin`
+and configures every AI client it finds (Claude Code, OpenCode):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/KikeKnox/Skillvolution/releases/latest/download/skillvolution-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/KikeKnox/Skillvolution/main/install.sh | sh
 ```
 
-Rerunning the installer updates in place. For a look before you run it: download the script,
-inspect it, then `sh skillvolution-installer.sh`. The script verifies each archive's SHA-256
-before installing, adds `~/.local/bin` to `PATH` in your shell profile (skip with
-`SKILLVOLUTION_NO_MODIFY_PATH=1`), and writes an install receipt to `~/.config/skillvolution/`.
+[`install.sh`](install.sh) runs the release's cargo-dist installer, which verifies each archive's
+SHA-256, adds `~/.local/bin` to `PATH` in your shell profile (skip with
+`SKILLVOLUTION_NO_MODIFY_PATH=1`) and writes an install receipt to `~/.config/skillvolution/`;
+then it runs `skillvolution setup` (skip with `SKILLVOLUTION_NO_SETUP=1`). Rerunning the same
+command updates the binary; setup is idempotent. To install without configuring anything, use the
+release installer directly:
+`https://github.com/KikeKnox/Skillvolution/releases/latest/download/skillvolution-installer.sh`.
 
 **Build from source** (requires Rust):
 
@@ -26,13 +30,14 @@ cargo install --locked --path .
 
 ## Setup
 
-Run once, after installing:
+The install command already runs this. Run it again yourself after installing a new AI client:
 
 ```bash
 skillvolution setup
 ```
 
-With no `--project`, this configures Claude Code and/or OpenCode (`--client both|opencode|claude-code`)
+With no `--project`, this configures the clients it detects (a `claude`/`opencode` executable on
+`PATH` or an existing config directory; force one with `--client both|opencode|claude-code`)
 **globally, for the current user**: every project then works with no per-project step. Claude Code
 gets the `evolution` skill, `SessionStart`/`Stop` hooks merged into `settings.json`, and the MCP
 server registered at user scope via `claude mcp add-json` (setup prints the command to run
@@ -44,8 +49,8 @@ directory name (outside a git repo, only global skills are visible).
 Pass `--project PATH [--project-key KEY]` instead to configure a single project's own files rather
 than the shared, global config. See `docs/integrations.md` for exactly what each mode writes.
 
-Updating the binary later: rerun the installer. `skillvolution setup` doesn't need to run again —
-the registered config already points at `~/.local/bin/skillvolution`.
+Updating later: rerun the install command; the registered config keeps pointing at
+`~/.local/bin/skillvolution`.
 
 ## Human review
 

@@ -27,7 +27,9 @@
 - `src/setup/claude.rs` / `src/setup/opencode.rs` — per-project changes; `src/setup/global.rs`,
   `global_claude.rs`, `global_opencode.rs` — the global equivalents. The global Claude Code side
   registers its MCP server via the `claude` CLI (`src/setup/claude_cli.rs`) instead of editing
-  `~/.claude.json` directly, which Claude Code itself rewrites.
+  `~/.claude.json` directly, which Claude Code itself rewrites. `src/setup/detect.rs` decides which
+  clients global setup configures when `--client` is omitted.
+- `install.sh` — one-command install: runs the release installer, then `skillvolution setup`.
 - `assets/evolution/SKILL.md` — the native `evolution` skill installed for both clients.
 - `assets/opencode/skillvolution.js` — the OpenCode plugin template: catalog injection plus the
   idle review prompt.

@@ -23,6 +23,12 @@ fn config_dir() -> Result<PathBuf> {
     Ok(home.join(".claude"))
 }
 
+/// Whether Claude Code's global config directory already exists, used by `detect` to
+/// tell if Claude Code is installed.
+pub(super) fn config_dir_exists() -> bool {
+    config_dir().is_ok_and(|dir| dir.exists())
+}
+
 pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
     let dir = config_dir()?;
     let mut changes = Vec::new();

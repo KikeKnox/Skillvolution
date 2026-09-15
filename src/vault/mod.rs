@@ -57,6 +57,7 @@ impl Vault {
     }
 
     pub fn set_deprecated(&self, id: &str, deprecated: bool) -> Result<()> {
+        validate_id(id)?;
         let changed = self.conn.execute(
             "UPDATE skills SET deprecated = ?2 WHERE id = ?1",
             rusqlite::params![id, deprecated],

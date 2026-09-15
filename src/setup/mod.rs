@@ -1,5 +1,6 @@
 mod claude;
 mod claude_cli;
+mod detect;
 mod fs_safe;
 mod global;
 mod global_claude;
@@ -23,8 +24,10 @@ pub struct SetupArgs {
     /// project then shares.
     #[arg(long)]
     project: Option<PathBuf>,
-    #[arg(long, default_value = "both", value_parser = ["both", "opencode", "claude-code"])]
-    client: String,
+    /// Which client(s) to configure. Defaults to "both" for `--project`; for global
+    /// setup, omitting it detects installed clients instead and configures only those.
+    #[arg(long, value_parser = ["both", "opencode", "claude-code"])]
+    client: Option<String>,
     /// Path to the skillvolution binary; defaults to the currently running executable.
     #[arg(long)]
     bin: Option<PathBuf>,
@@ -56,14 +59,14 @@ pub fn run(args: SetupArgs) -> Result<()> {
     let db = resolve_db(args.db)?;
 
     match args.project {
-        Some(project) => run_project(
-            project,
-            &args.client,
-            &bin,
-            &db,
-            args.project_key.as_deref(),
-        )?,
-        None => global::run(&args.client, &bin, &db)?,
+        Some(project) => {
+            let client = args.client.as_deref().unwrap_or("both");
+            run_project(project, client, &bin, &db, args.project_key.as_deref())?;
+        }
+        None => match args.client.as_deref() {
+            Some(client) => global::run(client, &bin, &db)?,
+            None => global::run_detected(&bin, &db)?,
+        },
     }
 
     Vault::open(&db).with_context(|| format!("open {}", db.display()))?;

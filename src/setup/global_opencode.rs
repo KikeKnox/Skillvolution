@@ -55,6 +55,12 @@ fn load_config(path: &Path) -> Result<Value> {
     })
 }
 
+/// Whether OpenCode's global config directory already exists, used by `detect` to tell
+/// if OpenCode is installed.
+pub(super) fn config_dir_exists() -> bool {
+    config_dir().is_ok_and(|dir| dir.exists())
+}
+
 pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
     let dir = config_dir()?;
     let mut changes = Vec::new();

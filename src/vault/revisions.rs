@@ -72,6 +72,8 @@ fn current_version(conn: &Connection, id: &str) -> Result<i64> {
 }
 
 fn load(conn: &Connection, id: &str, version: i64) -> Result<Revision> {
+    validate_id(id)?;
+    ensure!(version > 0, "version must be positive");
     conn.query_row(
         &format!("{REVISION_SELECT} WHERE r.id = ?1 AND r.version = ?2"),
         params![id, version],
@@ -242,6 +244,8 @@ impl Vault {
     }
 
     pub fn get(&self, id: &str, version: Option<i64>, project: Option<&str>) -> Result<SkillView> {
+        validate_id(id)?;
+        ensure!(version.is_none_or(|v| v > 0), "version must be positive");
         let version = match version {
             Some(version) => version,
             None => current_version(&self.conn, id)?,
