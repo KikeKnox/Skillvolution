@@ -29,7 +29,11 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     }
     writeln!(text, "Published skills ({} visible):", page.total)?;
     for skill in &page.skills {
-        write!(text, "- {} v{}: {}", skill.id, skill.version, skill.description)?;
+        write!(
+            text,
+            "- {} v{}: {}",
+            skill.id, skill.version, skill.description
+        )?;
         if skill.helped + skill.failed > 0 {
             write!(text, " [helped {}, failed {}]", skill.helped, skill.failed)?;
         }

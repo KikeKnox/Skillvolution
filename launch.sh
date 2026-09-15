@@ -6,7 +6,8 @@ usage() {
         '  --project PATH       Existing project to configure (required)' \
         '  --client CLIENT      both (default), opencode, or claude-code' \
         '  --bin-dir PATH       Binary directory (default: $HOME/.local/bin)' \
-        '  --db PATH            Database (default: $XDG_DATA_HOME/skillvolution/vault.sqlite3)' \
+        '  --db PATH            Database (default: $XDG_DATA_HOME/skillvolution/skills.db)' \
+        '  --project-key KEY    Project scope key (default: derived from the project directory name)' \
         '  --install-rust       Opt in to downloading/installing rustup if Rust is missing' \
         '  --help               Show this help without building or installing anything'
 }
@@ -14,18 +15,20 @@ fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 project=''
 client=both
 bin_dir="${HOME}/.local/bin"
-db="${XDG_DATA_HOME:-${HOME}/.local/share}/skillvolution/vault.sqlite3"
+db="${XDG_DATA_HOME:-${HOME}/.local/share}/skillvolution/skills.db"
+project_key=''
 install_rust=false
 help=false
 while (($#)); do
     case "$1" in
-        --project|--client|--bin-dir|--db)
+        --project|--client|--bin-dir|--db|--project-key)
             (($# >= 2)) && [[ -n "$2" && "$2" != --* ]] || fail "$1 requires a value"
             case "$1" in
                 --project) project=$2 ;;
                 --client) client=$2 ;;
                 --bin-dir) bin_dir=$2 ;;
                 --db) db=$2 ;;
+                --project-key) project_key=$2 ;;
             esac
             shift 2 ;;
         --install-rust) install_rust=true; shift ;;
@@ -95,6 +98,12 @@ if [[ ! -f "$binary" ]] || ! cmp -s -- "$built" "$binary"; then
     mv -f -- "$staged" "$binary"
 fi
 "$binary" --db "$(native_path "$db")" init
-"$binary" setup --project "$(native_path "$project")" --client "$client" --bin "$(native_path "$binary")" --db "$(native_path "$db")"
+setup_args=(setup --project "$(native_path "$project")" --client "$client" --bin "$(native_path "$binary")" --db "$(native_path "$db")")
+[[ -z "$project_key" ]] || setup_args+=(--project-key "$project_key")
+"$binary" "${setup_args[@]}"
 printf 'Installed: %s\nDatabase: %s\nConfigured project: %s (%s)\n' "$binary" "$db" "$project" "$client"
-printf '%s\n' 'Restart your client and review its workspace/MCP permissions before connecting.' 'Evolution review is instruction-driven, not a guaranteed lifecycle hook.'
+printf '%s\n' 'Restart your client and review its workspace/MCP permissions before connecting.'
+if [[ "$client" != opencode ]]; then
+    printf '%s\n' 'Claude Code hooks (SessionStart, Stop) were installed in .claude/settings.local.json.'
+fi
+printf '%s\n' 'Review proposed skills with: skillvolution drafts | diff ID --version N | publish ID --version N | reject ID --version N'

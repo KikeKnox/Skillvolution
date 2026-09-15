@@ -141,7 +141,10 @@ pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
         let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
-                write_message(&mut output, &error_message(Value::Null, -32700, &format!("parse error: {error}")))?;
+                write_message(
+                    &mut output,
+                    &error_message(Value::Null, -32700, &format!("parse error: {error}")),
+                )?;
                 continue;
             }
         };
@@ -220,12 +223,18 @@ impl Server {
         match name {
             "search_skills" => {
                 let args: SearchArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                let page = self.vault.search(&args.query, project, args.limit, args.offset)?;
+                let page = self
+                    .vault
+                    .search(&args.query, project, args.limit, args.offset)?;
                 Ok(serde_json::to_value(page)?)
             }
             "get_skill" => {
                 let args: GetArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                Ok(serde_json::to_value(self.vault.get(&args.id, args.version, project)?)?)
+                Ok(serde_json::to_value(self.vault.get(
+                    &args.id,
+                    args.version,
+                    project,
+                )?)?)
             }
             "report_skill_outcome" => {
                 let args: OutcomeArgs = serde_json::from_value(arguments).map_err(parse_error)?;

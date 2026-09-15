@@ -158,17 +158,26 @@ fn main() -> Result<()> {
         }
         Command::Deprecate { id } => open()?.set_deprecated(&id, true)?,
         Command::Undeprecate { id } => open()?.set_deprecated(&id, false)?,
-        Command::Outcomes { id: Some(id), json, .. } => {
+        Command::Outcomes {
+            id: Some(id), json, ..
+        } => {
             let records = open()?.outcomes(&id)?;
             if json {
                 print_json(&records)?;
             } else {
                 for r in records {
-                    println!("{} {} v{} {}: {}", r.created_at, r.id, r.version, r.result, r.note);
+                    println!(
+                        "{} {} v{} {}: {}",
+                        r.created_at, r.id, r.version, r.result, r.note
+                    );
                 }
             }
         }
-        Command::Outcomes { id: None, failing, json } => {
+        Command::Outcomes {
+            id: None,
+            failing,
+            json,
+        } => {
             let summaries = open()?.outcome_summaries(failing)?;
             if json {
                 print_json(&summaries)?;

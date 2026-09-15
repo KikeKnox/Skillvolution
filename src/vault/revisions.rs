@@ -116,7 +116,10 @@ impl Vault {
         validate_tags(tags)?;
         validate_text("content", content, 65_536)?;
         validate_text("evidence", evidence, 16_384)?;
-        ensure!(expected_version >= 0, "expected_version must be nonnegative");
+        ensure!(
+            expected_version >= 0,
+            "expected_version must be nonnegative"
+        );
         if let Some(scope) = scope {
             validate_id(scope).context("invalid project scope")?;
         }
@@ -136,18 +139,11 @@ impl Vault {
                     params![id, scope],
                 )?;
             }
-            Some(existing) if existing.as_deref() != scope => {
-                ensure!(
-                    current == 0,
-                    "skill {id} already exists with scope {}; choose a different id",
-                    existing.as_deref().unwrap_or("global")
-                );
-                tx.execute(
-                    "UPDATE skills SET scope = ?2 WHERE id = ?1",
-                    params![id, scope],
-                )?;
-            }
-            Some(_) => {}
+            Some(existing) => ensure!(
+                existing.as_deref() == scope,
+                "skill {id} already exists with scope {}; choose a different id",
+                existing.as_deref().unwrap_or("global")
+            ),
         }
         ensure!(
             current == expected_version,
@@ -190,9 +186,13 @@ impl Vault {
         tx.execute(
             &format!(
                 "UPDATE revisions SET status = 'superseded', reviewed_at = {NOW}, review_note = ?2
-                 WHERE id = ?1 AND status = 'draft'"
+                 WHERE id = ?1 AND status = 'draft' AND expected_version = ?3"
             ),
-            params![id, format!("superseded by published version {version}")],
+            params![
+                id,
+                format!("superseded by published version {version}"),
+                revision.expected_version
+            ],
         )?;
         tx.execute("DELETE FROM skills_fts WHERE id = ?1", [id])?;
         tx.execute(

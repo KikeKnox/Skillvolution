@@ -123,7 +123,10 @@ fn validate_single_line(name: &str, text: &str, maximum: usize) -> Result<()> {
 }
 
 fn validate_tags(tags: &[String]) -> Result<()> {
-    ensure!(tags.len() <= MAX_TAGS, "at most {MAX_TAGS} tags are allowed");
+    ensure!(
+        tags.len() <= MAX_TAGS,
+        "at most {MAX_TAGS} tags are allowed"
+    );
     for tag in tags {
         ensure!(
             tag.len() <= MAX_TAG_BYTES && validate_id(tag).is_ok(),
