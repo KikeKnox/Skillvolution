@@ -81,35 +81,21 @@ fn new_lines_appended_after_the_offset_block_again() {
 }
 
 #[test]
-fn work_plus_report_outcome_does_not_block() {
+fn work_plus_review_tool_does_not_block() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
-    let transcript = dir.path().join("transcript.jsonl");
-    write_transcript(
-        &transcript,
-        &[
-            assistant_tool_use("Edit"),
-            assistant_tool_use("mcp__skillvolution__report_skill_outcome"),
-        ],
-    );
-    let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
-}
-
-#[test]
-fn work_plus_propose_skill_change_does_not_block() {
-    let dir = tempfile::tempdir().unwrap();
-    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
-    let transcript = dir.path().join("transcript.jsonl");
-    write_transcript(
-        &transcript,
-        &[
-            assistant_tool_use("Bash"),
-            assistant_tool_use("mcp__skillvolution__propose_skill_change"),
-        ],
-    );
-    let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    for (session, review_tool) in [
+        ("s1", "mcp__skillvolution__report_skill_outcome"),
+        ("s2", "mcp__skillvolution__propose_skill_change"),
+    ] {
+        let transcript = dir.path().join(format!("{session}.jsonl"));
+        write_transcript(
+            &transcript,
+            &[assistant_tool_use("Edit"), assistant_tool_use(review_tool)],
+        );
+        let input = stop_input(session, &transcript, false);
+        assert!(hook::stop(&vault, &input).unwrap().is_none());
+    }
 }
 
 #[test]

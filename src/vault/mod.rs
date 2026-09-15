@@ -57,7 +57,6 @@ impl Vault {
     }
 
     pub fn set_deprecated(&self, id: &str, deprecated: bool) -> Result<()> {
-        validate_id(id)?;
         let changed = self.conn.execute(
             "UPDATE skills SET deprecated = ?2 WHERE id = ?1",
             rusqlite::params![id, deprecated],
@@ -72,15 +71,6 @@ fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match version {
         0 => {
-            let legacy: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'revisions'",
-                [],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                legacy == 0,
-                "database uses the pre-1 schema; move it aside and run init again"
-            );
             tx.execute_batch(SCHEMA)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

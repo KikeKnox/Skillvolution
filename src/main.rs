@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use skillvolution::{hook, setup, vault::Vault};
 use std::{io::Read, path::PathBuf};
 
@@ -15,8 +14,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialize the shared database (idempotent).
-    Init,
     /// Start the MCP server on stdio.
     Serve {
         /// Project key used for project-scoped skills and outcome records.
@@ -24,18 +21,9 @@ enum Command {
         project: Option<String>,
     },
     /// List drafts awaiting review.
-    Drafts {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show one revision, including its evidence.
+    Drafts,
+    /// Show one revision: its status, evidence, and a diff against its base.
     Show {
-        id: String,
-        #[arg(long, value_name = "VERSION")]
-        version: i64,
-    },
-    /// Show a draft as a unified diff against its base revision.
-    Diff {
         id: String,
         #[arg(long, value_name = "VERSION")]
         version: i64,
@@ -59,14 +47,7 @@ enum Command {
     /// Make a deprecated skill searchable again.
     Undeprecate { id: String },
     /// Summarize skill outcomes, or list the outcome log of one skill.
-    Outcomes {
-        id: Option<String>,
-        /// Only skills whose current version has failures.
-        #[arg(long, conflicts_with = "id")]
-        failing: bool,
-        #[arg(long)]
-        json: bool,
-    },
+    Outcomes { id: Option<String> },
     /// Claude Code hook entry points.
     #[command(subcommand)]
     Hook(HookEvent),
@@ -85,11 +66,6 @@ enum HookEvent {
     Stop,
 }
 
-fn print_json(value: &impl Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
-}
-
 fn validate_project(project: &Option<String>) -> Result<()> {
     if let Some(project) = project {
         skillvolution::vault::validate_id(project).context("invalid --project key")?;
@@ -97,98 +73,99 @@ fn validate_project(project: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if let Command::Setup(args) = cli.command {
-        return setup::run(args.with_default_db(cli.db));
-    }
-    let db = cli
-        .db
+/// Opens the database at `--db`, or the default location (setup and every
+/// command create it on first open, so there is no separate init step).
+fn open(db: &Option<PathBuf>) -> Result<Vault> {
+    let path = db
+        .clone()
         .map(Ok)
         .unwrap_or_else(skillvolution::vault::default_database)?;
-    let open = || Vault::open(&db).with_context(|| format!("open {}", db.display()));
+    Vault::open(&path).with_context(|| format!("open {}", path.display()))
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
     match cli.command {
-        Command::Init => {
-            open()?;
-            println!("Initialized {}", db.display());
-        }
+        Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
         Command::Serve { project } => {
             validate_project(&project)?;
-            skillvolution::mcp::serve(open()?, project)?;
+            skillvolution::mcp::serve(open(&cli.db)?, project)?;
         }
-        Command::Drafts { json } => {
-            let drafts = open()?.drafts()?;
-            if json {
-                print_json(&drafts)?;
-            } else if drafts.is_empty() {
+        Command::Drafts => {
+            let drafts = open(&cli.db)?.drafts()?;
+            if drafts.is_empty() {
                 println!("No drafts.");
             } else {
                 for draft in drafts {
                     println!(
-                        "{} v{} (base v{}, {}, by {}): {}",
+                        "{} v{} (base v{}, {}): {}",
                         draft.id,
                         draft.version,
                         draft.expected_version,
                         draft.scope.as_deref().unwrap_or("global"),
-                        draft.client.as_deref().unwrap_or("unknown"),
                         draft.description
                     );
                 }
             }
         }
-        Command::Show { id, version } => print_json(&open()?.inspect(&id, version)?)?,
-        Command::Diff { id, version } => print!("{}", open()?.diff(&id, version)?),
-        Command::Publish { id, version } => print_json(&open()?.publish(&id, version)?)?,
-        Command::Reject { id, version, note } => {
-            print_json(&open()?.reject(&id, version, note.as_deref())?)?
+        Command::Show { id, version } => {
+            let vault = open(&cli.db)?;
+            let revision = vault.inspect(&id, version)?;
+            println!(
+                "{} v{} ({}, base v{}, {})",
+                revision.id,
+                revision.version,
+                revision.status,
+                revision.expected_version,
+                revision.scope.as_deref().unwrap_or("global")
+            );
+            if let Some(note) = &revision.review_note {
+                println!("note: {note}");
+            }
+            println!("\nevidence:\n{}", revision.evidence);
+            println!("\n{}", vault.diff(&id, version)?);
         }
-        Command::Deprecate { id } => open()?.set_deprecated(&id, true)?,
-        Command::Undeprecate { id } => open()?.set_deprecated(&id, false)?,
-        Command::Outcomes {
-            id: Some(id), json, ..
-        } => {
-            let records = open()?.outcomes(&id)?;
-            if json {
-                print_json(&records)?;
-            } else {
-                for r in records {
-                    println!(
-                        "{} {} v{} {}: {}",
-                        r.created_at, r.id, r.version, r.result, r.note
-                    );
-                }
+        Command::Publish { id, version } => {
+            let version = open(&cli.db)?.publish(&id, version)?;
+            println!("Published {id} v{version}");
+        }
+        Command::Reject { id, version, note } => {
+            let version = open(&cli.db)?.reject(&id, version, note.as_deref())?;
+            println!("Rejected {id} v{version}");
+        }
+        Command::Deprecate { id } => open(&cli.db)?.set_deprecated(&id, true)?,
+        Command::Undeprecate { id } => open(&cli.db)?.set_deprecated(&id, false)?,
+        Command::Outcomes { id: Some(id) } => {
+            for r in open(&cli.db)?.outcomes(&id)? {
+                println!(
+                    "{} {} v{} {}: {}",
+                    r.created_at, r.id, r.version, r.result, r.note
+                );
             }
         }
-        Command::Outcomes {
-            id: None,
-            failing,
-            json,
-        } => {
-            let summaries = open()?.outcome_summaries(failing)?;
-            if json {
-                print_json(&summaries)?;
-            } else {
-                for s in summaries {
-                    println!(
-                        "{} v{}: helped {}, failed {}, not applicable {}",
-                        s.id, s.version, s.helped, s.failed, s.not_applicable
-                    );
-                }
+        Command::Outcomes { id: None } => {
+            for s in open(&cli.db)?.outcome_summaries()? {
+                println!(
+                    "{} v{}: helped {}, failed {}, not applicable {}",
+                    s.id, s.version, s.helped, s.failed, s.not_applicable
+                );
             }
         }
         Command::Hook(HookEvent::SessionStart { project }) => {
             validate_project(&project)?;
-            print!("{}", hook::session_start(&open()?, project.as_deref())?);
+            print!(
+                "{}",
+                hook::session_start(&open(&cli.db)?, project.as_deref())?
+            );
         }
         Command::Hook(HookEvent::Stop) => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
-            if let Some(reason) = hook::stop(&open()?, &input)? {
+            if let Some(reason) = hook::stop(&open(&cli.db)?, &input)? {
                 eprintln!("{reason}");
                 std::process::exit(2);
             }
         }
-        Command::Setup(_) => unreachable!(),
     }
     Ok(())
 }

@@ -96,15 +96,6 @@ fn initialize_negotiates_a_supported_protocol_version_or_falls_back_to_latest() 
 }
 
 #[test]
-fn uninitialized_tools_list_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("skills.db");
-    let mut server = McpServer::spawn(&db, None);
-    let response = server.request(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
-    assert_eq!(response["error"]["code"], -32002);
-}
-
-#[test]
 fn tools_list_exposes_the_four_tools() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
@@ -132,12 +123,6 @@ fn tools_list_exposes_the_four_tools() {
 fn propose_then_cli_publish_is_visible_to_the_same_running_server() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
-    Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-        .arg("--db")
-        .arg(&db)
-        .arg("init")
-        .output()
-        .unwrap();
 
     let mut server = McpServer::spawn(&db, None);
     server.initialize("2025-06-18");
@@ -154,7 +139,6 @@ fn propose_then_cli_publish_is_visible_to_the_same_running_server() {
     );
     assert_eq!(propose["result"]["isError"], false);
     let body = text_of(&propose);
-    assert_eq!(body, propose["result"]["structuredContent"]);
     assert_eq!(body["id"], "rust-tests");
     assert_eq!(body["version"], 1);
 
@@ -178,7 +162,6 @@ fn propose_then_cli_publish_is_visible_to_the_same_running_server() {
 
     let search = server.call(4, "search_skills", json!({"query": "cargo"}));
     let search_body = text_of(&search);
-    assert_eq!(search_body, search["result"]["structuredContent"]);
     assert_eq!(search_body["total"], 1);
     assert_eq!(search_body["skills"][0]["id"], "rust-tests");
     assert!(
@@ -263,7 +246,7 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
 }
 
 #[test]
-fn report_skill_outcome_records_the_client_name_from_initialize() {
+fn report_skill_outcome_records_it_for_a_visible_published_revision() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
@@ -275,14 +258,14 @@ fn report_skill_outcome_records_the_client_name_from_initialize() {
     let outcome = server.call(
         2,
         "report_skill_outcome",
-        json!({"id": "skill", "version": published.version, "result": "helped", "note": "worked well"}),
+        json!({"id": "skill", "version": published, "result": "helped", "note": "worked well"}),
     );
     assert_eq!(outcome["result"]["isError"], false);
+    assert_eq!(text_of(&outcome), json!({"recorded": true}));
     drop(server);
 
     let vault = Vault::open(&db).unwrap();
     let log = vault.outcomes("skill").unwrap();
-    assert_eq!(log[0].client.as_deref(), Some("test-client"));
     assert_eq!(log[0].note, "worked well");
 }
 

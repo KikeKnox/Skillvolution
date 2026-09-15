@@ -17,11 +17,9 @@ and call propose_skill_change only for a lesson that meets every lesson criterio
 If there is nothing to report or propose, reply only \"No lesson.\" and stop.";
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
-    let page = vault.search("", project, CATALOG_LIMIT, 0)?;
+    let page = vault.search("", project, CATALOG_LIMIT)?;
     let mut text = String::from(
-        "Skillvolution vault (shared procedural memory): follow the `evolution` skill. \
-         Before non-trivial work, check relevant skills with search_skills/get_skill; \
-         after applying one, call report_skill_outcome; propose verified lessons with propose_skill_change.\n",
+        "Skillvolution vault (shared procedural memory): follow the `evolution` skill.\n",
     );
     if page.skills.is_empty() {
         text.push_str("No published skills are visible to this project yet.\n");
@@ -39,11 +37,12 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
         }
         text.push('\n');
     }
-    if page.has_more {
+    let shown = page.skills.len() as i64;
+    if page.total > shown {
         writeln!(
             text,
             "- ...and {} more; use search_skills",
-            page.total - page.skills.len() as i64
+            page.total - shown
         )?;
     }
     Ok(text)
@@ -89,6 +88,9 @@ pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     Ok((worked && !reviewed).then_some(STOP_REASON))
 }
 
+/// Walks the whole JSON value rather than a fixed path: transcript entry
+/// shapes vary across Claude Code versions, and tool_use blocks can be
+/// nested inside content arrays at different depths.
 fn visit_tool_uses(value: &Value, visit: &mut impl FnMut(&str)) {
     match value {
         Value::Object(map) => {

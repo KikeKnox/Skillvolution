@@ -5,9 +5,8 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const REVISION_SELECT: &str = "SELECT r.id, r.version, s.scope, r.description, r.tags, r.content,
-    r.evidence, r.expected_version, r.status, r.client, r.created_at, r.reviewed_at, r.review_note
+    r.evidence, r.expected_version, r.status, r.created_at, r.review_note
     FROM revisions r JOIN skills s ON s.id = r.id";
-const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Revision {
@@ -20,9 +19,7 @@ pub struct Revision {
     pub evidence: String,
     pub expected_version: i64,
     pub status: String,
-    pub client: Option<String>,
     pub created_at: String,
-    pub reviewed_at: Option<String>,
     pub review_note: Option<String>,
 }
 
@@ -45,7 +42,6 @@ pub struct Proposal<'a> {
     pub evidence: &'a str,
     pub expected_version: i64,
     pub scope: Option<&'a str>,
-    pub client: Option<&'a str>,
 }
 
 fn revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Revision> {
@@ -59,10 +55,8 @@ fn revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Revision> {
         evidence: row.get(6)?,
         expected_version: row.get(7)?,
         status: row.get(8)?,
-        client: row.get(9)?,
-        created_at: row.get(10)?,
-        reviewed_at: row.get(11)?,
-        review_note: row.get(12)?,
+        created_at: row.get(9)?,
+        review_note: row.get(10)?,
     })
 }
 
@@ -75,8 +69,6 @@ fn current_version(conn: &Connection, id: &str) -> Result<i64> {
 }
 
 fn load(conn: &Connection, id: &str, version: i64) -> Result<Revision> {
-    validate_id(id)?;
-    ensure!(version > 0, "version must be positive");
     conn.query_row(
         &format!("{REVISION_SELECT} WHERE r.id = ?1 AND r.version = ?2"),
         params![id, version],
@@ -109,7 +101,6 @@ impl Vault {
             evidence,
             expected_version,
             scope,
-            client,
         } = *proposal;
         validate_id(id)?;
         validate_single_line("description", description, 280)?;
@@ -126,25 +117,20 @@ impl Vault {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = current_version(&tx, id)?;
-        let existing: Option<Option<String>> = tx
-            .query_row("SELECT scope FROM skills WHERE id = ?1", [id], |row| {
+        tx.execute(
+            "INSERT OR IGNORE INTO skills (id, scope) VALUES (?1, ?2)",
+            params![id, scope],
+        )?;
+        let stored_scope: Option<String> =
+            tx.query_row("SELECT scope FROM skills WHERE id = ?1", [id], |row| {
                 row.get(0)
-            })
-            .optional()?;
-        match existing {
-            None => {
-                tx.execute(
-                    "INSERT INTO skills (id, scope) VALUES (?1, ?2)",
-                    params![id, scope],
-                )?;
-            }
-            Some(existing) => ensure!(
-                existing.as_deref() == scope,
-                "skill {id} already exists with scope {}; choose a different id",
-                existing.as_deref().unwrap_or("global")
-            ),
-        }
+            })?;
+        ensure!(
+            stored_scope.as_deref() == scope,
+            "skill {id} already exists with scope {}; choose a different id",
+            stored_scope.as_deref().unwrap_or("global")
+        );
+        let current = current_version(&tx, id)?;
         ensure!(
             current == expected_version,
             "stale base: expected {expected_version}, current published version is {current}"
@@ -154,16 +140,34 @@ impl Vault {
             [id],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, client)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, version, description, join_tags(tags), content, evidence, expected_version, client],
+        let revision = tx.query_row(
+            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             RETURNING description, tags, content, evidence, status, created_at, review_note",
+            params![id, version, description, join_tags(tags), content, evidence, expected_version],
+            |row| {
+                Ok(Revision {
+                    id: id.to_owned(),
+                    version,
+                    scope: stored_scope,
+                    description: row.get(0)?,
+                    tags: split_tags(&row.get::<_, String>(1)?),
+                    content: row.get(2)?,
+                    evidence: row.get(3)?,
+                    expected_version,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    review_note: row.get(6)?,
+                })
+            },
         )?;
         tx.commit()?;
-        self.inspect(id, version)
+        Ok(revision)
     }
 
-    pub fn publish(&mut self, id: &str, version: i64) -> Result<Revision> {
+    /// Publishes a draft and returns its version. Same-base sibling drafts are
+    /// marked rejected (not re-read: callers only need the published version).
+    pub fn publish(&mut self, id: &str, version: i64) -> Result<i64> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -180,14 +184,12 @@ impl Vault {
             revision.expected_version
         );
         tx.execute(
-            &format!("UPDATE revisions SET status = 'published', reviewed_at = {NOW} WHERE id = ?1 AND version = ?2"),
+            "UPDATE revisions SET status = 'published' WHERE id = ?1 AND version = ?2",
             params![id, version],
         )?;
         tx.execute(
-            &format!(
-                "UPDATE revisions SET status = 'superseded', reviewed_at = {NOW}, review_note = ?2
-                 WHERE id = ?1 AND status = 'draft' AND expected_version = ?3"
-            ),
+            "UPDATE revisions SET status = 'rejected', review_note = ?2
+             WHERE id = ?1 AND status = 'draft' AND expected_version = ?3",
             params![
                 id,
                 format!("superseded by published version {version}"),
@@ -205,10 +207,10 @@ impl Vault {
             ],
         )?;
         tx.commit()?;
-        self.inspect(id, version)
+        Ok(version)
     }
 
-    pub fn reject(&mut self, id: &str, version: i64, note: Option<&str>) -> Result<Revision> {
+    pub fn reject(&mut self, id: &str, version: i64, note: Option<&str>) -> Result<i64> {
         if let Some(note) = note {
             validate_text("note", note, 2_048)?;
         }
@@ -222,16 +224,14 @@ impl Vault {
             revision.status
         );
         tx.execute(
-            &format!("UPDATE revisions SET status = 'rejected', reviewed_at = {NOW}, review_note = ?3 WHERE id = ?1 AND version = ?2"),
+            "UPDATE revisions SET status = 'rejected', review_note = ?3 WHERE id = ?1 AND version = ?2",
             params![id, version, note],
         )?;
         tx.commit()?;
-        self.inspect(id, version)
+        Ok(version)
     }
 
     pub fn get(&self, id: &str, version: Option<i64>, project: Option<&str>) -> Result<SkillView> {
-        validate_id(id)?;
-        ensure!(version.is_none_or(|v| v > 0), "version must be positive");
         let version = match version {
             Some(version) => version,
             None => current_version(&self.conn, id)?,

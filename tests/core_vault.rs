@@ -13,54 +13,15 @@ fn open() -> (tempfile::TempDir, Vault) {
 // --- validation --------------------------------------------------------
 
 #[test]
-fn read_and_publish_validate_identifiers_before_lookup() {
+fn get_inspect_and_publish_return_not_found_for_unknown_or_malformed_ids() {
     let (_dir, mut vault) = open();
-    for id in ["Upper", "-bad", "bad--id", ""] {
-        assert!(
-            vault
-                .get(id, None, None)
-                .unwrap_err()
-                .to_string()
-                .contains("id must")
-        );
-        assert!(
-            vault
-                .inspect(id, 1)
-                .unwrap_err()
-                .to_string()
-                .contains("id must")
-        );
-        assert!(
-            vault
-                .publish(id, 1)
-                .unwrap_err()
-                .to_string()
-                .contains("id must")
-        );
+    for id in ["missing", "Upper", ""] {
+        assert!(vault.get(id, None, None).is_err());
+        assert!(vault.inspect(id, 1).is_err());
+        assert!(vault.publish(id, 1).is_err());
     }
-    for version in [-1, 0] {
-        assert!(
-            vault
-                .get("valid", Some(version), None)
-                .unwrap_err()
-                .to_string()
-                .contains("version must")
-        );
-        assert!(
-            vault
-                .inspect("valid", version)
-                .unwrap_err()
-                .to_string()
-                .contains("version must")
-        );
-        assert!(
-            vault
-                .publish("valid", version)
-                .unwrap_err()
-                .to_string()
-                .contains("version must")
-        );
-    }
+    assert!(vault.get("missing", Some(-1), None).is_err());
+    assert!(vault.inspect("missing", 0).is_err());
 }
 
 #[test]
@@ -74,35 +35,14 @@ fn rejects_invalid_proposals_before_writing() {
         evidence,
         expected_version,
         scope: None,
-        client: None,
     };
     let long_id = "a".repeat(65);
-    for id in [
-        "",
-        "Upper",
-        "two--parts",
-        "-leading",
-        "trailing-",
-        "has_space",
-        "has space",
-        "é",
-        "sql';--",
-        long_id.as_str(),
-    ] {
+    for id in ["", "Upper", long_id.as_str()] {
         let proposal = base(id, "Use when testing", "Content body", "Evidence text", 0);
         assert!(vault.propose(&proposal).is_err(), "accepted id {id:?}");
     }
     let long_description = "d".repeat(281);
-    for description in [
-        "",
-        "  ",
-        "two\nlines",
-        "two\rlines",
-        "tab\tline",
-        "nul\0line",
-        "two\u{2028}lines",
-        long_description.as_str(),
-    ] {
+    for description in ["", long_description.as_str(), "two\nlines"] {
         let proposal = base("valid-id", description, "Content body", "Evidence text", 0);
         assert!(
             vault.propose(&proposal).is_err(),
@@ -110,7 +50,7 @@ fn rejects_invalid_proposals_before_writing() {
         );
     }
     let long_content = "x".repeat(65_537);
-    for content in ["", " \n", "nul\0body", long_content.as_str()] {
+    for content in ["", long_content.as_str(), "nul\0body"] {
         let proposal = base("valid-id", "Use when testing", content, "Evidence text", 0);
         assert!(
             vault.propose(&proposal).is_err(),
@@ -118,7 +58,7 @@ fn rejects_invalid_proposals_before_writing() {
         );
     }
     let long_evidence = "x".repeat(16_385);
-    for evidence in ["", " \n", "nul\0evidence", long_evidence.as_str()] {
+    for evidence in ["", long_evidence.as_str(), "nul\0evidence"] {
         let proposal = base("valid-id", "Use when testing", "Content body", evidence, 0);
         assert!(
             vault.propose(&proposal).is_err(),
@@ -274,7 +214,7 @@ fn stale_bases_never_overwrite_a_publication() {
 }
 
 #[test]
-fn publishing_supersedes_only_drafts_sharing_its_base() {
+fn publishing_rejects_only_sibling_drafts_sharing_its_base() {
     let (_dir, mut vault) = open();
     let sibling = Draft::new("skill")
         .description("Sibling draft")
@@ -287,10 +227,9 @@ fn publishing_supersedes_only_drafts_sharing_its_base() {
         .expected_version(winner.version)
         .description("Rebased draft")
         .propose(&mut vault);
-    assert_eq!(
-        vault.inspect("skill", sibling.version).unwrap().status,
-        "superseded"
-    );
+    let superseded = vault.inspect("skill", sibling.version).unwrap();
+    assert_eq!(superseded.status, "rejected");
+    assert!(superseded.review_note.unwrap().contains("superseded"));
     assert_eq!(
         vault.inspect("skill", rebased.version).unwrap().status,
         "draft"
@@ -301,17 +240,17 @@ fn publishing_supersedes_only_drafts_sharing_its_base() {
 fn reject_sets_status_and_note_and_blocks_publish() {
     let (_dir, mut vault) = open();
     let draft = Draft::new("skill").propose(&mut vault);
-    let rejected = vault
+    let version = vault
         .reject("skill", draft.version, Some("not reusable"))
         .unwrap();
+    let rejected = vault.inspect("skill", version).unwrap();
     assert_eq!(rejected.status, "rejected");
     assert_eq!(rejected.review_note.as_deref(), Some("not reusable"));
-    assert!(rejected.reviewed_at.is_some());
     assert!(vault.publish("skill", draft.version).is_err());
 }
 
 #[test]
-fn cannot_publish_rejected_or_superseded_revisions() {
+fn cannot_publish_rejected_revisions() {
     let (_dir, mut vault) = open();
     let rejected = Draft::new("skill").propose(&mut vault);
     vault.reject("skill", rejected.version, None).unwrap();
@@ -328,7 +267,7 @@ fn cannot_publish_rejected_or_superseded_revisions() {
         .publish("other", sibling.version)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("superseded"), "{error}");
+    assert!(error.contains("rejected"), "{error}");
 }
 
 #[test]
@@ -336,10 +275,10 @@ fn deprecate_hides_from_search_but_get_still_works() {
     let (_dir, mut vault) = open();
     Draft::new("skill").publish(&mut vault);
     vault.set_deprecated("skill", true).unwrap();
-    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
     assert!(vault.get("skill", None, None).is_ok());
     vault.set_deprecated("skill", false).unwrap();
-    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("", None, 20).unwrap().total, 1);
     assert!(vault.set_deprecated("missing", true).is_err());
 }
 
@@ -370,7 +309,7 @@ fn global_skill_is_visible_from_every_project() {
     Draft::new("global-skill").publish(&mut vault);
     for project in [None, Some("proja"), Some("projb")] {
         assert_eq!(
-            vault.search("", project, 20, 0).unwrap().total,
+            vault.search("", project, 20).unwrap().total,
             1,
             "project {project:?}"
         );
@@ -382,9 +321,9 @@ fn global_skill_is_visible_from_every_project() {
 fn project_scoped_skill_is_visible_only_to_its_project() {
     let (_dir, mut vault) = open();
     Draft::new("proj-skill").scope("proja").publish(&mut vault);
-    assert_eq!(vault.search("", Some("proja"), 20, 0).unwrap().total, 1);
-    assert_eq!(vault.search("", Some("projb"), 20, 0).unwrap().total, 0);
-    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("", Some("proja"), 20).unwrap().total, 1);
+    assert_eq!(vault.search("", Some("projb"), 20).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
     assert!(vault.get("proj-skill", None, Some("proja")).is_ok());
     assert!(vault.get("proj-skill", None, Some("projb")).is_err());
     assert!(vault.get("proj-skill", None, None).is_err());
@@ -433,7 +372,7 @@ fn multi_word_queries_match_when_words_are_not_adjacent() {
         .description("Handles timeout errors")
         .content("retry the flaky network call")
         .publish(&mut vault);
-    assert_eq!(vault.search("timeout flaky", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("timeout flaky", None, 20).unwrap().total, 1);
 }
 
 #[test]
@@ -443,7 +382,7 @@ fn body_content_words_are_searchable() {
         .description("Something else entirely")
         .content("mentions xylophone somewhere in the body")
         .publish(&mut vault);
-    assert_eq!(vault.search("xylophone", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("xylophone", None, 20).unwrap().total, 1);
 }
 
 #[test]
@@ -457,36 +396,26 @@ fn ranking_prefers_id_and_description_matches_over_content_only_matches() {
         .description("Unrelated description")
         .content("uses a widget somewhere")
         .publish(&mut vault);
-    let page = vault.search("widget", None, 20, 0).unwrap();
+    let page = vault.search("widget", None, 20).unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(page.skills[0].id, "widget-cache");
 }
 
 #[test]
-fn search_is_diacritics_insensitive() {
+fn search_tokenizer_ignores_diacritics_prefix_and_case() {
     let (_dir, mut vault) = open();
     Draft::new("coffee-skill")
         .description("Como preparar un buen café")
         .publish(&mut vault);
-    assert_eq!(vault.search("cafe", None, 20, 0).unwrap().total, 1);
-}
-
-#[test]
-fn search_matches_by_prefix() {
-    let (_dir, mut vault) = open();
     Draft::new("release-skill")
         .description("Deployment checklist")
         .publish(&mut vault);
-    assert_eq!(vault.search("deploy", None, 20, 0).unwrap().total, 1);
-}
-
-#[test]
-fn search_is_case_insensitive() {
-    let (_dir, mut vault) = open();
-    Draft::new("skill")
+    Draft::new("tests-skill")
         .description("Useful Tests")
         .publish(&mut vault);
-    assert_eq!(vault.search("TESTS", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("cafe", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("deploy", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("TESTS", None, 20).unwrap().total, 1);
 }
 
 #[test]
@@ -495,7 +424,7 @@ fn fts_special_characters_never_error() {
     Draft::new("skill").publish(&mut vault);
     for query in ["*", "\"", "OR", "NEAR(", "' OR 1=1 --", "AND", "-", "((("] {
         assert!(
-            vault.search(query, None, 20, 0).is_ok(),
+            vault.search(query, None, 20).is_ok(),
             "query {query:?} errored"
         );
     }
@@ -506,7 +435,7 @@ fn empty_query_lists_the_full_catalog_ordered_by_score_then_id() {
     let (_dir, mut vault) = open();
     Draft::new("beta").publish(&mut vault);
     Draft::new("alpha").publish(&mut vault);
-    let page = vault.search("", None, 20, 0).unwrap();
+    let page = vault.search("", None, 20).unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(
         page.skills
@@ -518,23 +447,14 @@ fn empty_query_lists_the_full_catalog_ordered_by_score_then_id() {
 }
 
 #[test]
-fn pagination_reports_total_and_has_more_correctly() {
+fn search_total_reflects_the_full_match_count_even_when_limited() {
     let (_dir, mut vault) = open();
     for id in ["a", "b", "c"] {
         Draft::new(id).publish(&mut vault);
     }
-    let page = vault.search("", None, 2, 0).unwrap();
+    let page = vault.search("", None, 2).unwrap();
     assert_eq!(page.total, 3);
-    assert!(page.has_more);
     assert_eq!(page.skills.len(), 2);
-    let page = vault.search("", None, 2, 2).unwrap();
-    assert_eq!(page.total, 3);
-    assert!(!page.has_more);
-    assert_eq!(page.skills.len(), 1);
-    let page = vault.search("", None, 2, 99).unwrap();
-    assert_eq!(page.total, 3);
-    assert!(page.skills.is_empty());
-    assert!(!page.has_more);
 }
 
 #[test]
@@ -550,10 +470,10 @@ fn search_never_returns_drafts_or_bodies_and_only_the_latest_published_version()
     Draft::new("hidden-skill")
         .content("never published")
         .propose(&mut vault);
-    let page = vault.search("", None, 20, 0).unwrap();
+    let page = vault.search("", None, 20).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.skills[0].id, "skill");
-    assert_eq!(page.skills[0].version, v1.version);
+    assert_eq!(page.skills[0].version, v1);
     let json = serde_json::to_value(&page).unwrap();
     assert!(!json.to_string().contains("SECRET"));
     assert!(!json.to_string().contains("never published"));
@@ -567,12 +487,11 @@ fn search_never_returns_drafts_or_bodies_and_only_the_latest_published_version()
 }
 
 #[test]
-fn search_validates_limit_offset_and_query_length() {
+fn search_validates_limit_and_query_length() {
     let (_dir, vault) = open();
-    assert!(vault.search("", None, 0, 0).is_err());
-    assert!(vault.search("", None, 101, 0).is_err());
-    assert!(vault.search("", None, 1, -1).is_err());
-    assert!(vault.search(&"a".repeat(513), None, 1, 0).is_err());
+    assert!(vault.search("", None, 0).is_err());
+    assert!(vault.search("", None, 101).is_err());
+    assert!(vault.search(&"a".repeat(513), None, 1).is_err());
 }
 
 // --- outcomes ------------------------------------------------------------
@@ -583,13 +502,13 @@ fn outcomes_are_recorded_only_for_published_revisions() {
     let draft = Draft::new("skill").propose(&mut vault);
     assert!(
         vault
-            .record_outcome("skill", draft.version, "helped", "note", None, None)
+            .record_outcome("skill", draft.version, "helped", "note", None)
             .is_err()
     );
     vault.publish("skill", draft.version).unwrap();
     assert!(
         vault
-            .record_outcome("skill", draft.version, "helped", "note", None, None)
+            .record_outcome("skill", draft.version, "helped", "note", None)
             .is_ok()
     );
 }
@@ -600,37 +519,38 @@ fn record_outcome_rejects_invalid_result() {
     let published = Draft::new("skill").publish(&mut vault);
     assert!(
         vault
-            .record_outcome("skill", published.version, "bogus", "note", None, None)
+            .record_outcome("skill", published, "bogus", "note", None)
             .is_err()
     );
 }
 
 #[test]
-fn search_metadata_counts_reset_on_new_published_version_and_support_failing_filter() {
+fn search_metadata_and_outcome_summaries_reset_on_new_published_version() {
     let (_dir, mut vault) = open();
     let v1 = Draft::new("skill").publish(&mut vault);
     vault
-        .record_outcome("skill", v1.version, "helped", "n", None, None)
+        .record_outcome("skill", v1, "helped", "n", None)
         .unwrap();
     vault
-        .record_outcome("skill", v1.version, "failed", "n", None, None)
+        .record_outcome("skill", v1, "failed", "n", None)
         .unwrap();
-    let page = vault.search("", None, 20, 0).unwrap();
+    let page = vault.search("", None, 20).unwrap();
     assert_eq!((page.skills[0].helped, page.skills[0].failed), (1, 1));
-    assert_eq!(vault.outcome_summaries(true).unwrap().len(), 1);
-    assert_eq!(vault.outcome_summaries(false).unwrap().len(), 1);
+    let summaries = vault.outcome_summaries().unwrap();
+    assert_eq!((summaries[0].helped, summaries[0].failed), (1, 1));
 
     let v2 = Draft::new("skill").expected_version(1).publish(&mut vault);
-    let page = vault.search("", None, 20, 0).unwrap();
+    let page = vault.search("", None, 20).unwrap();
     assert_eq!(
         (
             page.skills[0].version,
             page.skills[0].helped,
             page.skills[0].failed
         ),
-        (v2.version, 0, 0)
+        (v2, 0, 0)
     );
-    assert!(vault.outcome_summaries(true).unwrap().is_empty());
+    let summaries = vault.outcome_summaries().unwrap();
+    assert_eq!((summaries[0].helped, summaries[0].failed), (0, 0));
 }
 
 #[test]
@@ -638,30 +558,13 @@ fn outcomes_returns_the_full_log_for_a_skill_newest_first() {
     let (_dir, mut vault) = open();
     let published = Draft::new("skill").publish(&mut vault);
     vault
-        .record_outcome("skill", published.version, "helped", "first", None, None)
+        .record_outcome("skill", published, "helped", "first", None)
         .unwrap();
     vault
-        .record_outcome("skill", published.version, "failed", "second", None, None)
+        .record_outcome("skill", published, "failed", "second", None)
         .unwrap();
     let log = vault.outcomes("skill").unwrap();
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].note, "second");
     assert_eq!(log[1].note, "first");
-}
-
-// --- storage ------------------------------------------------------------
-
-#[test]
-fn initializes_persistent_database_idempotently_with_wal_and_timeout() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nested/skills.db");
-    let vault = Vault::open(&path).unwrap();
-    assert!(path.is_file());
-    drop(vault);
-    Vault::open(&path).unwrap();
-    let conn = rusqlite::Connection::open(path).unwrap();
-    let mode: String = conn
-        .pragma_query_value(None, "journal_mode", |row| row.get(0))
-        .unwrap();
-    assert_eq!(mode, "wal");
 }

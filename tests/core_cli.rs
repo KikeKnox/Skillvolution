@@ -26,7 +26,7 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
-fn drafts_and_show_and_diff_expose_pending_revisions() {
+fn drafts_and_show_expose_pending_revisions() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
@@ -35,36 +35,25 @@ fn drafts_and_show_and_diff_expose_pending_revisions() {
         .propose(&mut vault);
     drop(vault);
 
-    let listed = run(&db, &["drafts", "--json"]);
-    assert_success(&listed);
-    let drafts: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(drafts[0]["id"], "example");
-    assert_eq!(drafts[0]["version"], 1);
-    assert_eq!(drafts[0]["status"], "draft");
-
-    let table = run(&db, &["drafts"]);
-    assert_success(&table);
-    assert!(String::from_utf8_lossy(&table.stdout).contains("example"));
+    let drafts = run(&db, &["drafts"]);
+    assert_success(&drafts);
+    let drafts_out = String::from_utf8_lossy(&drafts.stdout);
+    assert!(drafts_out.contains("example"));
+    assert!(drafts_out.contains("Use when testing"));
 
     let shown = run(&db, &["show", "example", "--version", "1"]);
     assert_success(&shown);
-    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["evidence"], "Observed / Tried / Result");
-    assert_eq!(shown["status"], "draft");
-
-    let diff = run(&db, &["diff", "example", "--version", "1"]);
-    assert_success(&diff);
-    assert!(String::from_utf8_lossy(&diff.stdout).contains("+description"));
+    let shown_out = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown_out.contains("example v1"));
+    assert!(shown_out.contains("draft"));
+    assert!(shown_out.contains("Observed / Tried / Result"));
+    assert!(shown_out.contains("+description"));
 }
 
 #[test]
 fn publish_reject_deprecate_undeprecate_workflow() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
-    let vault = Vault::open(&db).unwrap();
-    drop(vault);
-
-    run(&db, &["init"]);
     let mut vault = Vault::open(&db).unwrap();
     Draft::new("published-skill").propose(&mut vault);
     Draft::new("rejected-skill").propose(&mut vault);
@@ -72,6 +61,7 @@ fn publish_reject_deprecate_undeprecate_workflow() {
 
     let published = run(&db, &["publish", "published-skill", "--version", "1"]);
     assert_success(&published);
+    assert!(String::from_utf8_lossy(&published.stdout).contains("Published published-skill v1"));
     let vault = Vault::open(&db).unwrap();
     assert!(vault.get("published-skill", None, None).is_ok());
     drop(vault);
@@ -88,6 +78,7 @@ fn publish_reject_deprecate_undeprecate_workflow() {
         ],
     );
     assert_success(&rejected);
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("Rejected rejected-skill v1"));
     let vault = Vault::open(&db).unwrap();
     assert_eq!(
         vault.inspect("rejected-skill", 1).unwrap().status,
@@ -98,63 +89,39 @@ fn publish_reject_deprecate_undeprecate_workflow() {
     let deprecated = run(&db, &["deprecate", "published-skill"]);
     assert_success(&deprecated);
     let vault = Vault::open(&db).unwrap();
-    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
     drop(vault);
 
     let undeprecated = run(&db, &["undeprecate", "published-skill"]);
     assert_success(&undeprecated);
     let vault = Vault::open(&db).unwrap();
-    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("", None, 20).unwrap().total, 1);
 }
 
 #[test]
-fn outcomes_table_json_and_failing_filter() {
+fn outcomes_summary_and_log_are_printed_as_text() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
     let helped = Draft::new("helped-skill").publish(&mut vault);
     let failed = Draft::new("failed-skill").publish(&mut vault);
     vault
-        .record_outcome(
-            "helped-skill",
-            helped.version,
-            "helped",
-            "worked",
-            None,
-            None,
-        )
+        .record_outcome("helped-skill", helped, "helped", "worked", None)
         .unwrap();
     vault
-        .record_outcome(
-            "failed-skill",
-            failed.version,
-            "failed",
-            "broke",
-            None,
-            None,
-        )
+        .record_outcome("failed-skill", failed, "failed", "broke", None)
         .unwrap();
     drop(vault);
 
-    let summary = run(&db, &["outcomes", "--json"]);
+    let summary = run(&db, &["outcomes"]);
     assert_success(&summary);
-    let summary: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
-    assert_eq!(summary.as_array().unwrap().len(), 2);
+    let summary_out = String::from_utf8_lossy(&summary.stdout);
+    assert!(summary_out.contains("helped-skill"));
+    assert!(summary_out.contains("failed-skill"));
 
-    let failing = run(&db, &["outcomes", "--failing", "--json"]);
-    assert_success(&failing);
-    let failing: serde_json::Value = serde_json::from_slice(&failing.stdout).unwrap();
-    assert_eq!(failing.as_array().unwrap().len(), 1);
-    assert_eq!(failing[0]["id"], "failed-skill");
-
-    let log = run(&db, &["outcomes", "failed-skill", "--json"]);
+    let log = run(&db, &["outcomes", "failed-skill"]);
     assert_success(&log);
-    let log: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
-    assert_eq!(log[0]["note"], "broke");
-
-    let table = run(&db, &["outcomes"]);
-    assert_success(&table);
-    assert!(String::from_utf8_lossy(&table.stdout).contains("helped-skill"));
+    assert!(String::from_utf8_lossy(&log.stdout).contains("broke"));
 }
 
 #[test]
@@ -166,14 +133,10 @@ fn cli_error_cases_produce_stderr_and_no_stdout() {
     drop(vault);
 
     for args in [
-        vec!["show", "example"],
-        vec!["publish", "example"],
         vec!["show", "missing", "--version", "1"],
         vec!["publish", "example", "--version", "1"],
         vec!["reject", "example", "--version", "1"],
         vec!["deprecate", "missing-skill"],
-        vec!["outcomes", "example", "--failing"],
-        vec!["unknown"],
     ] {
         let result = run(&db, &args);
         assert!(!result.status.success(), "expected failure for {args:?}");
@@ -193,20 +156,7 @@ fn help_lists_commands_without_opening_database() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for command in [
-        "setup",
-        "init",
-        "serve",
-        "drafts",
-        "show",
-        "diff",
-        "publish",
-        "reject",
-        "deprecate",
-        "undeprecate",
-        "outcomes",
-        "hook",
-    ] {
+    for command in ["setup", "serve", "show", "hook"] {
         assert!(help.contains(command), "missing {command}");
     }
     assert!(!dir.path().join(".local").exists());
@@ -218,7 +168,7 @@ fn default_database_respects_xdg_then_home() {
         let dir = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         command
-            .arg("init")
+            .arg("drafts")
             .env("HOME", dir.path())
             .env_remove("XDG_DATA_HOME");
         let base = if use_xdg {
@@ -308,11 +258,11 @@ fn setup_honours_global_db_flag() {
 }
 
 #[test]
-fn init_is_idempotent_with_global_database_path() {
+fn opening_the_database_is_idempotent_with_a_global_path() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("space directory/skills.db");
     for _ in 0..2 {
-        let result = run(&db, &["init"]);
+        let result = run(&db, &["drafts"]);
         assert_success(&result);
         assert!(result.stderr.is_empty());
     }

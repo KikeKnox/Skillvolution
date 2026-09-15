@@ -38,10 +38,10 @@ impl SetupArgs {
 }
 
 pub fn run(args: SetupArgs) -> Result<()> {
-    let project = args
-        .project
-        .map(Ok)
-        .unwrap_or_else(|| std::env::current_dir().context("determine current directory"))?;
+    let project = match args.project {
+        Some(project) => project,
+        None => std::env::current_dir().context("determine current directory")?,
+    };
     let bin = match args.bin {
         Some(bin) => bin,
         None => std::env::current_exe().context("determine current executable")?,
@@ -50,9 +50,6 @@ pub fn run(args: SetupArgs) -> Result<()> {
         Some(db) => db,
         None => crate::vault::default_database()?,
     };
-    for path in [&project, &bin, &db] {
-        fs_safe::check_path(path)?;
-    }
     let project = fs::canonicalize(&project).context("project must exist")?;
     let bin = fs::canonicalize(&bin).context("binary must exist")?;
     let db = std::path::absolute(&db)?;
@@ -72,18 +69,6 @@ pub fn run(args: SetupArgs) -> Result<()> {
         changes.extend(claude::changes(&project, &bin, &db, &key)?);
     }
 
-    for (path, _) in &changes {
-        fs_safe::check_path(path)?;
-        if path.exists() {
-            fs_safe::backup_path(path)?;
-            ensure!(path.is_file(), "not a regular file: {}", path.display());
-        }
-        for parent in path.ancestors().skip(1) {
-            if parent.exists() {
-                ensure!(parent.is_dir(), "not a directory: {}", parent.display());
-            }
-        }
-    }
     for (path, content) in changes {
         fs_safe::write(&path, &content).with_context(|| {
             format!(

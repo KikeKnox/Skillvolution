@@ -1,8 +1,8 @@
-use super::{Vault, validate_id, validate_single_line, validate_text};
+use super::{Vault, validate_id, validate_text};
 use anyhow::{Result, ensure};
 use rusqlite::params;
 
-pub const RESULTS: [&str; 3] = ["helped", "failed", "not_applicable"];
+const RESULTS: [&str; 3] = ["helped", "failed", "not_applicable"];
 
 #[derive(Debug, serde::Serialize)]
 pub struct OutcomeRecord {
@@ -10,7 +10,6 @@ pub struct OutcomeRecord {
     pub version: i64,
     pub result: String,
     pub note: String,
-    pub client: Option<String>,
     pub project: Option<String>,
     pub created_at: String,
 }
@@ -26,15 +25,17 @@ pub struct OutcomeSummary {
 }
 
 impl Vault {
+    /// Records an outcome in one statement: the INSERT only fires when the
+    /// revision is published and visible to `project`, so `changed == 1` is
+    /// both the write and the visibility check.
     pub fn record_outcome(
         &self,
         id: &str,
         version: i64,
         result: &str,
         note: &str,
-        client: Option<&str>,
         project: Option<&str>,
-    ) -> Result<OutcomeRecord> {
+    ) -> Result<()> {
         validate_id(id)?;
         ensure!(version > 0, "version must be positive");
         ensure!(
@@ -43,37 +44,30 @@ impl Vault {
             RESULTS.join(", ")
         );
         validate_text("note", note, 2_048)?;
-        if let Some(client) = client {
-            validate_single_line("client", client, 128)?;
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let published: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM revisions WHERE id = ?1 AND version = ?2 AND status = 'published')",
-            params![id, version],
-            |row| row.get(0),
+        let changed = self.conn.execute(
+            "INSERT INTO outcomes (id, version, result, note, project)
+             SELECT ?1, ?2, ?3, ?4, ?5
+             WHERE EXISTS (
+                 SELECT 1 FROM revisions r JOIN skills s ON s.id = r.id
+                 WHERE r.id = ?1 AND r.version = ?2 AND r.status = 'published'
+                   AND (s.scope IS NULL OR s.scope = ?5)
+             )",
+            params![id, version, result, note, project],
         )?;
-        ensure!(published, "no published revision {id} version {version}");
-        tx.execute(
-            "INSERT INTO outcomes (id, version, result, note, client, project) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, version, result, note, client, project],
-        )?;
-        let record = tx.query_row(
-            "SELECT id, version, result, note, client, project, created_at FROM outcomes WHERE rowid = last_insert_rowid()",
-            [],
-            outcome_row,
-        )?;
-        tx.commit()?;
-        Ok(record)
+        ensure!(
+            changed == 1,
+            "no published revision {id} version {version} visible to this project"
+        );
+        Ok(())
     }
 
-    pub fn outcome_summaries(&self, failing_only: bool) -> Result<Vec<OutcomeSummary>> {
+    pub fn outcome_summaries(&self) -> Result<Vec<OutcomeSummary>> {
         let mut statement = self.conn.prepare(
             "SELECT id, version, scope, helped, failed, not_applicable FROM current_skills
-             WHERE ?1 = 0 OR failed > 0
              ORDER BY failed DESC, helped DESC, id",
         )?;
         Ok(statement
-            .query_map([failing_only], |row| {
+            .query_map([], |row| {
                 Ok(OutcomeSummary {
                     id: row.get(0)?,
                     version: row.get(1)?,
@@ -87,9 +81,8 @@ impl Vault {
     }
 
     pub fn outcomes(&self, id: &str) -> Result<Vec<OutcomeRecord>> {
-        validate_id(id)?;
         let mut statement = self.conn.prepare(
-            "SELECT id, version, result, note, client, project, created_at FROM outcomes
+            "SELECT id, version, result, note, project, created_at FROM outcomes
              WHERE id = ?1 ORDER BY rowid DESC",
         )?;
         Ok(statement
@@ -104,8 +97,7 @@ fn outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeRecord> {
         version: row.get(1)?,
         result: row.get(2)?,
         note: row.get(3)?,
-        client: row.get(4)?,
-        project: row.get(5)?,
-        created_at: row.get(6)?,
+        project: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }

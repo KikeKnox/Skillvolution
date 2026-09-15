@@ -13,7 +13,6 @@ pub struct Draft {
     evidence: String,
     expected_version: i64,
     scope: Option<String>,
-    client: Option<String>,
 }
 
 impl Draft {
@@ -26,7 +25,6 @@ impl Draft {
             evidence: "Observed / Tried / Result".to_owned(),
             expected_version: 0,
             scope: None,
-            client: None,
         }
     }
 
@@ -60,11 +58,6 @@ impl Draft {
         self
     }
 
-    pub fn client(mut self, value: &str) -> Self {
-        self.client = Some(value.to_owned());
-        self
-    }
-
     pub fn proposal(&self) -> Proposal<'_> {
         Proposal {
             id: &self.id,
@@ -74,7 +67,6 @@ impl Draft {
             evidence: &self.evidence,
             expected_version: self.expected_version,
             scope: self.scope.as_deref(),
-            client: self.client.as_deref(),
         }
     }
 
@@ -83,8 +75,8 @@ impl Draft {
         vault.propose(&self.proposal()).unwrap()
     }
 
-    /// Proposes then immediately publishes it, returning the published revision.
-    pub fn publish(&self, vault: &mut Vault) -> Revision {
+    /// Proposes then immediately publishes it, returning the published version.
+    pub fn publish(&self, vault: &mut Vault) -> i64 {
         let revision = self.propose(vault);
         vault.publish(&self.id, revision.version).unwrap()
     }

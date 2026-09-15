@@ -18,8 +18,7 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords such as technology, action, and symptom, e.g. 'cargo flaky test timeout'"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
                 },
                 "additionalProperties": false
             }
@@ -80,8 +79,6 @@ struct SearchArgs {
     query: String,
     #[serde(default = "default_limit")]
     limit: i64,
-    #[serde(default)]
-    offset: i64,
 }
 
 fn default_limit() -> i64 {
@@ -121,17 +118,10 @@ struct ProposeArgs {
 struct Server {
     vault: Vault,
     project: Option<String>,
-    client: Option<String>,
-    initialized: bool,
 }
 
 pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
-    let mut server = Server {
-        vault,
-        project,
-        client: None,
-        initialized: false,
-    };
+    let mut server = Server { vault, project };
     let mut output = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line.context("reading MCP request line")?;
@@ -168,16 +158,12 @@ pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
 impl Server {
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, (i32, String)> {
         match method {
-            "initialize" => Ok(self.initialize(&params)),
+            "initialize" => Ok(initialize(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" | "tools/call" if !self.initialized => {
-                Err((-32002, "server not initialized".to_owned()))
-            }
             "tools/list" => Ok(json!({"tools": tools()})),
             "tools/call" => Ok(match self.call(params) {
                 Ok(value) => json!({
                     "content": [{"type": "text", "text": value.to_string()}],
-                    "structuredContent": value,
                     "isError": false,
                 }),
                 Err(error) => json!({
@@ -187,25 +173,6 @@ impl Server {
             }),
             _ => Err((-32601, format!("method not found: {method}"))),
         }
-    }
-
-    fn initialize(&mut self, params: &Value) -> Value {
-        self.initialized = true;
-        self.client = params
-            .pointer("/clientInfo/name")
-            .and_then(Value::as_str)
-            .map(|name| name.chars().filter(|c| !c.is_control()).take(128).collect())
-            .filter(|name: &String| !name.trim().is_empty());
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
-        let version = PROTOCOL_VERSIONS
-            .into_iter()
-            .find(|supported| Some(*supported) == requested)
-            .unwrap_or(PROTOCOL_VERSIONS[0]);
-        json!({
-            "protocolVersion": version,
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "capabilities": {"tools": {"listChanged": false}}
-        })
     }
 
     fn call(&mut self, params: Value) -> Result<Value> {
@@ -218,14 +185,11 @@ impl Server {
             Some(arguments) => arguments.clone(),
         };
         let project = self.project.as_deref();
-        let client = self.client.as_deref();
         let parse_error = |error| anyhow::anyhow!("invalid arguments for {name}: {error}");
         match name {
             "search_skills" => {
                 let args: SearchArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                let page = self
-                    .vault
-                    .search(&args.query, project, args.limit, args.offset)?;
+                let page = self.vault.search(&args.query, project, args.limit)?;
                 Ok(serde_json::to_value(page)?)
             }
             "get_skill" => {
@@ -238,16 +202,14 @@ impl Server {
             }
             "report_skill_outcome" => {
                 let args: OutcomeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                self.vault.get(&args.id, Some(args.version), project)?;
-                let record = self.vault.record_outcome(
+                self.vault.record_outcome(
                     &args.id,
                     args.version,
                     &args.result,
                     &args.note,
-                    client,
                     project,
                 )?;
-                Ok(serde_json::to_value(record)?)
+                Ok(json!({"recorded": true}))
             }
             "propose_skill_change" => {
                 let args: ProposeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
@@ -266,7 +228,6 @@ impl Server {
                     evidence: &args.evidence,
                     expected_version: args.expected_version,
                     scope,
-                    client,
                 })?;
                 Ok(json!({
                     "id": revision.id,
@@ -274,12 +235,25 @@ impl Server {
                     "status": revision.status,
                     "expected_version": revision.expected_version,
                     "scope": revision.scope,
-                    "next": "Tell the user a draft awaits human review: skillvolution diff ID --version N, then publish or reject. Never publish it yourself."
+                    "next": "Tell the user a draft awaits human review: skillvolution show ID --version N, then publish or reject. Never publish it yourself."
                 }))
             }
             other => bail!("unknown tool: {other}"),
         }
     }
+}
+
+fn initialize(params: &Value) -> Value {
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    let version = PROTOCOL_VERSIONS
+        .into_iter()
+        .find(|supported| Some(*supported) == requested)
+        .unwrap_or(PROTOCOL_VERSIONS[0]);
+    json!({
+        "protocolVersion": version,
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        "capabilities": {"tools": {"listChanged": false}}
+    })
 }
 
 fn error_message(id: Value, code: i32, message: &str) -> Value {
