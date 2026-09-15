@@ -120,6 +120,45 @@ fn stop_hook_active_never_blocks() {
 }
 
 #[test]
+fn stop_hook_active_still_advances_the_offset_so_the_next_turn_sees_only_new_work() {
+    // Reproduces: turn 1 Edit -> Stop(false) blocks and saves offset A; Claude
+    // then calls report_skill_outcome (lines A..B) -> Stop(true) fires (this
+    // hook's own block caused it) and must not block, but must still save
+    // offset B so a stale review from before B never masks new work after B.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(&transcript, &[assistant_tool_use("Edit")]);
+
+    let input = stop_input("s1", &transcript, false);
+    assert!(hook::stop(&vault, &input).unwrap().is_some()); // turn 1: blocks
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        assistant_tool_use("mcp__skillvolution__report_skill_outcome")
+    )
+    .unwrap();
+    let active_input = stop_input("s1", &transcript, true);
+    assert!(hook::stop(&vault, &active_input).unwrap().is_none()); // stop_hook_active: never blocks
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(file, "{}", assistant_tool_use("Edit")).unwrap();
+    let input = stop_input("s1", &transcript, false);
+    // turn 2: a fresh, unreviewed Edit must block again. If the offset was not
+    // saved above, this call would re-see the old Edit+report pair together
+    // with the new Edit and conclude everything was already reviewed.
+    assert!(hook::stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
 fn missing_transcript_does_not_block() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
@@ -277,21 +316,48 @@ fn session_start_without_project_detects_the_git_root_and_scopes_by_it() {
 }
 
 #[test]
-fn session_start_claude_project_dir_env_takes_precedence_over_cwd() {
+fn session_start_cwd_repo_beats_claude_project_dir() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let repo_a = git_repo(dir.path(), "proja");
     let repo_b = git_repo(dir.path(), "projb");
 
     let mut vault = Vault::open(&db).unwrap();
-    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    Draft::new("proja-skill").scope("proja").publish(&mut vault);
+    Draft::new("projb-skill").scope("projb").publish(&mut vault);
     drop(vault);
 
-    // cwd is repo_b (would detect "projb"), but CLAUDE_PROJECT_DIR points at repo_a.
+    // cwd is repo_b, a real repo; CLAUDE_PROJECT_DIR points elsewhere at
+    // repo_a. cwd must win.
     let output = run_hook_session_start(
         &db,
         None,
         &repo_b,
+        &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("projb-skill"));
+    assert!(!stdout.contains("proja-skill"));
+}
+
+#[test]
+fn session_start_claude_project_dir_used_when_cwd_is_not_a_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let outside = dir.path().join("no-git");
+    fs::create_dir_all(&outside).unwrap();
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    // cwd is not a repo, so CLAUDE_PROJECT_DIR is used as a fallback.
+    let output = run_hook_session_start(
+        &db,
+        None,
+        &outside,
         &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
     );
     assert!(output.status.success());

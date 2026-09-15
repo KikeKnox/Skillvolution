@@ -49,8 +49,8 @@ pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
 }
 
 fn merge_hooks(config: &mut serde_json::Value, bin: &Path, db: &Path) -> Result<()> {
-    let bin = hooks::shell_quote(&bin.display().to_string());
-    let db = hooks::shell_quote(&db.display().to_string());
+    let bin = hooks::shell_quote(hooks::require_utf8(bin, "--bin")?);
+    let db = hooks::shell_quote(hooks::require_utf8(db, "--db")?);
     let session_start = format!("{bin} --db {db} hook session-start");
     let stop = format!("{bin} --db {db} hook stop");
     hooks::merge(config, session_start, stop)

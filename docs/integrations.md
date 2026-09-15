@@ -35,13 +35,13 @@ Neither global MCP entry passes `--project`; `serve` detects it per-invocation i
 
 ## Runtime project detection
 
-`serve` and `hook session-start` use an explicit `--project KEY` if given; otherwise
-`CLAUDE_PROJECT_DIR` (set by Claude Code for MCP servers and hooks) if set, else the working
-directory — and derive the key from the sanitized name of that directory's enclosing git
-repository root. Outside a git repository, no key is detected and only global skills are visible.
-Two unrelated repositories checked out under directories with the same name therefore share
-project scope. OpenCode launches each local MCP server with the project directory as its working
-directory, so this resolves correctly per project despite the global config having no `--project`.
+`serve` and `hook session-start` use an explicit `--project KEY` if given; otherwise the enclosing
+git repository of the working directory, and only if there is none, that of `CLAUDE_PROJECT_DIR`
+(set by Claude Code, which may start user-scope MCP servers outside the project). The key is the
+sanitized name of the repository root; in a git worktree it is the main repository's name. Outside
+a git repository only global skills are visible. Two unrelated repositories with the same directory
+name share project scope. OpenCode starts local MCP servers in the project directory, so an
+inherited `CLAUDE_PROJECT_DIR` never overrides it.
 
 ## Setup safety
 

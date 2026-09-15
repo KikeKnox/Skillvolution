@@ -53,9 +53,7 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
 /// judged once, and a stop already continued by this hook is never blocked.
 pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
-    if input["stop_hook_active"].as_bool() == Some(true) {
-        return Ok(None);
-    }
+    let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
     let (Some(session), Some(path)) = (
         input["session_id"].as_str(),
         input["transcript_path"].as_str(),
@@ -75,6 +73,14 @@ pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    // Advance the offset even when this stop was itself caused by our own
+    // block (stop_hook_active): otherwise the lines Claude wrote in response
+    // (e.g. a report_skill_outcome call) get re-read on the next real stop,
+    // mixed in with new unreviewed work, and mask it as already reviewed.
+    vault.set_transcript_offset(session, offset + complete as u64)?;
+    if stop_hook_active {
+        return Ok(None);
+    }
     let (mut worked, mut reviewed) = (false, false);
     for line in bytes[..complete].split(|b| *b == b'\n') {
         if let Ok(entry) = serde_json::from_slice::<Value>(line) {
@@ -84,7 +90,6 @@ pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
             });
         }
     }
-    vault.set_transcript_offset(session, offset + complete as u64)?;
     Ok((worked && !reviewed).then_some(STOP_REASON))
 }
 

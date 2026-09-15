@@ -72,6 +72,7 @@ pub fn parse_strict_object(text: &str) -> Result<Value> {
 
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let value = deserializer.deserialize_map(StrictObjectVisitor)?;
+    deserializer.end()?;
     Ok(value)
 }
 
@@ -171,8 +172,13 @@ pub fn check_target(path: &Path) -> Result<()> {
     }
 }
 
+/// Writes `content` to `path` atomically: it lands fully or not at all, even if the
+/// process is killed mid-write, because it's assembled in a temp file next to `path`
+/// and only then renamed over it (a rename is a single filesystem operation, unlike
+/// `fs::write`'s truncate-then-write).
 pub fn write(path: &Path, content: &str) -> Result<()> {
     check_target(path)?;
+    let mut permissions = None;
     if path.exists() {
         let old = fs::read(path)?;
         if old == content.as_bytes() {
@@ -186,9 +192,35 @@ pub fn write(path: &Path, content: &str) -> Result<()> {
         file.set_permissions(fs::metadata(path)?.permissions())?;
         file.write_all(&old)?;
         file.sync_all()?;
+        permissions = Some(fs::metadata(path)?.permissions());
     }
     fs::create_dir_all(path.parent().context("missing parent")?)?;
-    fs::write(path, content).with_context(|| format!("write {}", path.display()))
+
+    let tmp_path = tmp_path_for(path);
+    let mut tmp_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp_path)
+        .with_context(|| format!("create {}", tmp_path.display()))?;
+    if let Some(permissions) = permissions {
+        tmp_file.set_permissions(permissions)?;
+    }
+    tmp_file
+        .write_all(content.as_bytes())
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+    tmp_file.sync_all()?;
+    drop(tmp_file);
+
+    fs::rename(&tmp_path, path).with_context(|| format!("write {}", path.display()))
+}
+
+/// The scratch file `write` assembles new content in before renaming it over `path`.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(path.file_name().unwrap_or_default());
+    tmp_name.push(".skillvolution.tmp");
+    path.with_file_name(tmp_name)
 }
 
 /// Picks the first available numbered backup path (`.skillvolution.bak`, then `.bak.1`, ...),
@@ -209,4 +241,46 @@ pub fn backup_path(path: &Path) -> Result<PathBuf> {
         }
     }
     bail!("too many backups for {}", path.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_strict_object_refuses_trailing_content_after_the_object() {
+        let err = parse_strict_object(r#"{"a":1}{"trailing":true}"#).unwrap_err();
+        // The malformed input must be refused outright, not silently truncated to the
+        // first object with the rest dropped.
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replaces_existing_file_atomically_and_preserves_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "old content").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let original_inode = fs::metadata(&path).unwrap().ino();
+
+        write(&path, "new content").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // A rename over the target leaves a new inode; an in-place truncate-and-write
+        // (the non-atomic form) would keep the original one.
+        assert_ne!(fs::metadata(&path).unwrap().ino(), original_inode);
+
+        let leftover_tmp = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!leftover_tmp, "temp file left behind");
+    }
 }

@@ -7,10 +7,10 @@ pub use revisions::{Proposal, Revision, SkillView};
 pub use search::{SearchPage, SkillMetadata};
 
 use anyhow::{Result, bail, ensure};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const SCHEMA_VERSION: i64 = 1;
@@ -29,9 +29,14 @@ impl Vault {
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        migrate(&conn)?;
+        // Several processes can race to create the same not-yet-existing database.
+        // busy_timeout doesn't cover this window (the WAL pragma and the first
+        // migration transaction can still see SQLITE_BUSY/LOCKED here), so retry.
+        retry_on_busy(|| {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+            migrate(&conn)
+        })?;
         Ok(Self { conn })
     }
 
@@ -65,6 +70,31 @@ impl Vault {
         ensure!(changed == 1, "unknown skill: {id}");
         Ok(())
     }
+}
+
+/// Retries `f` while it fails with SQLITE_BUSY/SQLITE_LOCKED, up to a bounded
+/// total wait; any other error (or a busy error past the deadline) is returned
+/// immediately.
+fn retry_on_busy<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        match f() {
+            Err(err) if is_busy(&err) && Instant::now() < deadline => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn is_busy(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(inner, _))
+            if matches!(inner.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }
 
 fn migrate(conn: &Connection) -> Result<()> {

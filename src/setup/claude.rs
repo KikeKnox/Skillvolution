@@ -42,8 +42,8 @@ pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(
 }
 
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: &str) -> Result<()> {
-    let bin = hooks::shell_quote(&bin.display().to_string());
-    let db = hooks::shell_quote(&db.display().to_string());
+    let bin = hooks::shell_quote(hooks::require_utf8(bin, "--bin")?);
+    let db = hooks::shell_quote(hooks::require_utf8(db, "--db")?);
     let key = hooks::shell_quote(key);
     let session_start = format!("{bin} --db {db} hook session-start --project {key}");
     let stop = format!("{bin} --db {db} hook stop");

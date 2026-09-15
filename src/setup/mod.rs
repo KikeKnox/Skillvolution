@@ -57,6 +57,9 @@ pub fn run(args: SetupArgs) -> Result<()> {
     );
     let bin = resolve_bin(args.bin)?;
     let db = resolve_db(args.db)?;
+    // Client configs embed these paths as JSON strings, which must be valid UTF-8.
+    hooks::require_utf8(&bin, "--bin")?;
+    hooks::require_utf8(&db, "--db")?;
 
     match args.project {
         Some(project) => {

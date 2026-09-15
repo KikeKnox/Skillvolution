@@ -13,7 +13,8 @@
 - `src/hook.rs` — the SessionStart catalog text and the Stop transcript scan, independent of stdio
   so both are unit-testable against fixture transcripts.
 - `src/main.rs` — CLI parsing and dispatch (`clap`); `resolve_project` picks `--project` when
-  given, else `CLAUDE_PROJECT_DIR` or the working directory, for `serve` and `hook session-start`.
+  given, else the working directory's git repository, falling back to `CLAUDE_PROJECT_DIR`'s, for
+  `serve` and `hook session-start`.
 - `src/project.rs` — derives a project key from a directory's enclosing git repository root
   (lowercased, non-alphanumeric runs collapsed to `-`, ≤64 bytes); `None` outside a git repo. Used
   for runtime auto-detection and to default `setup --project`'s `--project-key`.

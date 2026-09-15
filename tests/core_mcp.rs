@@ -306,6 +306,72 @@ fn unknown_arguments_are_rejected_as_tool_errors() {
     assert_eq!(response["result"]["isError"], true);
 }
 
+// --- malformed input on stdin -----------------------------------------------
+
+#[test]
+fn invalid_utf8_on_stdin_gets_a_parse_error_and_the_server_keeps_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    server.stdin.write_all(&[0xff, 0xfe, b'\n']).unwrap();
+    server.stdin.flush().unwrap();
+    let mut line = String::new();
+    server.stdout.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["error"]["code"], -32700);
+    assert_eq!(response["id"], Value::Null);
+
+    // The server is still alive and answers a normal request afterwards.
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn batch_requests_get_a_single_unsupported_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!([
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    ]));
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], Value::Null);
+}
+
+#[test]
+fn a_response_shaped_message_without_method_is_ignored_silently() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    // Looks like a client's response to some earlier request of ours (has id
+    // and result, no method) - must not get a reply.
+    writeln!(
+        server.stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 99, "result": {}})
+    )
+    .unwrap();
+    server.stdin.flush().unwrap();
+
+    // The next real request gets exactly the next line of output, proving
+    // nothing was written for the response-shaped message above.
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn a_request_with_an_id_but_no_method_gets_invalid_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!({"jsonrpc": "2.0", "id": 7}));
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], 7);
+}
+
 // --- runtime project detection (no --project flag) ------------------------
 
 #[test]
@@ -334,20 +400,46 @@ fn serve_without_project_detects_the_git_root_and_scopes_by_it() {
 }
 
 #[test]
-fn claude_project_dir_env_takes_precedence_over_cwd() {
+fn cwd_repo_beats_claude_project_dir() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let repo_a = git_repo(dir.path(), "proja");
     let repo_b = git_repo(dir.path(), "projb");
 
     let mut vault = Vault::open(&db).unwrap();
-    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    Draft::new("proja-skill").scope("proja").publish(&mut vault);
+    Draft::new("projb-skill").scope("projb").publish(&mut vault);
     drop(vault);
 
-    // cwd is repo_b (would detect "projb"), but CLAUDE_PROJECT_DIR points at repo_a.
+    // cwd is repo_b, a real repo; CLAUDE_PROJECT_DIR points elsewhere at
+    // repo_a. cwd must win.
     let mut server = McpServer::spawn_detecting(
         &db,
         &repo_b,
+        &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
+    );
+    server.initialize("2025-06-18");
+    let visible = server.call(2, "search_skills", json!({}));
+    assert_eq!(text_of(&visible)["total"], 1);
+    assert_eq!(text_of(&visible)["skills"][0]["id"], "projb-skill");
+}
+
+#[test]
+fn claude_project_dir_used_when_cwd_is_not_a_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let repo_a = git_repo(dir.path(), "proja");
+    let outside = dir.path().join("no-git");
+    fs::create_dir_all(&outside).unwrap();
+
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("proj-only").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    // cwd is not a repo, so CLAUDE_PROJECT_DIR is used as a fallback.
+    let mut server = McpServer::spawn_detecting(
+        &db,
+        &outside,
         &[("CLAUDE_PROJECT_DIR", repo_a.to_str().unwrap())],
     );
     server.initialize("2025-06-18");

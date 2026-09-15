@@ -126,12 +126,35 @@ struct Server {
 pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
     let mut server = Server { vault, project };
     let mut output = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines() {
-        let line = line.context("reading MCP request line")?;
-        if line.trim().is_empty() {
+    let mut input = std::io::stdin().lock();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = input
+            .read_until(b'\n', &mut line)
+            .context("reading MCP request line")?;
+        if read == 0 {
+            return Ok(());
+        }
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+        let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+        if trimmed.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let request: Value = match serde_json::from_str(&line) {
+        // A single malformed line (invalid UTF-8, or valid UTF-8 that isn't
+        // JSON) must not take the whole server down: reply with a parse
+        // error and keep reading.
+        let text = match std::str::from_utf8(trimmed) {
+            Ok(text) => text,
+            Err(error) => {
+                write_message(
+                    &mut output,
+                    &error_message(Value::Null, -32700, &format!("parse error: {error}")),
+                )?;
+                continue;
+            }
+        };
+        let request: Value = match serde_json::from_str(text) {
             Ok(value) => value,
             Err(error) => {
                 write_message(
@@ -141,10 +164,23 @@ pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
                 continue;
             }
         };
+        if request.is_array() {
+            write_message(
+                &mut output,
+                &error_message(Value::Null, -32600, "batch requests are not supported"),
+            )?;
+            continue;
+        }
+        let method = request.get("method").and_then(Value::as_str);
+        let is_response =
+            method.is_none() && (request.get("result").is_some() || request.get("error").is_some());
+        if is_response {
+            continue;
+        }
         let Some(id) = request.get("id").cloned() else {
             continue;
         };
-        let Some(method) = request.get("method").and_then(Value::as_str) else {
+        let Some(method) = method else {
             write_message(&mut output, &error_message(id, -32600, "missing method"))?;
             continue;
         };
@@ -155,7 +191,6 @@ pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
         };
         write_message(&mut output, &reply)?;
     }
-    Ok(())
 }
 
 impl Server {

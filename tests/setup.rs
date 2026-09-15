@@ -10,8 +10,13 @@ struct Cli {
     setup: setup::SetupArgs,
 }
 
+/// The default test binary's relative path: a directory with spaces (covering shell
+/// quoting) containing a file literally named `skillvolution`, since hook ownership
+/// (see `owned_command` in `src/setup/hooks.rs`) matches on that exact file name.
+const DEFAULT_BIN: &str = "bin dir with spaces/skillvolution";
+
 fn install(project: &Path, client: &str) -> anyhow::Result<()> {
-    install_full(project, client, "binary with spaces", None)
+    install_full(project, client, DEFAULT_BIN, None)
 }
 
 fn install_full(
@@ -86,12 +91,42 @@ fn preserves_settings_and_instructions_with_backups_and_idempotence() {
 }
 
 #[test]
+fn existing_key_order_and_large_integers_survive_the_merge() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    // Deliberately not alphabetical, and carrying an integer far past i64/f64
+    // precision: a rewrite must keep both exactly as they were.
+    let original =
+        "{\"zebra\":1,\"mcp\":{\"other\":true},\"apple\":2,\"big\":12345678901234567890123}";
+    fs::write(p.join("opencode.json"), original).unwrap();
+    install(p, "opencode").unwrap();
+
+    let text = fs::read_to_string(p.join("opencode.json")).unwrap();
+    assert!(text.contains("12345678901234567890123"), "{text}");
+    // The pre-existing keys keep their original order; only `mcp.skillvolution` is new.
+    let zebra_pos = text.find("\"zebra\"").unwrap();
+    let mcp_pos = text.find("\"mcp\"").unwrap();
+    let apple_pos = text.find("\"apple\"").unwrap();
+    let big_pos = text.find("\"big\"").unwrap();
+    assert!(zebra_pos < mcp_pos, "{text}");
+    assert!(mcp_pos < apple_pos, "{text}");
+    assert!(apple_pos < big_pos, "{text}");
+
+    let config = read_json(p.join("opencode.json"));
+    assert_eq!(config["mcp"]["other"], true);
+    assert_eq!(config["mcp"]["skillvolution"]["type"], "local");
+}
+
+#[test]
 fn rejects_conflicts_before_writing_any_client() {
     let cases = [
         (".mcp.json", "not json"),
         (".mcp.json", "[]"),
         (".mcp.json", "{\"mcpServers\":null}"),
         (".mcp.json", "{\"mcpServers\":{\"skillvolution\":false}}"),
+        // Trailing content after the object must be refused outright, not silently
+        // dropped with only the first object kept.
+        (".mcp.json", "{}{\"trailing\":true}"),
         ("opencode.json", "{\"mcp\":[]}"),
         ("opencode.json", "{\"instructions\":[42]}"),
         ("opencode.jsonc", "{}"),
@@ -232,7 +267,7 @@ fn rejects_duplicate_json_keys_without_losing_settings() {
 
 #[test]
 fn rejects_directory_binary_and_database() {
-    for bad in ["binary with spaces", "data with spaces/vault.sqlite3"] {
+    for bad in [DEFAULT_BIN, "data with spaces/vault.sqlite3"] {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join(bad)).unwrap();
         assert!(
@@ -397,18 +432,54 @@ fn settings_local_json_idempotent_rerun_without_extra_backup() {
 
 #[test]
 fn changed_bin_path_replaces_owned_hooks_without_duplicating() {
+    // Both binaries are named exactly `skillvolution` (in different directories, as a
+    // real upgrade that moves the binary would look): ownership matches on that file
+    // name, so the second install must replace the first's hooks, not merely on an
+    // identical path.
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
-    install_full(p, "claude-code", "bin-one", None).unwrap();
-    install_full(p, "claude-code", "bin-two", None).unwrap();
+    install_full(p, "claude-code", "dir-one/skillvolution", None).unwrap();
+    install_full(p, "claude-code", "dir-two/skillvolution", None).unwrap();
     let settings = read_json(p.join(".claude/settings.local.json"));
     let session_groups = settings["hooks"]["SessionStart"].as_array().unwrap();
     let stop_groups = settings["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(session_groups.len(), 1, "{session_groups:?}");
     assert_eq!(stop_groups.len(), 1, "{stop_groups:?}");
     let stop_cmd = stop_groups[0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(stop_cmd.contains("bin-two"));
-    assert!(!stop_cmd.contains("bin-one"));
+    assert!(stop_cmd.contains("dir-two"));
+    assert!(!stop_cmd.contains("dir-one"));
+}
+
+#[test]
+fn foreign_hooks_with_similar_command_text_are_preserved() {
+    // A foreign tool's own `hook stop`, and an unrelated `hook stopwatch` subcommand
+    // from a binary that happens to be named `skillvolution`, must both survive a
+    // skillvolution install untouched.
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    fs::create_dir_all(p.join(".claude")).unwrap();
+    let original = json!({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": "/opt/skillvolution hook stopwatch", "timeout": 5}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "/usr/bin/other-tool hook stop", "timeout": 5}]}],
+        }
+    });
+    fs::write(p.join(".claude/settings.local.json"), original.to_string()).unwrap();
+    install(p, "claude-code").unwrap();
+    let settings = read_json(p.join(".claude/settings.local.json"));
+    let session_groups = settings["hooks"]["SessionStart"].as_array().unwrap();
+    let stop_groups = settings["hooks"]["Stop"].as_array().unwrap();
+    // Our own new entry was appended alongside each foreign one, not replacing it.
+    assert_eq!(session_groups.len(), 2, "{session_groups:?}");
+    assert_eq!(stop_groups.len(), 2, "{stop_groups:?}");
+    assert_eq!(
+        session_groups[0]["hooks"][0]["command"],
+        "/opt/skillvolution hook stopwatch"
+    );
+    assert_eq!(
+        stop_groups[0]["hooks"][0]["command"],
+        "/usr/bin/other-tool hook stop"
+    );
 }
 
 #[test]

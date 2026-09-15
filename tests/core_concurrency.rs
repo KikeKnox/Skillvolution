@@ -58,6 +58,31 @@ fn competing_publishers_have_exactly_one_winner() {
 }
 
 #[test]
+fn opening_a_fresh_database_concurrently_never_fails_with_busy() {
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skills.db");
+        let barrier = Arc::new(Barrier::new(10));
+        let threads: Vec<_> = (0..10)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Vault::open(&path)
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread
+                .join()
+                .unwrap()
+                .expect("opening a brand-new database concurrently should never fail");
+        }
+    }
+}
+
+#[test]
 fn a_writer_waits_for_an_existing_write_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");

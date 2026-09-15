@@ -26,7 +26,10 @@ impl Env {
         let xdg_config = home.path().join("xdg-config");
         let empty_path = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let bin = workspace.path().join("skillvolution-bin");
+        // Named exactly `skillvolution`: hook ownership (see `owned_command`) matches on
+        // the binary's file name, so a rerun with this same path must recognize its own
+        // previous hook entries and replace them instead of duplicating them.
+        let bin = workspace.path().join("skillvolution");
         fs::write(&bin, "test binary").unwrap();
         let db = workspace.path().join("vault.sqlite3");
         Self {
@@ -79,25 +82,69 @@ fn read_json(path: impl AsRef<Path>) -> Value {
 
 /// Writes an executable fake `claude` into `dir` that appends its argv to `log` (one
 /// line per invocation) and, unless `fail_add_json`, always exits 0. With
-/// `fail_add_json`, an `mcp add-json` call prints to stderr and exits 1 while `mcp
-/// remove` still succeeds, so setup's own remove-then-add flow can be tested either way.
+/// `fail_add_json`, every `mcp add-json` call prints an unrelated error to stderr and
+/// exits 1 (not "already exists"), so setup's fresh-add attempt fails outright without
+/// ever calling `mcp remove`.
 fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
-    fs::create_dir_all(dir).unwrap();
-    let claude = dir.join("claude");
     let failure = if fail_add_json {
         "if [ \"$1 $2\" = \"mcp add-json\" ]; then echo 'fake add-json boom' >&2; exit 1; fi\n"
             .to_owned()
     } else {
         String::new()
     };
-    fs::write(
-        &claude,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> {}\n{failure}exit 0\n",
-            log.display()
-        ),
+    write_fake_claude_script(
+        dir,
+        &format!("echo \"$@\" >> {{log}}\n{failure}exit 0\n"),
+        log,
     )
-    .unwrap();
+}
+
+/// Writes an executable fake `claude` that simulates updating an existing user-scope
+/// `skillvolution` registration: its first `mcp add-json` call fails with "already
+/// exists" (as the real CLI does), `mcp remove` succeeds, and its second `add-json` call
+/// succeeds or fails per `second_add_succeeds`. Counts calls itself (in a sibling file,
+/// via shell builtins only) rather than relying on `grep`/`wc`, since the test process
+/// runs this script with `PATH` pointed only at its own directory.
+fn write_fake_claude_already_registered(
+    dir: &Path,
+    log: &Path,
+    second_add_succeeds: bool,
+) -> PathBuf {
+    let second = if second_add_succeeds {
+        "exit 0\n".to_owned()
+    } else {
+        "echo 'fake second add-json boom' >&2; exit 1\n".to_owned()
+    };
+    let script = format!(
+        "echo \"$@\" >> {{log}}\n\
+         if [ \"$1 $2\" = \"mcp add-json\" ]; then\n\
+         \x20\x20count=0\n\
+         \x20\x20[ -f {{count_file}} ] && read count < {{count_file}}\n\
+         \x20\x20count=$((count + 1))\n\
+         \x20\x20echo \"$count\" > {{count_file}}\n\
+         \x20\x20if [ \"$count\" = \"1\" ]; then\n\
+         \x20\x20\x20\x20echo 'MCP server skillvolution already exists in user config' >&2\n\
+         \x20\x20\x20\x20exit 1\n\
+         \x20\x20fi\n\
+         \x20\x20{second}\
+         fi\n\
+         exit 0\n"
+    );
+    write_fake_claude_script(
+        dir,
+        &script.replace(
+            "{count_file}",
+            &dir.join("add-json-count").display().to_string(),
+        ),
+        log,
+    )
+}
+
+fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let claude = dir.join("claude");
+    let body = body_template.replace("{log}", &log.display().to_string());
+    fs::write(&claude, format!("#!/bin/sh\n{body}")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -162,13 +209,13 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert!(plugin.contains(&serde_json::to_string(env.bin.to_str().unwrap()).unwrap()));
     assert!(plugin.contains(&serde_json::to_string(env.db.to_str().unwrap()).unwrap()));
 
-    // The claude CLI was used to remove then add the user-scope registration.
+    // A fresh registration (nothing named skillvolution existed yet) is a single
+    // `add-json` call; `remove` is only needed to replace an existing one.
     let log_text = fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = log_text.lines().collect();
-    assert_eq!(lines.len(), 2, "{log_text}");
-    assert_eq!(lines[0], "mcp remove --scope user skillvolution");
-    assert!(lines[1].starts_with("mcp add-json --scope user skillvolution "));
-    let json_arg = lines[1]
+    assert_eq!(lines.len(), 1, "{log_text}");
+    assert!(lines[0].starts_with("mcp add-json --scope user skillvolution "));
+    let json_arg = lines[0]
         .strip_prefix("mcp add-json --scope user skillvolution ")
         .unwrap();
     let mcp_json: Value = serde_json::from_str(json_arg).unwrap();
@@ -311,6 +358,180 @@ fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     // Files were written before the CLI call, and setup does not roll them back.
     assert!(env.claude_dir().join("skills/evolution/SKILL.md").exists());
     assert!(env.claude_dir().join("settings.json").exists());
+}
+
+#[test]
+fn global_mcp_update_of_existing_registration_removes_then_readds() {
+    // The first add-json attempt reports the name already exists (as the real `claude`
+    // CLI does for a second registration under the same name); setup must then remove
+    // the old one and add the new definition, rather than treating the first failure as
+    // fatal and leaving the old (possibly stale) registration in place.
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, true);
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let lines: Vec<String> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            format!(
+                "mcp add-json --scope user skillvolution {}",
+                serde_json::json!({
+                    "type": "stdio",
+                    "command": env.bin,
+                    "args": ["--db", &env.db, "serve"],
+                })
+            ),
+            "mcp remove --scope user skillvolution".to_owned(),
+            format!(
+                "mcp add-json --scope user skillvolution {}",
+                serde_json::json!({
+                    "type": "stdio",
+                    "command": env.bin,
+                    "args": ["--db", &env.db, "serve"],
+                })
+            ),
+        ],
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
+    // The first add-json fails as "already exists", remove succeeds, but the follow-up
+    // add-json fails too: setup must fail loudly with the exact command to re-register,
+    // never pretend the update succeeded or silently leave no registration at all.
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, false);
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("fake second add-json boom"), "{stderr}");
+    assert!(stderr.contains("registration is now gone"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "claude mcp add-json --scope user skillvolution '{}'",
+            serde_json::json!({
+                "type": "stdio",
+                "command": env.bin,
+                "args": ["--db", &env.db, "serve"],
+            })
+        )),
+        "{stderr}"
+    );
+
+    // Setup must still have run `mcp remove`, matching the removal the error reports.
+    let log_text = fs::read_to_string(&log).unwrap();
+    assert!(
+        log_text.contains("mcp remove --scope user skillvolution"),
+        "{log_text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_db_path_fails_cleanly_before_any_write() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let bin = workspace.path().join("skillvolution");
+    fs::write(&bin, "test binary").unwrap();
+    // "vault-<invalid byte>.sqlite3": not representable as UTF-8, so it must be
+    // rejected with a clear error rather than silently mangled into a hook command.
+    let mut db_name = b"vault-".to_vec();
+    db_name.push(0xff);
+    db_name.extend_from_slice(b".sqlite3");
+    let db = workspace.path().join(OsStr::from_bytes(&db_name));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("--db")
+        .arg(&db)
+        .arg("setup")
+        .arg("--client")
+        .arg("claude-code")
+        .arg("--bin")
+        .arg(&bin)
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("PATH", empty_path.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not valid UTF-8"), "{stderr}");
+    assert!(
+        !home.path().join(".claude/settings.json").exists(),
+        "must not write before the UTF-8 check fails"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_db_path_is_an_error_not_a_panic_in_every_mode() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let bin = workspace.path().join("skillvolution");
+    fs::write(&bin, "test binary").unwrap();
+    let db = workspace
+        .path()
+        .join(OsStr::from_bytes(b"vault-\xff.sqlite3"));
+    let project = workspace.path().join("project");
+    fs::create_dir(&project).unwrap();
+
+    let modes: [&[&OsStr]; 2] = [
+        &[OsStr::new("--client"), OsStr::new("opencode")],
+        &[OsStr::new("--project"), project.as_os_str()],
+    ];
+    for mode in modes {
+        let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+            .arg("--db")
+            .arg(&db)
+            .arg("setup")
+            .args(mode)
+            .arg("--bin")
+            .arg(&bin)
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("PATH", empty_path.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{mode:?}: {stderr}");
+        assert!(stderr.contains("not valid UTF-8"), "{mode:?}: {stderr}");
+    }
+    assert!(!home.path().join(".config/opencode").exists());
+    assert!(!project.join(".mcp.json").exists());
 }
 
 #[test]

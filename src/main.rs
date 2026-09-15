@@ -97,17 +97,23 @@ fn validate_project(project: &Option<String>) -> Result<()> {
 
 /// Resolves the project key for `serve` and `hook session-start`: an explicit
 /// `--project` wins (already validated by `validate_project`); otherwise the
-/// project is detected from `CLAUDE_PROJECT_DIR` (set by Claude Code for MCP
-/// servers and hooks) or, failing that, the current directory.
+/// current directory is tried first, since that is where OpenCode and a
+/// plain terminal start these processes. If the current directory is not a
+/// repo, fall back to `CLAUDE_PROJECT_DIR` (set by Claude Code) — this covers
+/// Claude Code starting a user-scope MCP server with its own config dir as
+/// cwd, which is never a repo.
 fn resolve_project(explicit: Option<String>) -> Result<Option<String>> {
     if explicit.is_some() {
         return Ok(explicit);
     }
-    let dir = match std::env::var("CLAUDE_PROJECT_DIR") {
-        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => std::env::current_dir().context("determine current directory")?,
-    };
-    Ok(skillvolution::project::detect(&dir))
+    let cwd = std::env::current_dir().context("determine current directory")?;
+    if let Some(project) = skillvolution::project::detect(&cwd) {
+        return Ok(Some(project));
+    }
+    Ok(match std::env::var("CLAUDE_PROJECT_DIR") {
+        Ok(dir) if !dir.is_empty() => skillvolution::project::detect(&PathBuf::from(dir)),
+        _ => None,
+    })
 }
 
 /// Opens the database at `--db`, or the default location (setup and every

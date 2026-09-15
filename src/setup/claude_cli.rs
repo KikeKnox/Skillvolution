@@ -2,7 +2,7 @@
 //! `claude` CLI. We never edit `~/.claude.json` directly: Claude Code rewrites that file
 //! on its own, so a direct edit would race it and get lost.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -55,24 +55,62 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Removes any existing user-scope registration (a missing one is fine, so its failure
-/// is ignored) then adds ours. `add-json` failing is fatal: it means the server did not
-/// actually get registered.
-pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
-    let _ = Command::new(claude)
-        .args(["mcp", "remove", "--scope", "user", "skillvolution"])
-        .output();
+/// The result of one `claude mcp add-json` attempt.
+enum AddOutcome {
+    Added,
+    /// Failed because a server named `skillvolution` is already registered there.
+    AlreadyExists,
+    Failed(String),
+}
 
-    let json = mcp_json(bin, db);
+fn add_json(claude: &Path, json: &str) -> Result<AddOutcome> {
     let output = Command::new(claude)
-        .args(["mcp", "add-json", "--scope", "user", "skillvolution", &json])
+        .args(["mcp", "add-json", "--scope", "user", "skillvolution", json])
         .output()
-        .with_context(|| format!("run `{}`", add_json_command(bin, db)))?;
-    if !output.status.success() {
-        bail!(
-            "claude mcp add-json failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        .context("run `claude mcp add-json`")?;
+    if output.status.success() {
+        return Ok(AddOutcome::Added);
     }
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if stderr.contains("already exists") {
+        Ok(AddOutcome::AlreadyExists)
+    } else {
+        Ok(AddOutcome::Failed(stderr))
+    }
+}
+
+/// Registers `skillvolution` at user scope without ever leaving a working registration
+/// lost to a failed update. `add-json` is tried directly first, so a name that isn't
+/// registered yet is a single call; the existing entry is removed only once we know from
+/// that first failure that it's actually there. If the follow-up add then fails too, the
+/// registration is gone: `claude mcp get` reports a stdio server's args space-joined
+/// with no escaping, so a previous entry (particularly one with spaces in its own
+/// `--db`) can't be read back and reconstructed reliably, and we report the removal
+/// clearly instead, with the exact command to redo it.
+pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
+    let json = mcp_json(bin, db);
+    match add_json(claude, &json)? {
+        AddOutcome::Added => return Ok(()),
+        AddOutcome::AlreadyExists => {}
+        AddOutcome::Failed(stderr) => bail!("claude mcp add-json failed: {stderr}"),
+    }
+
+    let remove = Command::new(claude)
+        .args(["mcp", "remove", "--scope", "user", "skillvolution"])
+        .output()
+        .context("run `claude mcp remove --scope user skillvolution`")?;
+    ensure!(
+        remove.status.success(),
+        "claude mcp remove failed: {}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+
+    match add_json(claude, &json)? {
+        AddOutcome::Added | AddOutcome::AlreadyExists => Ok(()),
+        AddOutcome::Failed(stderr) => bail!(
+            "claude mcp add-json failed after removing the previous skillvolution \
+             registration: {stderr}\nThe user-scope registration is now gone; re-add it with:\n{}",
+            add_json_command(bin, db)
+        ),
+    }
 }
