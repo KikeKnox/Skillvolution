@@ -61,13 +61,14 @@ impl Vault {
         Ok(())
     }
 
-    pub fn outcome_summaries(&self) -> Result<Vec<OutcomeSummary>> {
+    pub fn outcome_summaries(&self, failing_only: bool) -> Result<Vec<OutcomeSummary>> {
         let mut statement = self.conn.prepare(
             "SELECT id, version, scope, helped, failed, not_applicable FROM current_skills
+             WHERE ?1 = 0 OR failed > 0
              ORDER BY failed DESC, helped DESC, id",
         )?;
         Ok(statement
-            .query_map([], |row| {
+            .query_map([failing_only], |row| {
                 Ok(OutcomeSummary {
                     id: row.get(0)?,
                     version: row.get(1)?,

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use skillvolution::{hook, setup, vault::Vault};
 use std::{io::Read, path::PathBuf};
 
@@ -21,12 +22,18 @@ enum Command {
         project: Option<String>,
     },
     /// List drafts awaiting review.
-    Drafts,
+    Drafts {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one revision: its status, evidence, and a diff against its base.
     Show {
         id: String,
         #[arg(long, value_name = "VERSION")]
         version: i64,
+        /// Print the full revision as JSON instead of the readable summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Publish a draft revision.
     Publish {
@@ -47,7 +54,14 @@ enum Command {
     /// Make a deprecated skill searchable again.
     Undeprecate { id: String },
     /// Summarize skill outcomes, or list the outcome log of one skill.
-    Outcomes { id: Option<String> },
+    Outcomes {
+        id: Option<String>,
+        /// Only skills whose current version has failures.
+        #[arg(long, conflicts_with = "id")]
+        failing: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Claude Code hook entry points.
     #[command(subcommand)]
     Hook(HookEvent),
@@ -64,6 +78,11 @@ enum HookEvent {
     },
     /// Ask for an evolution review after unreviewed work (exit 2 blocks the stop).
     Stop,
+}
+
+fn print_json(value: &impl Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
 }
 
 fn validate_project(project: &Option<String>) -> Result<()> {
@@ -91,9 +110,11 @@ fn main() -> Result<()> {
             validate_project(&project)?;
             skillvolution::mcp::serve(open(&cli.db)?, project)?;
         }
-        Command::Drafts => {
+        Command::Drafts { json } => {
             let drafts = open(&cli.db)?.drafts()?;
-            if drafts.is_empty() {
+            if json {
+                print_json(&drafts)?;
+            } else if drafts.is_empty() {
                 println!("No drafts.");
             } else {
                 for draft in drafts {
@@ -108,22 +129,29 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Show { id, version } => {
+        Command::Show { id, version, json } => {
             let vault = open(&cli.db)?;
             let revision = vault.inspect(&id, version)?;
-            println!(
-                "{} v{} ({}, base v{}, {})",
-                revision.id,
-                revision.version,
-                revision.status,
-                revision.expected_version,
-                revision.scope.as_deref().unwrap_or("global")
-            );
-            if let Some(note) = &revision.review_note {
-                println!("note: {note}");
+            if json {
+                print_json(&revision)?;
+            } else {
+                println!(
+                    "{} v{} ({}, base v{}, {})",
+                    revision.id,
+                    revision.version,
+                    revision.status,
+                    revision.expected_version,
+                    revision.scope.as_deref().unwrap_or("global")
+                );
+                if let Some(reviewed_at) = &revision.reviewed_at {
+                    println!("reviewed: {reviewed_at}");
+                }
+                if let Some(note) = &revision.review_note {
+                    println!("note: {note}");
+                }
+                println!("\nevidence:\n{}", revision.evidence);
+                println!("\n{}", vault.diff(&id, version)?);
             }
-            println!("\nevidence:\n{}", revision.evidence);
-            println!("\n{}", vault.diff(&id, version)?);
         }
         Command::Publish { id, version } => {
             let version = open(&cli.db)?.publish(&id, version)?;
@@ -135,20 +163,36 @@ fn main() -> Result<()> {
         }
         Command::Deprecate { id } => open(&cli.db)?.set_deprecated(&id, true)?,
         Command::Undeprecate { id } => open(&cli.db)?.set_deprecated(&id, false)?,
-        Command::Outcomes { id: Some(id) } => {
-            for r in open(&cli.db)?.outcomes(&id)? {
-                println!(
-                    "{} {} v{} {}: {}",
-                    r.created_at, r.id, r.version, r.result, r.note
-                );
+        Command::Outcomes {
+            id: Some(id), json, ..
+        } => {
+            let records = open(&cli.db)?.outcomes(&id)?;
+            if json {
+                print_json(&records)?;
+            } else {
+                for r in records {
+                    println!(
+                        "{} {} v{} {}: {}",
+                        r.created_at, r.id, r.version, r.result, r.note
+                    );
+                }
             }
         }
-        Command::Outcomes { id: None } => {
-            for s in open(&cli.db)?.outcome_summaries()? {
-                println!(
-                    "{} v{}: helped {}, failed {}, not applicable {}",
-                    s.id, s.version, s.helped, s.failed, s.not_applicable
-                );
+        Command::Outcomes {
+            id: None,
+            failing,
+            json,
+        } => {
+            let summaries = open(&cli.db)?.outcome_summaries(failing)?;
+            if json {
+                print_json(&summaries)?;
+            } else {
+                for s in summaries {
+                    println!(
+                        "{} v{}: helped {}, failed {}, not applicable {}",
+                        s.id, s.version, s.helped, s.failed, s.not_applicable
+                    );
+                }
             }
         }
         Command::Hook(HookEvent::SessionStart { project }) => {

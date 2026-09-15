@@ -2,9 +2,11 @@
 //! Every write goes through `write`, which backs up the previous content first.
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -21,8 +23,12 @@ pub fn read_optional(path: &Path) -> Result<Option<String>> {
 
 pub fn load_json(path: &Path) -> Result<Value> {
     let config: Value = match read_optional(path)? {
-        Some(text) => serde_json::from_str(&text)
-            .with_context(|| format!("{} must be valid JSON", path.display()))?,
+        Some(text) => parse_strict_object(&text).with_context(|| {
+            format!(
+                "{} must be a strict JSON object with unique keys (no comments, trailing commas, or duplicate keys)",
+                path.display()
+            )
+        })?,
         None => json!({}),
     };
     ensure!(
@@ -31,6 +37,42 @@ pub fn load_json(path: &Path) -> Result<Value> {
         path.display()
     );
     Ok(config)
+}
+
+/// Parses `text` as a JSON object, rejecting duplicate top-level keys instead of letting
+/// the last one silently win.
+pub fn parse_strict_object(text: &str) -> Result<Value> {
+    struct StrictObjectVisitor;
+
+    impl<'de> Visitor<'de> for StrictObjectVisitor {
+        type Value = Value;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a JSON object with unique keys")
+        }
+
+        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut entries: Vec<(String, Value)> = Vec::new();
+            while let Some((key, value)) = access.next_entry::<String, Value>()? {
+                if !seen.insert(key.clone()) {
+                    return Err(<M::Error as serde::de::Error>::custom(format!(
+                        "duplicate key {key:?}"
+                    )));
+                }
+                entries.push((key, value));
+            }
+            let map: serde_json::Map<String, Value> = entries.into_iter().collect();
+            Ok(Value::Object(map))
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = deserializer.deserialize_map(StrictObjectVisitor)?;
+    Ok(value)
 }
 
 /// Refuses an existing skill file that doesn't carry our managed marker, so we never
@@ -91,29 +133,74 @@ pub fn merge_marker_block(mut text: String, start: &str, end: &str, block: &str)
     Ok(text)
 }
 
-/// Writes `content` to `path`, backing up any differing existing content first.
-/// Skips the write entirely when the content is already up to date.
+/// Removes a legacy marker block if present. `Ok(None)` means the file is untouched.
+pub fn remove_marker_block(mut text: String, start: &str, end: &str) -> Result<Option<String>> {
+    match find_marker_block(&text, start, end)? {
+        Some((s, e)) => {
+            text.replace_range(s..e, "");
+            Ok(Some(text))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Refuses `path` if it exists as a symlink or as anything other than a regular file.
+/// A path that doesn't exist at all is fine to write; a dangling symlink is still caught
+/// here because `symlink_metadata` reports the link itself, not its (missing) target.
+/// Ancestor directories are never inspected, so a symlinked ancestor (a stowed `~/.local/bin`,
+/// a symlinked project directory, ...) is left alone.
+pub fn check_target(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "symlink refused: {}",
+                path.display()
+            );
+            ensure!(meta.is_file(), "not a regular file: {}", path.display());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
 pub fn write(path: &Path, content: &str) -> Result<()> {
+    check_target(path)?;
     if path.exists() {
-        ensure!(path.is_file(), "not a regular file: {}", path.display());
         let old = fs::read(path)?;
         if old == content.as_bytes() {
             return Ok(());
         }
-        backup(path)?;
+        let backup = backup_path(path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)?;
+        file.set_permissions(fs::metadata(path)?.permissions())?;
+        file.write_all(&old)?;
+        file.sync_all()?;
     }
     fs::create_dir_all(path.parent().context("missing parent")?)?;
     fs::write(path, content).with_context(|| format!("write {}", path.display()))
 }
 
-/// Copies `path` to `path.skillvolution.bak` unless that backup already exists,
-/// so the file preserves whatever it held before Skillvolution ever touched it.
-fn backup(path: &Path) -> Result<()> {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".skillvolution.bak");
-    let backup = PathBuf::from(name);
-    if !backup.exists() {
-        fs::copy(path, &backup).with_context(|| format!("backup {}", path.display()))?;
+/// Picks the first available numbered backup path (`.skillvolution.bak`, then `.bak.1`, ...),
+/// refusing a symlinked candidate instead of silently skipping past it.
+pub fn backup_path(path: &Path) -> Result<PathBuf> {
+    for index in 0..10_000 {
+        let suffix = if index == 0 {
+            ".skillvolution.bak".to_string()
+        } else {
+            format!(".skillvolution.bak.{index}")
+        };
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let backup = PathBuf::from(name);
+        check_target(&backup)?;
+        if !backup.exists() {
+            return Ok(backup);
+        }
     }
-    Ok(())
+    bail!("too many backups for {}", path.display())
 }

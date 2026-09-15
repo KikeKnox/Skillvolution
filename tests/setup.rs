@@ -53,25 +53,36 @@ fn read_json(path: impl AsRef<Path>) -> Value {
 }
 
 #[test]
-fn preserves_settings_with_backup_and_idempotence() {
+fn preserves_settings_and_instructions_with_backups_and_idempotence() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
-    let original = "{\"model\":\"existing\",\"mcp\":{\"other\":{\"enabled\":false}}}";
+    let original = "{\"model\":\"existing\",\"mcp\":{\"other\":{\"enabled\":false}},\"instructions\":[\"team.md\"]}";
     fs::write(p.join("opencode.json"), original).unwrap();
+    fs::write(p.join("CLAUDE.md"), "# My instructions\nKeep me.\n").unwrap();
     install(p, "both").unwrap();
     let config = read_json(p.join("opencode.json"));
     assert_eq!(config["model"], "existing");
     assert_eq!(config["mcp"]["other"]["enabled"], false);
+    // No legacy instructions entry was present, so nothing is added.
+    assert_eq!(config["instructions"], json!(["team.md"]));
     assert_eq!(
         fs::read_to_string(p.join("opencode.json.skillvolution.bak")).unwrap(),
         original
     );
+    // CLAUDE.md carries no legacy markers, so setup leaves it untouched: no rewrite, no backup.
+    assert_eq!(
+        fs::read_to_string(p.join("CLAUDE.md")).unwrap(),
+        "# My instructions\nKeep me.\n"
+    );
+    assert!(!p.join("CLAUDE.md.skillvolution.bak").exists());
 
     let oc_before = fs::read(p.join("opencode.json")).unwrap();
     let agents_before = fs::read(p.join("AGENTS.md")).unwrap();
     install(p, "both").unwrap();
     assert_eq!(fs::read(p.join("opencode.json")).unwrap(), oc_before);
     assert_eq!(fs::read(p.join("AGENTS.md")).unwrap(), agents_before);
+    assert!(!p.join("opencode.json.skillvolution.bak.1").exists());
+    assert!(!p.join("AGENTS.md.skillvolution.bak.1").exists());
 }
 
 #[test]
@@ -82,10 +93,19 @@ fn rejects_conflicts_before_writing_any_client() {
         (".mcp.json", "{\"mcpServers\":null}"),
         (".mcp.json", "{\"mcpServers\":{\"skillvolution\":false}}"),
         ("opencode.json", "{\"mcp\":[]}"),
+        ("opencode.json", "{\"instructions\":[42]}"),
         ("opencode.jsonc", "{}"),
         (
             ".opencode/skills/evolution/SKILL.md",
             "# My own evolution skill",
+        ),
+        (
+            "CLAUDE.md",
+            "User text\n<!-- skillvolution:evolution:start -->\nmissing end",
+        ),
+        (
+            "CLAUDE.md",
+            "<!-- skillvolution:evolution:end -->\n<!-- skillvolution:evolution:start -->",
         ),
         (
             "AGENTS.md",
@@ -118,6 +138,96 @@ fn rejects_conflicts_before_writing_any_client() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_symlinked_config_targets_before_any_write() {
+    for target in [
+        "opencode.json",
+        ".mcp.json",
+        "opencode.json.skillvolution.bak",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = temp.path().join(target);
+        let original = outside.path().join("original");
+        fs::write(&original, "{}").unwrap();
+        if target.ends_with(".bak") {
+            fs::write(temp.path().join("opencode.json"), "{}").unwrap();
+        }
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        let result = install(temp.path(), "both");
+        assert!(result.is_err(), "must reject {target}");
+        assert!(format!("{:#}", result.unwrap_err()).contains("symlink"));
+        assert_eq!(fs::read_to_string(&original).unwrap(), "{}");
+        // No other client's files were written either, since every target is checked
+        // before any write happens.
+        assert!(!temp.path().join("AGENTS.md").exists());
+        assert!(!temp.path().join(".claude/settings.local.json").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn accepts_symlinked_project_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real-project");
+    fs::create_dir(&real).unwrap();
+    let linked = temp.path().join("linked-project");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    install(&linked, "both").unwrap();
+    assert!(real.join("opencode.json").exists());
+}
+
+#[test]
+fn accepts_relative_parent_dir_in_project_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("nested/project");
+    fs::create_dir_all(&project).unwrap();
+    let via_parent_dir = project.join("../project");
+    install(&via_parent_dir, "both").unwrap();
+    assert!(project.join("opencode.json").exists());
+}
+
+#[test]
+fn accepts_relative_parent_dir_in_db_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fs::write(&bin, "test binary").unwrap();
+    let db = temp.path().join("data/../data/vault.sqlite3");
+    let argv = vec![
+        "setup".to_owned(),
+        "--project".to_owned(),
+        temp.path().to_string_lossy().into_owned(),
+        "--client".to_owned(),
+        "claude-code".to_owned(),
+        "--bin".to_owned(),
+        bin.to_string_lossy().into_owned(),
+        "--db".to_owned(),
+        db.to_string_lossy().into_owned(),
+    ];
+    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let cc = read_json(temp.path().join(".mcp.json"));
+    let args = cc["mcpServers"]["skillvolution"]["args"]
+        .as_array()
+        .unwrap();
+    let db_arg = args[1].as_str().unwrap();
+    assert!(!db_arg.contains(".."), "db path not normalized: {db_arg}");
+    assert!(Path::new(db_arg).is_absolute());
+}
+
+#[test]
+fn rejects_duplicate_json_keys_without_losing_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let text = "{\"model\":\"first\",\"model\":\"second\"}";
+    fs::write(temp.path().join("opencode.json"), text).unwrap();
+    assert!(install(temp.path(), "both").is_err());
+    assert_eq!(
+        fs::read_to_string(temp.path().join("opencode.json")).unwrap(),
+        text
+    );
+    assert!(!temp.path().join(".mcp.json").exists());
 }
 
 #[test]
@@ -170,6 +280,8 @@ fn installs_both_documented_clients_with_absolute_argv() {
             assert!(skill.contains(required), "missing {required}");
         }
     }
+    assert!(oc.get("instructions").is_none());
+    assert!(!temp.path().join("CLAUDE.md").exists());
     let agents = fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
     assert!(agents.contains("<!-- skillvolution:start -->"));
     assert!(agents.contains("<!-- skillvolution:end -->"));
@@ -320,4 +432,42 @@ fn agents_md_block_created_rewritten_and_malformed_refused() {
     .unwrap();
     assert!(install(temp2.path(), "opencode").is_err());
     assert!(!temp2.path().join("opencode.json").exists());
+}
+
+#[test]
+fn removes_legacy_claude_md_block_and_does_not_create_when_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    install(p, "claude-code").unwrap();
+    assert!(!p.join("CLAUDE.md").exists());
+
+    fs::write(
+        p.join("CLAUDE.md"),
+        "# Notes\n<!-- skillvolution:evolution:start -->\n@.claude/skills/evolution/SKILL.md\n<!-- skillvolution:evolution:end -->\nTail\n",
+    )
+    .unwrap();
+    install(p, "claude-code").unwrap();
+    let text = fs::read_to_string(p.join("CLAUDE.md")).unwrap();
+    assert!(!text.contains("skillvolution:evolution"));
+    assert!(text.contains("# Notes"));
+    assert!(text.contains("Tail"));
+}
+
+#[test]
+fn removes_legacy_opencode_instructions_entry_without_creating_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    fs::write(
+        p.join("opencode.json"),
+        json!({"instructions": [".opencode/skills/evolution/SKILL.md", "team.md"]}).to_string(),
+    )
+    .unwrap();
+    install(p, "opencode").unwrap();
+    let config = read_json(p.join("opencode.json"));
+    assert_eq!(config["instructions"], json!(["team.md"]));
+
+    let temp2 = tempfile::tempdir().unwrap();
+    install(temp2.path(), "opencode").unwrap();
+    let config2 = read_json(temp2.path().join("opencode.json"));
+    assert!(config2.get("instructions").is_none());
 }

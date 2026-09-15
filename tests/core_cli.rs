@@ -35,11 +35,18 @@ fn drafts_and_show_expose_pending_revisions() {
         .propose(&mut vault);
     drop(vault);
 
-    let drafts = run(&db, &["drafts"]);
-    assert_success(&drafts);
-    let drafts_out = String::from_utf8_lossy(&drafts.stdout);
-    assert!(drafts_out.contains("example"));
-    assert!(drafts_out.contains("Use when testing"));
+    let listed = run(&db, &["drafts", "--json"]);
+    assert_success(&listed);
+    let drafts: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(drafts[0]["id"], "example");
+    assert_eq!(drafts[0]["version"], 1);
+    assert_eq!(drafts[0]["status"], "draft");
+
+    let table = run(&db, &["drafts"]);
+    assert_success(&table);
+    let table_out = String::from_utf8_lossy(&table.stdout);
+    assert!(table_out.contains("example"));
+    assert!(table_out.contains("Use when testing"));
 
     let shown = run(&db, &["show", "example", "--version", "1"]);
     assert_success(&shown);
@@ -48,6 +55,12 @@ fn drafts_and_show_expose_pending_revisions() {
     assert!(shown_out.contains("draft"));
     assert!(shown_out.contains("Observed / Tried / Result"));
     assert!(shown_out.contains("+description"));
+
+    let shown_json = run(&db, &["show", "example", "--version", "1", "--json"]);
+    assert_success(&shown_json);
+    let shown_json: serde_json::Value = serde_json::from_slice(&shown_json.stdout).unwrap();
+    assert_eq!(shown_json["id"], "example");
+    assert_eq!(shown_json["status"], "draft");
 }
 
 #[test]
@@ -89,17 +102,17 @@ fn publish_reject_deprecate_undeprecate_workflow() {
     let deprecated = run(&db, &["deprecate", "published-skill"]);
     assert_success(&deprecated);
     let vault = Vault::open(&db).unwrap();
-    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
     drop(vault);
 
     let undeprecated = run(&db, &["undeprecate", "published-skill"]);
     assert_success(&undeprecated);
     let vault = Vault::open(&db).unwrap();
-    assert_eq!(vault.search("", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 1);
 }
 
 #[test]
-fn outcomes_summary_and_log_are_printed_as_text() {
+fn outcomes_table_json_and_failing_filter() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
@@ -113,15 +126,25 @@ fn outcomes_summary_and_log_are_printed_as_text() {
         .unwrap();
     drop(vault);
 
-    let summary = run(&db, &["outcomes"]);
+    let summary = run(&db, &["outcomes", "--json"]);
     assert_success(&summary);
-    let summary_out = String::from_utf8_lossy(&summary.stdout);
-    assert!(summary_out.contains("helped-skill"));
-    assert!(summary_out.contains("failed-skill"));
+    let summary: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(summary.as_array().unwrap().len(), 2);
 
-    let log = run(&db, &["outcomes", "failed-skill"]);
+    let failing = run(&db, &["outcomes", "--failing", "--json"]);
+    assert_success(&failing);
+    let failing: serde_json::Value = serde_json::from_slice(&failing.stdout).unwrap();
+    assert_eq!(failing.as_array().unwrap().len(), 1);
+    assert_eq!(failing[0]["id"], "failed-skill");
+
+    let log = run(&db, &["outcomes", "failed-skill", "--json"]);
     assert_success(&log);
-    assert!(String::from_utf8_lossy(&log.stdout).contains("broke"));
+    let log: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
+    assert_eq!(log[0]["note"], "broke");
+
+    let table = run(&db, &["outcomes"]);
+    assert_success(&table);
+    assert!(String::from_utf8_lossy(&table.stdout).contains("helped-skill"));
 }
 
 #[test]
@@ -137,6 +160,7 @@ fn cli_error_cases_produce_stderr_and_no_stdout() {
         vec!["publish", "example", "--version", "1"],
         vec!["reject", "example", "--version", "1"],
         vec!["deprecate", "missing-skill"],
+        vec!["outcomes", "example", "--failing"],
     ] {
         let result = run(&db, &args);
         assert!(!result.status.success(), "expected failure for {args:?}");

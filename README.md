@@ -37,13 +37,14 @@ vault. See `docs/integrations.md` for exactly what it writes.
 Agents can only create drafts; a human publishes or rejects them:
 
 ```bash
-skillvolution drafts                          # list drafts awaiting review
-skillvolution show my-skill --version 1        # status, evidence, diff against its base
+skillvolution drafts [--json]                  # list drafts awaiting review
+skillvolution show my-skill --version 1 [--json]  # status, evidence, diff (or full JSON)
 skillvolution publish my-skill --version 1
 skillvolution reject my-skill --version 1 --note "too narrow"
 
-skillvolution outcomes                         # helped/failed/not_applicable per skill
-skillvolution outcomes my-skill                # this skill's outcome log
+skillvolution outcomes [--json]                # helped/failed/not_applicable per skill
+skillvolution outcomes my-skill [--json]       # this skill's outcome log
+skillvolution outcomes --failing [--json]      # skills with failures in current version
 
 skillvolution deprecate my-skill               # hide from search, keep history
 skillvolution undeprecate my-skill
@@ -54,15 +55,15 @@ skillvolution undeprecate my-skill
 ```
 skillvolution [--db PATH] <command>
 
-serve [--project KEY]              Start the MCP server on stdio
-drafts                              List drafts awaiting review
-show ID --version N                 Show a revision: status, evidence, diff against its base
-publish ID --version N              Publish a draft revision
-reject ID --version N [--note TEXT] Reject a draft revision
-deprecate ID / undeprecate ID       Toggle a skill's visibility in search
-outcomes [ID]                       Summarize outcomes, or list one skill's outcome log
-hook session-start / hook stop      Claude Code hook entry points
-setup [OPTIONS]                     Configure a project to use the vault
+serve [--project KEY]                Start the MCP server on stdio
+drafts [--json]                      List drafts awaiting review
+show ID --version N [--json]         Show a revision: status, evidence, diff (or full JSON)
+publish ID --version N               Publish a draft revision
+reject ID --version N [--note TEXT]  Reject a draft revision
+deprecate ID / undeprecate ID        Toggle a skill's visibility in search
+outcomes [ID] [--failing] [--json]   Summarize outcomes, or list one skill's outcome log
+hook session-start / hook stop       Claude Code hook entry points
+setup [OPTIONS]                      Configure a project to use the vault
 ```
 
 Run `skillvolution <command> --help` for exact flags. The database defaults to

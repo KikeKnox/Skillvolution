@@ -52,7 +52,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
     };
     let project = fs::canonicalize(&project).context("project must exist")?;
     let bin = fs::canonicalize(&bin).context("binary must exist")?;
-    let db = std::path::absolute(&db)?;
+    let db = absolutize(&db)?;
     ensure!(project.is_dir(), "project must be a directory");
     ensure!(bin.is_file(), "binary must be a regular file");
     ensure!(
@@ -69,6 +69,17 @@ pub fn run(args: SetupArgs) -> Result<()> {
         changes.extend(claude::changes(&project, &bin, &db, &key)?);
     }
 
+    for (path, _) in &changes {
+        fs_safe::check_target(path)?;
+        if path.exists() {
+            fs_safe::backup_path(path)?;
+        }
+        for parent in path.ancestors().skip(1) {
+            if parent.exists() {
+                ensure!(parent.is_dir(), "not a directory: {}", parent.display());
+            }
+        }
+    }
     for (path, content) in changes {
         fs_safe::write(&path, &content).with_context(|| {
             format!(
@@ -79,6 +90,27 @@ pub fn run(args: SetupArgs) -> Result<()> {
     }
     Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     Ok(())
+}
+
+/// Resolves `path` to an absolute path: canonicalizes it (also resolving symlinks) when
+/// it exists, otherwise absolutizes it against the current directory and lexically
+/// collapses `.`/`..` components. Unlike a plain existence check, this lets a `--db` path
+/// that doesn't exist yet still contain `..`.
+fn absolutize(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()));
+    }
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    Ok(normalized)
 }
 
 fn resolve_project_key(explicit: Option<&str>, project: &Path) -> Result<String> {

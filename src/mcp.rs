@@ -18,7 +18,8 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords such as technology, action, and symptom, e.g. 'cargo flaky test timeout'"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
                 },
                 "additionalProperties": false
             }
@@ -79,6 +80,8 @@ struct SearchArgs {
     query: String,
     #[serde(default = "default_limit")]
     limit: i64,
+    #[serde(default)]
+    offset: i64,
 }
 
 fn default_limit() -> i64 {
@@ -189,7 +192,9 @@ impl Server {
         match name {
             "search_skills" => {
                 let args: SearchArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                let page = self.vault.search(&args.query, project, args.limit)?;
+                let page = self
+                    .vault
+                    .search(&args.query, project, args.limit, args.offset)?;
                 Ok(serde_json::to_value(page)?)
             }
             "get_skill" => {

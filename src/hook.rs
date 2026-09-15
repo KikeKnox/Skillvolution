@@ -17,7 +17,7 @@ and call propose_skill_change only for a lesson that meets every lesson criterio
 If there is nothing to report or propose, reply only \"No lesson.\" and stop.";
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
-    let page = vault.search("", project, CATALOG_LIMIT)?;
+    let page = vault.search("", project, CATALOG_LIMIT, 0)?;
     let mut text = String::from(
         "Skillvolution vault (shared procedural memory): follow the `evolution` skill.\n",
     );

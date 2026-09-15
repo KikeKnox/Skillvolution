@@ -29,11 +29,16 @@ What `skillvolution setup` writes into a project, for each client selected with
 
 - Every planned change is validated before anything is written, so a failing check (a malformed
   config, a conflicting entry) leaves the project untouched.
+- Config files must be strict JSON with unique keys; duplicate keys are rejected.
 - Merging an MCP entry only touches the `skillvolution` key, preserving any other server entries
   and foreign keys in the file.
-- Each changed file gets one `.skillvolution.bak` backup, made once and never overwritten by a
-  later setup run.
+- Each changed file gets numbered backups (`.skillvolution.bak`, `.skillvolution.bak.1`, etc.)
+  before being modified; backups are created once and never overwritten by later setup runs.
+- Setup refuses to write through a config file that itself is a symlink (symlinked ancestor
+  directories are fine).
 - A write that would produce byte-identical content is skipped, so repeated setup makes no changes.
+- Setup removes the legacy `CLAUDE.md` `@import` marker block if present and removes any legacy
+  `.opencode/skills/evolution/SKILL.md` entry from the `instructions` array in `opencode.json`.
 - Setup refuses an existing `SKILL.md` at the target path that isn't already Skillvolution-managed,
   and refuses a project using `opencode.jsonc` (merge it into a strict `opencode.json` first).
 

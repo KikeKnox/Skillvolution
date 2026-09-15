@@ -214,7 +214,7 @@ fn stale_bases_never_overwrite_a_publication() {
 }
 
 #[test]
-fn publishing_rejects_only_sibling_drafts_sharing_its_base() {
+fn publishing_supersedes_only_drafts_sharing_its_base() {
     let (_dir, mut vault) = open();
     let sibling = Draft::new("skill")
         .description("Sibling draft")
@@ -228,8 +228,9 @@ fn publishing_rejects_only_sibling_drafts_sharing_its_base() {
         .description("Rebased draft")
         .propose(&mut vault);
     let superseded = vault.inspect("skill", sibling.version).unwrap();
-    assert_eq!(superseded.status, "rejected");
+    assert_eq!(superseded.status, "superseded");
     assert!(superseded.review_note.unwrap().contains("superseded"));
+    assert!(superseded.reviewed_at.is_some());
     assert_eq!(
         vault.inspect("skill", rebased.version).unwrap().status,
         "draft"
@@ -246,11 +247,12 @@ fn reject_sets_status_and_note_and_blocks_publish() {
     let rejected = vault.inspect("skill", version).unwrap();
     assert_eq!(rejected.status, "rejected");
     assert_eq!(rejected.review_note.as_deref(), Some("not reusable"));
+    assert!(rejected.reviewed_at.is_some());
     assert!(vault.publish("skill", draft.version).is_err());
 }
 
 #[test]
-fn cannot_publish_rejected_revisions() {
+fn cannot_publish_rejected_or_superseded_revisions() {
     let (_dir, mut vault) = open();
     let rejected = Draft::new("skill").propose(&mut vault);
     vault.reject("skill", rejected.version, None).unwrap();
@@ -267,7 +269,7 @@ fn cannot_publish_rejected_revisions() {
         .publish("other", sibling.version)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("rejected"), "{error}");
+    assert!(error.contains("superseded"), "{error}");
 }
 
 #[test]
@@ -275,10 +277,10 @@ fn deprecate_hides_from_search_but_get_still_works() {
     let (_dir, mut vault) = open();
     Draft::new("skill").publish(&mut vault);
     vault.set_deprecated("skill", true).unwrap();
-    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
     assert!(vault.get("skill", None, None).is_ok());
     vault.set_deprecated("skill", false).unwrap();
-    assert_eq!(vault.search("", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 1);
     assert!(vault.set_deprecated("missing", true).is_err());
 }
 
@@ -309,7 +311,7 @@ fn global_skill_is_visible_from_every_project() {
     Draft::new("global-skill").publish(&mut vault);
     for project in [None, Some("proja"), Some("projb")] {
         assert_eq!(
-            vault.search("", project, 20).unwrap().total,
+            vault.search("", project, 20, 0).unwrap().total,
             1,
             "project {project:?}"
         );
@@ -321,9 +323,9 @@ fn global_skill_is_visible_from_every_project() {
 fn project_scoped_skill_is_visible_only_to_its_project() {
     let (_dir, mut vault) = open();
     Draft::new("proj-skill").scope("proja").publish(&mut vault);
-    assert_eq!(vault.search("", Some("proja"), 20).unwrap().total, 1);
-    assert_eq!(vault.search("", Some("projb"), 20).unwrap().total, 0);
-    assert_eq!(vault.search("", None, 20).unwrap().total, 0);
+    assert_eq!(vault.search("", Some("proja"), 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("", Some("projb"), 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 0);
     assert!(vault.get("proj-skill", None, Some("proja")).is_ok());
     assert!(vault.get("proj-skill", None, Some("projb")).is_err());
     assert!(vault.get("proj-skill", None, None).is_err());
@@ -372,7 +374,7 @@ fn multi_word_queries_match_when_words_are_not_adjacent() {
         .description("Handles timeout errors")
         .content("retry the flaky network call")
         .publish(&mut vault);
-    assert_eq!(vault.search("timeout flaky", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("timeout flaky", None, 20, 0).unwrap().total, 1);
 }
 
 #[test]
@@ -382,7 +384,7 @@ fn body_content_words_are_searchable() {
         .description("Something else entirely")
         .content("mentions xylophone somewhere in the body")
         .publish(&mut vault);
-    assert_eq!(vault.search("xylophone", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("xylophone", None, 20, 0).unwrap().total, 1);
 }
 
 #[test]
@@ -396,7 +398,7 @@ fn ranking_prefers_id_and_description_matches_over_content_only_matches() {
         .description("Unrelated description")
         .content("uses a widget somewhere")
         .publish(&mut vault);
-    let page = vault.search("widget", None, 20).unwrap();
+    let page = vault.search("widget", None, 20, 0).unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(page.skills[0].id, "widget-cache");
 }
@@ -413,9 +415,9 @@ fn search_tokenizer_ignores_diacritics_prefix_and_case() {
     Draft::new("tests-skill")
         .description("Useful Tests")
         .publish(&mut vault);
-    assert_eq!(vault.search("cafe", None, 20).unwrap().total, 1);
-    assert_eq!(vault.search("deploy", None, 20).unwrap().total, 1);
-    assert_eq!(vault.search("TESTS", None, 20).unwrap().total, 1);
+    assert_eq!(vault.search("cafe", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("deploy", None, 20, 0).unwrap().total, 1);
+    assert_eq!(vault.search("TESTS", None, 20, 0).unwrap().total, 1);
 }
 
 #[test]
@@ -424,7 +426,7 @@ fn fts_special_characters_never_error() {
     Draft::new("skill").publish(&mut vault);
     for query in ["*", "\"", "OR", "NEAR(", "' OR 1=1 --", "AND", "-", "((("] {
         assert!(
-            vault.search(query, None, 20).is_ok(),
+            vault.search(query, None, 20, 0).is_ok(),
             "query {query:?} errored"
         );
     }
@@ -435,7 +437,7 @@ fn empty_query_lists_the_full_catalog_ordered_by_score_then_id() {
     let (_dir, mut vault) = open();
     Draft::new("beta").publish(&mut vault);
     Draft::new("alpha").publish(&mut vault);
-    let page = vault.search("", None, 20).unwrap();
+    let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(
         page.skills
@@ -447,14 +449,23 @@ fn empty_query_lists_the_full_catalog_ordered_by_score_then_id() {
 }
 
 #[test]
-fn search_total_reflects_the_full_match_count_even_when_limited() {
+fn pagination_reports_total_and_has_more_correctly() {
     let (_dir, mut vault) = open();
     for id in ["a", "b", "c"] {
         Draft::new(id).publish(&mut vault);
     }
-    let page = vault.search("", None, 2).unwrap();
+    let page = vault.search("", None, 2, 0).unwrap();
     assert_eq!(page.total, 3);
+    assert!(page.has_more);
     assert_eq!(page.skills.len(), 2);
+    let page = vault.search("", None, 2, 2).unwrap();
+    assert_eq!(page.total, 3);
+    assert!(!page.has_more);
+    assert_eq!(page.skills.len(), 1);
+    let page = vault.search("", None, 2, 99).unwrap();
+    assert_eq!(page.total, 3);
+    assert!(page.skills.is_empty());
+    assert!(!page.has_more);
 }
 
 #[test]
@@ -470,7 +481,7 @@ fn search_never_returns_drafts_or_bodies_and_only_the_latest_published_version()
     Draft::new("hidden-skill")
         .content("never published")
         .propose(&mut vault);
-    let page = vault.search("", None, 20).unwrap();
+    let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.skills[0].id, "skill");
     assert_eq!(page.skills[0].version, v1);
@@ -487,11 +498,12 @@ fn search_never_returns_drafts_or_bodies_and_only_the_latest_published_version()
 }
 
 #[test]
-fn search_validates_limit_and_query_length() {
+fn search_validates_limit_offset_and_query_length() {
     let (_dir, vault) = open();
-    assert!(vault.search("", None, 0).is_err());
-    assert!(vault.search("", None, 101).is_err());
-    assert!(vault.search(&"a".repeat(513), None, 1).is_err());
+    assert!(vault.search("", None, 0, 0).is_err());
+    assert!(vault.search("", None, 101, 0).is_err());
+    assert!(vault.search("", None, 1, -1).is_err());
+    assert!(vault.search(&"a".repeat(513), None, 1, 0).is_err());
 }
 
 // --- outcomes ------------------------------------------------------------
@@ -525,7 +537,7 @@ fn record_outcome_rejects_invalid_result() {
 }
 
 #[test]
-fn search_metadata_and_outcome_summaries_reset_on_new_published_version() {
+fn search_metadata_counts_reset_on_new_published_version_and_support_failing_filter() {
     let (_dir, mut vault) = open();
     let v1 = Draft::new("skill").publish(&mut vault);
     vault
@@ -534,13 +546,13 @@ fn search_metadata_and_outcome_summaries_reset_on_new_published_version() {
     vault
         .record_outcome("skill", v1, "failed", "n", None)
         .unwrap();
-    let page = vault.search("", None, 20).unwrap();
+    let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!((page.skills[0].helped, page.skills[0].failed), (1, 1));
-    let summaries = vault.outcome_summaries().unwrap();
-    assert_eq!((summaries[0].helped, summaries[0].failed), (1, 1));
+    assert_eq!(vault.outcome_summaries(true).unwrap().len(), 1);
+    assert_eq!(vault.outcome_summaries(false).unwrap().len(), 1);
 
     let v2 = Draft::new("skill").expected_version(1).publish(&mut vault);
-    let page = vault.search("", None, 20).unwrap();
+    let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(
         (
             page.skills[0].version,
@@ -549,8 +561,7 @@ fn search_metadata_and_outcome_summaries_reset_on_new_published_version() {
         ),
         (v2, 0, 0)
     );
-    let summaries = vault.outcome_summaries().unwrap();
-    assert_eq!((summaries[0].helped, summaries[0].failed), (0, 0));
+    assert!(vault.outcome_summaries(true).unwrap().is_empty());
 }
 
 #[test]
@@ -567,4 +578,21 @@ fn outcomes_returns_the_full_log_for_a_skill_newest_first() {
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].note, "second");
     assert_eq!(log[1].note, "first");
+}
+
+// --- migration -----------------------------------------------------------
+
+#[test]
+fn refuses_to_migrate_a_pre_1_schema_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE revisions (id TEXT PRIMARY KEY);")
+        .unwrap();
+    drop(conn);
+    let error = match Vault::open(&path) {
+        Ok(_) => panic!("expected the pre-1 schema to be refused"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("pre-1 schema"), "{error}");
 }

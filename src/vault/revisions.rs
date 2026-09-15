@@ -5,8 +5,9 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const REVISION_SELECT: &str = "SELECT r.id, r.version, s.scope, r.description, r.tags, r.content,
-    r.evidence, r.expected_version, r.status, r.created_at, r.review_note
+    r.evidence, r.expected_version, r.status, r.created_at, r.reviewed_at, r.review_note
     FROM revisions r JOIN skills s ON s.id = r.id";
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Revision {
@@ -20,6 +21,7 @@ pub struct Revision {
     pub expected_version: i64,
     pub status: String,
     pub created_at: String,
+    pub reviewed_at: Option<String>,
     pub review_note: Option<String>,
 }
 
@@ -56,7 +58,8 @@ fn revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Revision> {
         expected_version: row.get(7)?,
         status: row.get(8)?,
         created_at: row.get(9)?,
-        review_note: row.get(10)?,
+        reviewed_at: row.get(10)?,
+        review_note: row.get(11)?,
     })
 }
 
@@ -143,7 +146,7 @@ impl Vault {
         let revision = tx.query_row(
             "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             RETURNING description, tags, content, evidence, status, created_at, review_note",
+             RETURNING description, tags, content, evidence, status, created_at, reviewed_at, review_note",
             params![id, version, description, join_tags(tags), content, evidence, expected_version],
             |row| {
                 Ok(Revision {
@@ -157,7 +160,8 @@ impl Vault {
                     expected_version,
                     status: row.get(4)?,
                     created_at: row.get(5)?,
-                    review_note: row.get(6)?,
+                    reviewed_at: row.get(6)?,
+                    review_note: row.get(7)?,
                 })
             },
         )?;
@@ -166,7 +170,7 @@ impl Vault {
     }
 
     /// Publishes a draft and returns its version. Same-base sibling drafts are
-    /// marked rejected (not re-read: callers only need the published version).
+    /// marked superseded (not re-read: callers only need the published version).
     pub fn publish(&mut self, id: &str, version: i64) -> Result<i64> {
         let tx = self
             .conn
@@ -184,12 +188,16 @@ impl Vault {
             revision.expected_version
         );
         tx.execute(
-            "UPDATE revisions SET status = 'published' WHERE id = ?1 AND version = ?2",
+            &format!(
+                "UPDATE revisions SET status = 'published', reviewed_at = {NOW} WHERE id = ?1 AND version = ?2"
+            ),
             params![id, version],
         )?;
         tx.execute(
-            "UPDATE revisions SET status = 'rejected', review_note = ?2
-             WHERE id = ?1 AND status = 'draft' AND expected_version = ?3",
+            &format!(
+                "UPDATE revisions SET status = 'superseded', reviewed_at = {NOW}, review_note = ?2
+                 WHERE id = ?1 AND status = 'draft' AND expected_version = ?3"
+            ),
             params![
                 id,
                 format!("superseded by published version {version}"),
@@ -224,7 +232,9 @@ impl Vault {
             revision.status
         );
         tx.execute(
-            "UPDATE revisions SET status = 'rejected', review_note = ?3 WHERE id = ?1 AND version = ?2",
+            &format!(
+                "UPDATE revisions SET status = 'rejected', reviewed_at = {NOW}, review_note = ?3 WHERE id = ?1 AND version = ?2"
+            ),
             params![id, version, note],
         )?;
         tx.commit()?;

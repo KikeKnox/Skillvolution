@@ -29,10 +29,11 @@
 - **skills**(`id`, `scope`, `deprecated`) — `scope` is `NULL` (global) or a project key, fixed on
   the skill's first proposal. `deprecated` hides it from search without deleting history.
 - **revisions**(`id`, `version`, `description`, `tags`, `content`, `evidence`,
-  `expected_version`, `status`, `created_at`, `review_note`) — `status` is `draft`, `published`, or
-  `rejected`. `expected_version` names the published version a proposal was based on (`0` for a new
-  skill); publishing checks it still matches and rejects any other draft sharing that same base,
-  with a `review_note` noting which version superseded it.
+  `expected_version`, `status`, `created_at`, `reviewed_at`, `review_note`) — `status` is `draft`,
+  `published`, `rejected`, or `superseded`. `expected_version` names the published version a proposal
+  was based on (`0` for a new skill); publishing checks it still matches and marks any other draft
+  sharing that same base as `superseded` with a `review_note` noting the published version that
+  superseded them. `reviewed_at` records when a revision was published or rejected.
 - **outcomes**(`id`, `version`, `result`, `note`, `project`, `created_at`) — `result` is `helped`,
   `failed`, or `not_applicable`; only recordable against a published revision visible to `project`.
 - **hook_state**(`session_id`, `transcript_offset`) — the byte offset each Claude Code session's
@@ -44,12 +45,15 @@
 - **current_skills** — a view joining each skill to its latest published revision and outcome
   counts; backs search and the outcome summary.
 - The schema is versioned with SQLite's `user_version` pragma. A fresh database is initialized to
-  the current version; a database already there is left alone; any other version fails to open.
+  the current version; a database at the current version is left alone; a database with a pre-1
+  schema is refused with a clear message to move it aside and create a new one; any other version
+  fails to open with an upgrade prompt.
 
 ## MCP tools
 
-- `search_skills(query, limit)` — search published skill metadata; an empty query lists the
-  catalog. Bodies are never returned.
+- `search_skills(query, limit, offset)` — search published skill metadata; an empty query lists the
+  catalog. Returns `skills` (metadata only), `total` count, and `has_more` flag for pagination.
+  Bodies are never returned.
 - `get_skill(id, version?)` — fetch one published skill's body, defaulting to its latest version.
 - `report_skill_outcome(id, version, result, note)` — record whether an applied skill helped.
 - `propose_skill_change(id, description, tags?, content, evidence, expected_version, scope?)` —
