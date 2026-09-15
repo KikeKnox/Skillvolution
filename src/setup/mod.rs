@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const SKILL: &str = include_str!("../assets/evolution/SKILL.md");
+const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 const OWNER: &str = "<!-- skillvolution-managed:evolution:v1 -->";
 const START: &str = "<!-- skillvolution:evolution:start -->";
 const END: &str = "<!-- skillvolution:evolution:end -->";

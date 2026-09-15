@@ -1,34 +1,32 @@
-use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
-use std::{
-    io::{BufRead, Write},
-    path::{Path, PathBuf},
-};
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::io::{BufRead, Write};
 
-use crate::vault::Vault;
+use crate::vault::{Proposal, Vault};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_NAME: &str = "skillvolution";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn tools() -> Vec<Value> {
-    vec![
-        json!({
+fn tools() -> Value {
+    json!([
+        {
             "name": "search_skills",
-            "description": "List published skill metadata whose id or description contains the query. The full skill body is never returned; use get_skill to retrieve a specific revision.",
+            "description": "Search the shared skill vault before starting a non-trivial task. Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance. Returns metadata only (id, version, description, tags, helped/failed counts); call get_skill for the body. An empty query lists the catalog.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Free-text substring; empty string lists the entire catalog"},
+                    "query": {"type": "string", "description": "Keywords such as technology, action, and symptom, e.g. 'cargo flaky test timeout'"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
                     "offset": {"type": "integer", "minimum": 0, "default": 0}
                 },
                 "additionalProperties": false
             }
-        }),
-        json!({
+        },
+        {
             "name": "get_skill",
-            "description": "Retrieve one published skill revision by id, optionally at an exact integer version. Drafts are not exposed.",
+            "description": "Load the body of one published skill that matched your task. Defaults to the latest published version.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -38,254 +36,249 @@ fn tools() -> Vec<Value> {
                 "required": ["id"],
                 "additionalProperties": false
             }
-        }),
-        json!({
-            "name": "propose_skill_change",
-            "description": "Store an immutable draft revision with supplied evidence. Agents must never publish drafts; a human reviews and runs `skillvolution publish`. `expected_version` must equal the current published version (0 for a new skill) or the proposal is rejected as stale.",
+        },
+        {
+            "name": "report_skill_outcome",
+            "description": "After applying a skill loaded with get_skill, record whether it helped. Failures with a concrete note are the most valuable signal for improving skills.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "description": {"type": "string"},
-                    "content": {"type": "string"},
-                    "evidence": {"type": "string"},
-                    "expected_version": {"type": "integer", "minimum": 0}
+                    "version": {"type": "integer", "minimum": 1},
+                    "result": {"type": "string", "enum": ["helped", "failed", "not_applicable"]},
+                    "note": {"type": "string", "description": "What happened when the skill was applied; for failures, which step was wrong and why"}
+                },
+                "required": ["id", "version", "result", "note"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "propose_skill_change",
+            "description": "Store a draft of a new skill or a complete replacement of an existing one, for human review. Only propose verified, reusable, non-obvious lessons. Drafts are never visible to agents until a human publishes them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Stable lowercase-hyphenated id, e.g. 'rust-sqlite-busy-timeout'"},
+                    "description": {"type": "string", "description": "One line starting with 'Use when', naming the situation that should trigger the skill"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                    "content": {"type": "string", "description": "Full markdown body with sections: When to use, Procedure, Pitfalls, Verification"},
+                    "evidence": {"type": "string", "description": "Observed / Tried / Result: what actually happened in this session"},
+                    "expected_version": {"type": "integer", "minimum": 0, "description": "Current published version of the skill, or 0 for a new skill"},
+                    "scope": {"type": "string", "enum": ["global", "project"], "default": "global", "description": "project when the lesson only applies to this repository"}
                 },
                 "required": ["id", "description", "content", "evidence", "expected_version"],
                 "additionalProperties": false
             }
-        }),
-    ]
+        }
+    ])
 }
 
-pub fn serve(database: PathBuf) -> Result<()> {
-    let vault = Vault::open(&database)?;
-    let database_for_writes = database;
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut input = stdin.lock();
-    let mut output = stdout.lock();
-    let mut initialized = false;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    #[serde(default)]
+    query: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
 
-    let mut buffer = String::new();
-    loop {
-        buffer.clear();
-        let read = input
-            .read_line(&mut buffer)
-            .context("reading MCP request line")?;
-        if read == 0 {
-            return Ok(());
-        }
-        let trimmed = buffer.trim();
-        if trimmed.is_empty() {
+fn default_limit() -> i64 {
+    20
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetArgs {
+    id: String,
+    version: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutcomeArgs {
+    id: String,
+    version: i64,
+    result: String,
+    note: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeArgs {
+    id: String,
+    description: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    content: String,
+    evidence: String,
+    expected_version: i64,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+struct Server {
+    vault: Vault,
+    project: Option<String>,
+    client: Option<String>,
+    initialized: bool,
+}
+
+pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
+    let mut server = Server {
+        vault,
+        project,
+        client: None,
+        initialized: false,
+    };
+    let mut output = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.context("reading MCP request line")?;
+        if line.trim().is_empty() {
             continue;
         }
-        let request: Value = match serde_json::from_str(trimmed) {
+        let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
-                write_error(&mut output, None, -32700, &format!("parse error: {error}"))?;
+                write_message(&mut output, &error_message(Value::Null, -32700, &format!("parse error: {error}")))?;
                 continue;
             }
         };
-        let id = request.get("id").cloned();
-        if id.is_none() {
+        let Some(id) = request.get("id").cloned() else {
             continue;
-        }
-        let id = id.unwrap();
-        let method = match request.get("method").and_then(Value::as_str) {
-            Some(method) => method.to_string(),
-            None => {
-                write_error(&mut output, Some(id), -32600, "missing method")?;
-                continue;
-            }
+        };
+        let Some(method) = request.get("method").and_then(Value::as_str) else {
+            write_message(&mut output, &error_message(id, -32600, "missing method"))?;
+            continue;
         };
         let params = request.get("params").cloned().unwrap_or(Value::Null);
-        match dispatch(&vault, &database_for_writes, &mut initialized, &method, params, id) {
-            Outcome::Reply { id, result } => {
-                write_response(&mut output, Some(&id), result)?;
-            }
-            Outcome::Error { id, code, message } => {
-                write_error(&mut output, Some(id), code, &message)?;
-            }
-        }
+        let reply = match server.dispatch(method, params) {
+            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err((code, message)) => error_message(id, code, &message),
+        };
+        write_message(&mut output, &reply)?;
     }
-}
-
-enum Outcome {
-    Reply {
-        id: Value,
-        result: Value,
-    },
-    Error {
-        id: Value,
-        code: i32,
-        message: String,
-    },
-}
-
-fn dispatch(
-    vault: &Vault,
-    database: &Path,
-    initialized: &mut bool,
-    method: &str,
-    params: Value,
-    id: Value,
-) -> Outcome {
-    match method {
-        "initialize" => {
-            *initialized = true;
-            Outcome::Reply {
-                id,
-                result: json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "capabilities": {"tools": {"listChanged": false}}
-                }),
-            }
-        }
-        "ping" => Outcome::Reply { id, result: json!({}) },
-        "tools/list" => {
-            if !*initialized {
-                return Outcome::Error {
-                    id,
-                    code: -32002,
-                    message: "server not initialized".to_string(),
-                };
-            }
-            Outcome::Reply {
-                id,
-                result: json!({ "tools": tools() }),
-            }
-        }
-        "tools/call" => {
-            if !*initialized {
-                return Outcome::Error {
-                    id,
-                    code: -32002,
-                    message: "server not initialized".to_string(),
-                };
-            }
-            match handle_tool_call(vault, database, params) {
-                Ok(result) => Outcome::Reply { id, result },
-                Err(error) => Outcome::Reply {
-                    id,
-                    result: tool_error(&error.to_string()),
-                },
-            }
-        }
-        _ => Outcome::Error {
-            id,
-            code: -32601,
-            message: format!("method not found: {method}"),
-        },
-    }
-}
-
-fn handle_tool_call(vault: &Vault, database: &Path, params: Value) -> Result<Value> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing tool name"))?;
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| Value::Object(Default::default()));
-    match name {
-        "search_skills" => call_search(vault, arguments),
-        "get_skill" => call_get(vault, arguments),
-        "propose_skill_change" => call_propose(database, arguments),
-        other => bail!("unknown tool: {other}"),
-    }
-}
-
-fn call_search(vault: &Vault, arguments: Value) -> Result<Value> {
-    let query = arguments
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let limit = arguments.get("limit").and_then(Value::as_i64).unwrap_or(20);
-    let offset = arguments.get("offset").and_then(Value::as_i64).unwrap_or(0);
-    let page = vault.search(query, limit, offset)?;
-    text_reply(serde_json::to_value(&page)?)
-}
-
-fn call_get(vault: &Vault, arguments: Value) -> Result<Value> {
-    let id = arguments
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing id"))?;
-    let version = arguments.get("version").and_then(Value::as_i64);
-    let revision = vault.get(id, version)?;
-    text_reply(serde_json::to_value(&revision)?)
-}
-
-fn call_propose(database: &Path, arguments: Value) -> Result<Value> {
-    let id = arguments
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing id"))?;
-    let description = arguments
-        .get("description")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing description"))?;
-    let content = arguments
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing content"))?;
-    let evidence = arguments
-        .get("evidence")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing evidence"))?;
-    let expected_version = arguments
-        .get("expected_version")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("missing expected_version"))?;
-    let mut owned = Vault::open(database)?;
-    let revision = owned.propose(id, description, content, evidence, expected_version)?;
-    text_reply(serde_json::to_value(&revision)?)
-}
-
-fn text_reply(value: Value) -> Result<Value> {
-    let text = serde_json::to_string(&value)?;
-    Ok(json!({
-        "content": [{"type": "text", "text": text}],
-        "isError": false,
-    }))
-}
-
-fn tool_error(message: &str) -> Value {
-    json!({
-        "content": [{"type": "text", "text": message}],
-        "isError": true,
-    })
-}
-
-fn write_response<W: Write>(output: &mut W, id: Option<&Value>, result: Value) -> Result<()> {
-    let payload = json!({
-        "jsonrpc": "2.0",
-        "id": id.cloned().unwrap_or(Value::Null),
-        "result": result,
-    });
-    let line = serde_json::to_string(&payload)?;
-    output.write_all(line.as_bytes())?;
-    output.write_all(b"\n")?;
-    output.flush()?;
     Ok(())
 }
 
-fn write_error<W: Write>(
-    output: &mut W,
-    id: Option<Value>,
-    code: i32,
-    message: &str,
-) -> Result<()> {
-    let payload = json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "error": {"code": code, "message": message},
-    });
-    let line = serde_json::to_string(&payload)?;
-    output.write_all(line.as_bytes())?;
+impl Server {
+    fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, (i32, String)> {
+        match method {
+            "initialize" => Ok(self.initialize(&params)),
+            "ping" => Ok(json!({})),
+            "tools/list" | "tools/call" if !self.initialized => {
+                Err((-32002, "server not initialized".to_owned()))
+            }
+            "tools/list" => Ok(json!({"tools": tools()})),
+            "tools/call" => Ok(match self.call(params) {
+                Ok(value) => json!({
+                    "content": [{"type": "text", "text": value.to_string()}],
+                    "structuredContent": value,
+                    "isError": false,
+                }),
+                Err(error) => json!({
+                    "content": [{"type": "text", "text": format!("{error:#}")}],
+                    "isError": true,
+                }),
+            }),
+            _ => Err((-32601, format!("method not found: {method}"))),
+        }
+    }
+
+    fn initialize(&mut self, params: &Value) -> Value {
+        self.initialized = true;
+        self.client = params
+            .pointer("/clientInfo/name")
+            .and_then(Value::as_str)
+            .map(|name| name.chars().filter(|c| !c.is_control()).take(128).collect())
+            .filter(|name: &String| !name.trim().is_empty());
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let version = PROTOCOL_VERSIONS
+            .into_iter()
+            .find(|supported| Some(*supported) == requested)
+            .unwrap_or(PROTOCOL_VERSIONS[0]);
+        json!({
+            "protocolVersion": version,
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "capabilities": {"tools": {"listChanged": false}}
+        })
+    }
+
+    fn call(&mut self, params: Value) -> Result<Value> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .context("missing tool name")?;
+        let arguments = match params.get("arguments") {
+            None | Some(Value::Null) => json!({}),
+            Some(arguments) => arguments.clone(),
+        };
+        let project = self.project.as_deref();
+        let client = self.client.as_deref();
+        let parse_error = |error| anyhow::anyhow!("invalid arguments for {name}: {error}");
+        match name {
+            "search_skills" => {
+                let args: SearchArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+                let page = self.vault.search(&args.query, project, args.limit, args.offset)?;
+                Ok(serde_json::to_value(page)?)
+            }
+            "get_skill" => {
+                let args: GetArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+                Ok(serde_json::to_value(self.vault.get(&args.id, args.version, project)?)?)
+            }
+            "report_skill_outcome" => {
+                let args: OutcomeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+                self.vault.get(&args.id, Some(args.version), project)?;
+                let record = self.vault.record_outcome(
+                    &args.id,
+                    args.version,
+                    &args.result,
+                    &args.note,
+                    client,
+                    project,
+                )?;
+                Ok(serde_json::to_value(record)?)
+            }
+            "propose_skill_change" => {
+                let args: ProposeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+                let scope = match args.scope.as_deref() {
+                    None | Some("global") => None,
+                    Some("project") => Some(project.context(
+                        "this server has no project key; use scope global or rerun setup",
+                    )?),
+                    Some(other) => bail!("scope must be global or project, not {other:?}"),
+                };
+                let revision = self.vault.propose(&Proposal {
+                    id: &args.id,
+                    description: &args.description,
+                    tags: &args.tags,
+                    content: &args.content,
+                    evidence: &args.evidence,
+                    expected_version: args.expected_version,
+                    scope,
+                    client,
+                })?;
+                Ok(json!({
+                    "id": revision.id,
+                    "version": revision.version,
+                    "status": revision.status,
+                    "expected_version": revision.expected_version,
+                    "scope": revision.scope,
+                    "next": "Tell the user a draft awaits human review: skillvolution diff ID --version N, then publish or reject. Never publish it yourself."
+                }))
+            }
+            other => bail!("unknown tool: {other}"),
+        }
+    }
+}
+
+fn error_message(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+fn write_message(output: &mut impl Write, message: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *output, message)?;
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
