@@ -26,7 +26,7 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
-fn drafts_and_show_expose_pending_revisions() {
+fn show_exposes_a_published_revision() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
@@ -35,24 +35,11 @@ fn drafts_and_show_expose_pending_revisions() {
         .propose(&mut vault);
     drop(vault);
 
-    let listed = run(&db, &["drafts", "--json"]);
-    assert_success(&listed);
-    let drafts: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(drafts[0]["id"], "example");
-    assert_eq!(drafts[0]["version"], 1);
-    assert_eq!(drafts[0]["status"], "draft");
-
-    let table = run(&db, &["drafts"]);
-    assert_success(&table);
-    let table_out = String::from_utf8_lossy(&table.stdout);
-    assert!(table_out.contains("example"));
-    assert!(table_out.contains("Use when testing"));
-
     let shown = run(&db, &["show", "example", "--version", "1"]);
     assert_success(&shown);
     let shown_out = String::from_utf8_lossy(&shown.stdout);
     assert!(shown_out.contains("example v1"));
-    assert!(shown_out.contains("draft"));
+    assert!(shown_out.contains("published"));
     assert!(shown_out.contains("Observed / Tried / Result"));
     assert!(shown_out.contains("+description"));
 
@@ -60,43 +47,15 @@ fn drafts_and_show_expose_pending_revisions() {
     assert_success(&shown_json);
     let shown_json: serde_json::Value = serde_json::from_slice(&shown_json.stdout).unwrap();
     assert_eq!(shown_json["id"], "example");
-    assert_eq!(shown_json["status"], "draft");
+    assert_eq!(shown_json["status"], "published");
 }
 
 #[test]
-fn publish_reject_deprecate_undeprecate_workflow() {
+fn deprecate_undeprecate_workflow() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
-    Draft::new("published-skill").propose(&mut vault);
-    Draft::new("rejected-skill").propose(&mut vault);
-    drop(vault);
-
-    let published = run(&db, &["publish", "published-skill", "--version", "1"]);
-    assert_success(&published);
-    assert!(String::from_utf8_lossy(&published.stdout).contains("Published published-skill v1"));
-    let vault = Vault::open(&db).unwrap();
-    assert!(vault.get("published-skill", None, None).is_ok());
-    drop(vault);
-
-    let rejected = run(
-        &db,
-        &[
-            "reject",
-            "rejected-skill",
-            "--version",
-            "1",
-            "--note",
-            "not reusable",
-        ],
-    );
-    assert_success(&rejected);
-    assert!(String::from_utf8_lossy(&rejected.stdout).contains("Rejected rejected-skill v1"));
-    let vault = Vault::open(&db).unwrap();
-    assert_eq!(
-        vault.inspect("rejected-skill", 1).unwrap().status,
-        "rejected"
-    );
+    Draft::new("published-skill").publish(&mut vault);
     drop(vault);
 
     let deprecated = run(&db, &["deprecate", "published-skill"]);
@@ -157,8 +116,6 @@ fn cli_error_cases_produce_stderr_and_no_stdout() {
 
     for args in [
         vec!["show", "missing", "--version", "1"],
-        vec!["publish", "example", "--version", "1"],
-        vec!["reject", "example", "--version", "1"],
         vec!["deprecate", "missing-skill"],
         vec!["outcomes", "example", "--failing"],
     ] {
@@ -192,7 +149,7 @@ fn default_database_respects_xdg_then_home() {
         let dir = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         command
-            .arg("drafts")
+            .arg("outcomes")
             .env("HOME", dir.path())
             .env_remove("XDG_DATA_HOME");
         let base = if use_xdg {
@@ -286,7 +243,7 @@ fn opening_the_database_is_idempotent_with_a_global_path() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("space directory/skills.db");
     for _ in 0..2 {
-        let result = run(&db, &["drafts"]);
+        let result = run(&db, &["outcomes"]);
         assert_success(&result);
         assert!(result.stderr.is_empty());
     }

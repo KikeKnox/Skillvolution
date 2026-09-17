@@ -146,8 +146,8 @@ impl Vault {
             |row| row.get(0),
         )?;
         let revision = tx.query_row(
-            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'published')
              RETURNING description, tags, content, evidence, status, created_at, reviewed_at, review_note",
             params![id, version, description, join_tags(tags), content, evidence, expected_version],
             |row| {
@@ -167,34 +167,9 @@ impl Vault {
                 })
             },
         )?;
-        tx.commit()?;
-        Ok(revision)
-    }
-
-    /// Publishes a draft and returns its version. Same-base sibling drafts are
-    /// marked superseded (not re-read: callers only need the published version).
-    pub fn publish(&mut self, id: &str, version: i64) -> Result<i64> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let revision = load(&tx, id, version)?;
-        ensure!(
-            revision.status == "draft",
-            "revision {id} version {version} is {}, not a draft",
-            revision.status
-        );
-        let current = current_version(&tx, id)?;
-        ensure!(
-            current == revision.expected_version,
-            "stale base: draft expects {}, current published version is {current}",
-            revision.expected_version
-        );
-        tx.execute(
-            &format!(
-                "UPDATE revisions SET status = 'published', reviewed_at = {NOW} WHERE id = ?1 AND version = ?2"
-            ),
-            params![id, version],
-        )?;
+        // Drafts can no longer be created, but a database from before that
+        // change may still hold some; publishing over their shared base
+        // supersedes them so they never linger as publishable candidates.
         tx.execute(
             &format!(
                 "UPDATE revisions SET status = 'superseded', reviewed_at = {NOW}, review_note = ?2
@@ -203,7 +178,7 @@ impl Vault {
             params![
                 id,
                 format!("superseded by published version {version}"),
-                revision.expected_version
+                expected_version
             ],
         )?;
         tx.execute("DELETE FROM skills_fts WHERE id = ?1", [id])?;
@@ -217,30 +192,7 @@ impl Vault {
             ],
         )?;
         tx.commit()?;
-        Ok(version)
-    }
-
-    pub fn reject(&mut self, id: &str, version: i64, note: Option<&str>) -> Result<i64> {
-        if let Some(note) = note {
-            validate_text("note", note, 2_048)?;
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let revision = load(&tx, id, version)?;
-        ensure!(
-            revision.status == "draft",
-            "revision {id} version {version} is {}, not a draft",
-            revision.status
-        );
-        tx.execute(
-            &format!(
-                "UPDATE revisions SET status = 'rejected', reviewed_at = {NOW}, review_note = ?3 WHERE id = ?1 AND version = ?2"
-            ),
-            params![id, version, note],
-        )?;
-        tx.commit()?;
-        Ok(version)
+        Ok(revision)
     }
 
     pub fn get(&self, id: &str, version: Option<i64>, project: Option<&str>) -> Result<SkillView> {
@@ -275,15 +227,6 @@ impl Vault {
 
     pub fn inspect(&self, id: &str, version: i64) -> Result<Revision> {
         load(&self.conn, id, version)
-    }
-
-    pub fn drafts(&self) -> Result<Vec<Revision>> {
-        let mut statement = self.conn.prepare(&format!(
-            "{REVISION_SELECT} WHERE r.status = 'draft' ORDER BY r.id, r.version"
-        ))?;
-        Ok(statement
-            .query_map([], revision_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn diff(&self, id: &str, version: i64) -> Result<String> {

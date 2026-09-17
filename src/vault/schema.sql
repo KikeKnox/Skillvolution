@@ -36,6 +36,14 @@ CREATE TABLE hook_state (
     transcript_offset INTEGER NOT NULL
 );
 
+-- Devin hook payloads carry no transcript path, so worked/reviewed flags are
+-- tracked per session instead of scanning the transcript like the Claude hook.
+CREATE TABLE devin_hook_state (
+    session_id TEXT PRIMARY KEY,
+    worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
+    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
+);
+
 CREATE VIRTUAL TABLE skills_fts USING fts5(
     id, description, tags, content,
     tokenize = 'unicode61 remove_diacritics 2'

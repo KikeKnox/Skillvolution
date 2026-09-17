@@ -13,18 +13,17 @@ fn open() -> (tempfile::TempDir, Vault) {
 // --- validation --------------------------------------------------------
 
 #[test]
-fn get_inspect_and_publish_return_not_found_for_unknown_ids() {
-    let (_dir, mut vault) = open();
+fn get_and_inspect_return_not_found_for_unknown_ids() {
+    let (_dir, vault) = open();
     for id in ["missing", "unknown-id"] {
         assert!(vault.get(id, None, None).is_err());
         assert!(vault.inspect(id, 1).is_err());
-        assert!(vault.publish(id, 1).is_err());
     }
 }
 
 #[test]
-fn get_inspect_publish_outcomes_and_deprecate_reject_malformed_ids() {
-    let (_dir, mut vault) = open();
+fn get_inspect_outcomes_and_deprecate_reject_malformed_ids() {
+    let (_dir, vault) = open();
     let bad_id = "Upper";
     assert!(
         vault
@@ -36,13 +35,6 @@ fn get_inspect_publish_outcomes_and_deprecate_reject_malformed_ids() {
     assert!(
         vault
             .inspect(bad_id, 1)
-            .unwrap_err()
-            .to_string()
-            .contains("id must")
-    );
-    assert!(
-        vault
-            .publish(bad_id, 1)
             .unwrap_err()
             .to_string()
             .contains("id must")
@@ -64,8 +56,8 @@ fn get_inspect_publish_outcomes_and_deprecate_reject_malformed_ids() {
 }
 
 #[test]
-fn get_inspect_and_publish_reject_non_positive_versions() {
-    let (_dir, mut vault) = open();
+fn get_and_inspect_reject_non_positive_versions() {
+    let (_dir, vault) = open();
     assert!(
         vault
             .get("valid-id", Some(0), None)
@@ -76,13 +68,6 @@ fn get_inspect_and_publish_reject_non_positive_versions() {
     assert!(
         vault
             .inspect("valid-id", 0)
-            .unwrap_err()
-            .to_string()
-            .contains("version must")
-    );
-    assert!(
-        vault
-            .publish("valid-id", 0)
             .unwrap_err()
             .to_string()
             .contains("version must")
@@ -174,21 +159,7 @@ fn rejects_invalid_tags_and_keeps_valid_ones_in_order() {
 // --- lifecycle -----------------------------------------------------------
 
 #[test]
-fn drafts_lists_only_unpublished_revisions_in_stable_order() {
-    let (_dir, mut vault) = open();
-    assert!(vault.drafts().unwrap().is_empty());
-    Draft::new("beta").propose(&mut vault);
-    Draft::new("alpha").publish(&mut vault);
-    Draft::new("alpha").expected_version(1).propose(&mut vault);
-    let drafts = vault.drafts().unwrap();
-    assert_eq!(drafts.len(), 2);
-    assert_eq!((&*drafts[0].id, drafts[0].version), ("alpha", 2));
-    assert_eq!(drafts[1].id, "beta");
-    assert!(drafts.iter().all(|r| r.status == "draft"));
-}
-
-#[test]
-fn proposals_are_immutable_persistent_draft_revisions() {
+fn proposals_are_immutable_persistent_published_revisions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
@@ -198,13 +169,14 @@ fn proposals_are_immutable_persistent_draft_revisions() {
         .evidence("Passed locally")
         .propose(&mut vault);
     let second = Draft::new("rust-tests")
+        .expected_version(1)
         .description("Run better tests")
         .content("Run cargo test --all-targets")
         .evidence("Passed twice")
         .propose(&mut vault);
     assert_eq!(first.version, 1);
     assert_eq!(second.version, 2);
-    assert_eq!(first.status, "draft");
+    assert_eq!(first.status, "published");
     assert_eq!(first.expected_version, 0);
     drop(vault);
     let vault = Vault::open(&path).unwrap();
@@ -213,7 +185,7 @@ fn proposals_are_immutable_persistent_draft_revisions() {
 }
 
 #[test]
-fn publication_exposes_only_published_revisions_and_keeps_history() {
+fn proposals_publish_immediately_and_keep_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
@@ -222,9 +194,6 @@ fn publication_exposes_only_published_revisions_and_keeps_history() {
         .content("First body")
         .evidence("First evidence")
         .propose(&mut vault);
-    assert!(vault.get("rust-tests", None, None).is_err());
-    assert!(vault.get("rust-tests", Some(1), None).is_err());
-    vault.publish("rust-tests", 1).unwrap();
     assert!(vault.get("rust-tests", None, None).is_ok());
     Draft::new("rust-tests")
         .expected_version(1)
@@ -232,9 +201,7 @@ fn publication_exposes_only_published_revisions_and_keeps_history() {
         .content("Second body")
         .evidence("Second evidence")
         .propose(&mut vault);
-    assert_eq!(vault.get("rust-tests", None, None).unwrap().version, 1);
-    assert!(vault.get("rust-tests", Some(2), None).is_err());
-    vault.publish("rust-tests", 2).unwrap();
+    assert_eq!(vault.get("rust-tests", None, None).unwrap().version, 2);
     drop(vault);
     let vault = Vault::open(&path).unwrap();
     assert_eq!(vault.get("rust-tests", None, None).unwrap().version, 2);
@@ -254,87 +221,47 @@ fn stale_bases_never_overwrite_a_publication() {
             .is_err()
     );
     let first = Draft::new("skill").description("First").propose(&mut vault);
-    let competing = Draft::new("skill")
-        .description("Competing")
-        .propose(&mut vault);
-    vault.publish("skill", first.version).unwrap();
-    assert!(vault.publish("skill", competing.version).is_err());
+    // A competing proposal on the same base fails: v1 is already published.
+    assert!(
+        vault
+            .propose(&Draft::new("skill").description("Competing").proposal())
+            .is_err()
+    );
     assert_eq!(
         vault.get("skill", None, None).unwrap().version,
         first.version
     );
-    assert!(
-        vault
-            .propose(&Draft::new("skill").description("Stale").proposal())
-            .is_err()
-    );
-    assert!(vault.publish("skill", first.version).is_err());
     let fresh = Draft::new("skill")
         .expected_version(1)
         .description("Fresh")
         .propose(&mut vault);
-    assert_eq!(fresh.version, 3);
-    vault.publish("skill", fresh.version).unwrap();
-    assert!(vault.publish("skill", competing.version).is_err());
+    assert_eq!(fresh.version, 2);
 }
 
 #[test]
-fn publishing_supersedes_only_drafts_sharing_its_base() {
-    let (_dir, mut vault) = open();
-    let sibling = Draft::new("skill")
-        .description("Sibling draft")
-        .propose(&mut vault);
-    let winner = Draft::new("skill")
-        .description("Winning draft")
-        .propose(&mut vault);
-    vault.publish("skill", winner.version).unwrap();
-    let rebased = Draft::new("skill")
-        .expected_version(winner.version)
-        .description("Rebased draft")
-        .propose(&mut vault);
-    let superseded = vault.inspect("skill", sibling.version).unwrap();
+fn publishing_supersedes_legacy_drafts_sharing_its_base() {
+    // Databases from before proposals auto-published can still hold drafts;
+    // publishing over their shared base marks them superseded.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO skills (id) VALUES ('skill');
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
+         VALUES ('skill', 1, 'Legacy draft', '', 'body', 'evidence', 0);
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
+         VALUES ('skill', 2, 'Rebased draft', '', 'body', 'evidence', 0);",
+    )
+    .unwrap();
+    drop(conn);
+    let revision = Draft::new("skill").propose(&mut vault);
+    assert_eq!(revision.version, 3);
+    let superseded = vault.inspect("skill", 1).unwrap();
     assert_eq!(superseded.status, "superseded");
     assert!(superseded.review_note.unwrap().contains("superseded"));
     assert!(superseded.reviewed_at.is_some());
-    assert_eq!(
-        vault.inspect("skill", rebased.version).unwrap().status,
-        "draft"
-    );
-}
-
-#[test]
-fn reject_sets_status_and_note_and_blocks_publish() {
-    let (_dir, mut vault) = open();
-    let draft = Draft::new("skill").propose(&mut vault);
-    let version = vault
-        .reject("skill", draft.version, Some("not reusable"))
-        .unwrap();
-    let rejected = vault.inspect("skill", version).unwrap();
-    assert_eq!(rejected.status, "rejected");
-    assert_eq!(rejected.review_note.as_deref(), Some("not reusable"));
-    assert!(rejected.reviewed_at.is_some());
-    assert!(vault.publish("skill", draft.version).is_err());
-}
-
-#[test]
-fn cannot_publish_rejected_or_superseded_revisions() {
-    let (_dir, mut vault) = open();
-    let rejected = Draft::new("skill").propose(&mut vault);
-    vault.reject("skill", rejected.version, None).unwrap();
-    let error = vault
-        .publish("skill", rejected.version)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("rejected"), "{error}");
-
-    let sibling = Draft::new("other").propose(&mut vault);
-    let winner = Draft::new("other").propose(&mut vault);
-    vault.publish("other", winner.version).unwrap();
-    let error = vault
-        .publish("other", sibling.version)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("superseded"), "{error}");
+    assert_eq!(vault.inspect("skill", 2).unwrap().status, "superseded");
 }
 
 #[test]
@@ -358,7 +285,6 @@ fn diff_shows_unified_diff_against_base_and_empty_for_new_skill() {
     let new_diff = vault.diff("skill", first.version).unwrap();
     assert!(new_diff.contains("+line one"), "{new_diff}");
     assert!(new_diff.contains("+line two"), "{new_diff}");
-    vault.publish("skill", first.version).unwrap();
     let second = Draft::new("skill")
         .expected_version(1)
         .content("line one\nline three\n")
@@ -411,7 +337,12 @@ fn scope_cannot_change_after_the_first_proposal() {
         .to_string();
     assert!(error.contains("already exists with scope"), "{error}");
     let matching = vault
-        .propose(&Draft::new("skill").scope("proja").proposal())
+        .propose(
+            &Draft::new("skill")
+                .scope("proja")
+                .expected_version(1)
+                .proposal(),
+        )
         .unwrap();
     assert_eq!(matching.version, 2);
 }
@@ -534,25 +465,21 @@ fn pagination_reports_total_and_has_more_correctly() {
 }
 
 #[test]
-fn search_never_returns_drafts_or_bodies_and_only_the_latest_published_version() {
+fn search_returns_only_the_latest_published_version_and_never_bodies() {
     let (_dir, mut vault) = open();
-    let v1 = Draft::new("skill")
+    Draft::new("skill")
         .content("SECRET body v1")
         .publish(&mut vault);
-    Draft::new("skill")
+    let v2 = Draft::new("skill")
         .expected_version(1)
         .content("SECRET body v2")
-        .propose(&mut vault);
-    Draft::new("hidden-skill")
-        .content("never published")
-        .propose(&mut vault);
+        .publish(&mut vault);
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.skills[0].id, "skill");
-    assert_eq!(page.skills[0].version, v1);
+    assert_eq!(page.skills[0].version, v2);
     let json = serde_json::to_value(&page).unwrap();
     assert!(!json.to_string().contains("SECRET"));
-    assert!(!json.to_string().contains("never published"));
     let fields: Vec<String> = json["skills"][0]
         .as_object()
         .unwrap()
@@ -576,16 +503,15 @@ fn search_validates_limit_offset_and_query_length() {
 #[test]
 fn outcomes_are_recorded_only_for_published_revisions() {
     let (_dir, mut vault) = open();
-    let draft = Draft::new("skill").propose(&mut vault);
     assert!(
         vault
-            .record_outcome("skill", draft.version, "helped", "note", None)
+            .record_outcome("missing", 1, "helped", "note", None)
             .is_err()
     );
-    vault.publish("skill", draft.version).unwrap();
+    let published = Draft::new("skill").publish(&mut vault);
     assert!(
         vault
-            .record_outcome("skill", draft.version, "helped", "note", None)
+            .record_outcome("skill", published, "helped", "note", None)
             .is_ok()
     );
 }

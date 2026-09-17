@@ -1,6 +1,8 @@
 // skillvolution-managed:opencode-plugin
 // Skillvolution for OpenCode: injects the vault catalog into the system prompt
-// and asks for the evolution review once the agent goes idle after doing work.
+// and, once a turn that did work ends without a report or publication, adds a
+// review reminder to the system prompt of the following turns until the work
+// is reviewed. It never prompts the session itself, so no extra turn is spent.
 // Setup rewrites this file on install; local edits will be overwritten.
 import { execFile } from "node:child_process";
 
@@ -8,16 +10,18 @@ const BIN = __SKILLVOLUTION_BIN__;
 const DB = __SKILLVOLUTION_DB__;
 
 // Keep in sync with STOP_REASON in src/hook.rs.
-const REVIEW_PROMPT =
-  "Skillvolution review: you changed files or ran commands since the last review. " +
-  "Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, " +
-  "and call propose_skill_change only for a lesson that meets every lesson criterion. " +
-  'If there is nothing to report or propose, reply only "No lesson." and stop.';
+const REVIEW_REMINDER =
+  "Skillvolution review: this session did work that has not been reviewed yet. " +
+  "Before finishing, follow the Report and Reflect steps of the evolution skill: " +
+  "call report_skill_outcome for any vault skill you applied, and for any candidate " +
+  "lesson that meets every lesson criterion, dispatch a fresh subagent now — " +
+  "without asking the user — to judge it " +
+  "(global scope, project scope, or discard), then call publish_skill with the verdict.";
 
 // OpenCode built-in tool ids that change files or run commands.
 const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch", "bash"]);
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
-const REVIEW_TOOLS = ["propose_skill_change", "report_skill_outcome"];
+const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
 
 export const SkillvolutionPlugin = async ({ client, directory }) => {
   const log = (level, message) =>
@@ -26,9 +30,10 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       .catch(() => {});
 
   const catalogs = new Map(); // sessionID -> Promise<string>
-  const sessions = new Map(); // sessionID -> { worked, reviewed, reviewing, agent, model }
+  const sessions = new Map(); // sessionID -> { worked, reviewed, remind }
+  const parents = new Map(); // sessionID -> Promise<parentID | undefined>
   const state = (id) => {
-    if (!sessions.has(id)) sessions.set(id, { worked: false, reviewed: false, reviewing: false });
+    if (!sessions.has(id)) sessions.set(id, { worked: false, reviewed: false, remind: false });
     return sessions.get(id);
   };
 
@@ -49,44 +54,22 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       });
     });
 
-  const parentOf = async (sessionID) => {
-    try {
-      const { data } = await client.session.get({ path: { id: sessionID } });
-      return data?.parentID;
-    } catch {
-      return undefined;
+  // Subagent (task) sessions hand their work and reviews to the parent:
+  // flags always live on the top-level session so delegated edits still get
+  // reviewed and subagent context is never polluted with the reminder.
+  const parentOf = (id) => {
+    if (!parents.has(id)) {
+      parents.set(
+        id,
+        client.session
+          .get({ path: { id } })
+          .then(({ data }) => data?.parentID)
+          .catch(() => undefined),
+      );
     }
+    return parents.get(id);
   };
-
-  const onIdle = async (sessionID) => {
-    const s = sessions.get(sessionID);
-    if (!s) return;
-    const needsReview = s.worked && !s.reviewed && !s.reviewing;
-    s.worked = s.reviewed = s.reviewing = false; // the turn caused by the review prompt never re-triggers
-    if (!needsReview) return;
-
-    // Subagent (task) sessions hand their work to the parent instead of being prompted.
-    const parentID = await parentOf(sessionID);
-    if (parentID) {
-      state(parentID).worked = true;
-      return;
-    }
-
-    s.reviewing = true;
-    try {
-      await client.session.promptAsync({
-        path: { id: sessionID },
-        body: {
-          agent: s.agent,
-          model: s.model,
-          parts: [{ type: "text", text: REVIEW_PROMPT, synthetic: true }],
-        },
-      });
-    } catch (error) {
-      s.reviewing = false;
-      log("error", `review prompt failed: ${error?.message ?? error}`);
-    }
-  };
+  const ownerOf = async (id) => (await parentOf(id)) ?? id;
 
   return {
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
@@ -94,31 +77,33 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       if (!catalogs.has(sessionID)) catalogs.set(sessionID, loadCatalog());
       const catalog = await catalogs.get(sessionID);
       if (catalog) output.system.push(catalog);
-    },
-
-    "chat.message": async ({ sessionID, agent, model }) => {
-      const s = state(sessionID);
-      s.agent = agent;
-      s.model = model;
+      if (sessions.get(sessionID)?.remind) output.system.push(REVIEW_REMINDER);
     },
 
     "tool.execute.after": async ({ tool, sessionID }) => {
-      const s = state(sessionID);
+      const s = state(await ownerOf(sessionID));
       if (WORK_TOOLS.has(tool)) s.worked = true;
-      if (REVIEW_TOOLS.some((name) => tool.includes(name))) s.reviewed = true;
+      if (REVIEW_TOOLS.some((name) => tool.includes(name))) {
+        s.reviewed = true;
+        s.remind = false;
+      }
     },
 
     event: async ({ event }) => {
       const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
       if (!sessionID) return;
-      if (event.type === "session.idle") void onIdle(sessionID); // don't hold up event delivery
-      // Aborted or failed turns are not reviewed; the idle that follows sees a clean span.
-      else if (event.type === "session.error") {
-        const s = sessions.get(sessionID);
-        if (s && !s.reviewing) s.worked = s.reviewed = false;
+      if (event.type === "session.idle" || event.type === "session.error") {
+        const s = sessions.get(await ownerOf(sessionID));
+        if (!s) return;
+        // Idle: a turn that did work without reviewing earns a reminder on the
+        // following turns; each span is judged once. Error: aborted or failed
+        // turns are not reviewed; a pending reminder survives either way.
+        if (event.type === "session.idle" && s.worked && !s.reviewed) s.remind = true;
+        s.worked = s.reviewed = false;
       } else if (event.type === "session.deleted") {
         sessions.delete(sessionID);
         catalogs.delete(sessionID);
+        parents.delete(sessionID);
       }
     },
   };

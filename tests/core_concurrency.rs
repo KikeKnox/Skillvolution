@@ -6,7 +6,34 @@ use std::sync::{Arc, Barrier};
 use support::Draft;
 
 #[test]
-fn simultaneous_connections_allocate_unique_persistent_revisions() {
+fn simultaneous_connections_publish_distinct_skills_without_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    Vault::open(&path).unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut vault = Vault::open(&path).unwrap();
+                barrier.wait();
+                Draft::new(&format!("skill-{i}"))
+                    .propose(&mut vault)
+                    .version
+            })
+        })
+        .collect();
+    let versions: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(versions, vec![1; 8]);
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 8);
+}
+
+#[test]
+fn competing_publishers_have_exactly_one_winner() {
+    // Proposals publish immediately against an expected base, so concurrent
+    // proposals for the same new id cannot all succeed.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     Vault::open(&path).unwrap();
@@ -18,34 +45,7 @@ fn simultaneous_connections_allocate_unique_persistent_revisions() {
             std::thread::spawn(move || {
                 let mut vault = Vault::open(&path).unwrap();
                 barrier.wait();
-                Draft::new("shared").propose(&mut vault).version
-            })
-        })
-        .collect();
-    let mut versions: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
-    versions.sort();
-    assert_eq!(versions, (1..=8).collect::<Vec<_>>());
-    let vault = Vault::open(&path).unwrap();
-    assert_eq!(vault.drafts().unwrap().len(), 8);
-}
-
-#[test]
-fn competing_publishers_have_exactly_one_winner() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("skills.db");
-    let mut vault = Vault::open(&path).unwrap();
-    for _ in 0..2 {
-        Draft::new("shared").propose(&mut vault);
-    }
-    let barrier = Arc::new(Barrier::new(2));
-    let threads: Vec<_> = (1..=2)
-        .map(|version| {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let mut vault = Vault::open(&path).unwrap();
-                barrier.wait();
-                vault.publish("shared", version).is_ok()
+                vault.propose(&Draft::new("shared").proposal()).is_ok()
             })
         })
         .collect();
@@ -54,7 +54,8 @@ fn competing_publishers_have_exactly_one_winner() {
         .filter_map(|t| t.join().unwrap().then_some(()))
         .count();
     assert_eq!(winners, 1);
-    assert!(vault.get("shared", None, None).is_ok());
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(vault.get("shared", None, None).unwrap().version, 1);
 }
 
 #[test]

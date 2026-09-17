@@ -2,7 +2,7 @@
 //! hooks merged into `settings.json` (not `settings.local.json`), and MCP registration
 //! via the `claude` CLI (see `claude_cli`).
 
-use super::{claude_cli, fs_safe, hooks};
+use super::{claude_cli, fs_safe, hooks, permissions};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,7 @@ pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
     merge_hooks(&mut settings, bin, db)?;
+    permissions::merge_claude(&mut settings)?;
     changes.push((
         settings_path,
         serde_json::to_string_pretty(&settings)? + "\n",
@@ -53,7 +54,10 @@ fn merge_hooks(config: &mut serde_json::Value, bin: &Path, db: &Path) -> Result<
     let db = hooks::shell_quote(hooks::require_utf8(db, "--db")?);
     let session_start = format!("{bin} --db {db} hook session-start");
     let stop = format!("{bin} --db {db} hook stop");
-    hooks::merge(config, session_start, stop)
+    hooks::merge(
+        config,
+        &[("SessionStart", None, session_start), ("Stop", None, stop)],
+    )
 }
 
 /// Registers the MCP server at user scope via the `claude` CLI, run only after every

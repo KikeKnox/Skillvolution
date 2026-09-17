@@ -2,7 +2,7 @@
 //! (whichever is present; refuses if both are), the managed skill file, the AGENTS.md
 //! trigger block, and the plugin.
 
-use super::{fs_safe, opencode, plugin};
+use super::{fs_safe, opencode, permissions, plugin};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
         "enabled": true,
     });
     fs_safe::merge_server(&mut config, "mcp", entry)?;
+    permissions::merge_opencode(&mut config)?;
     changes.push((config_path, serde_json::to_string_pretty(&config)? + "\n"));
 
     let skill_path = dir.join("skills/evolution/SKILL.md");

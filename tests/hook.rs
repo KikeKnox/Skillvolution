@@ -1,7 +1,7 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use skillvolution::{hook, vault::Vault};
 use std::{
     fs,
@@ -97,7 +97,7 @@ fn work_plus_review_tool_does_not_block() {
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
     for (session, review_tool) in [
         ("s1", "mcp__skillvolution__report_skill_outcome"),
-        ("s2", "mcp__skillvolution__propose_skill_change"),
+        ("s2", "mcp__skillvolution__publish_skill"),
     ] {
         let transcript = dir.path().join(format!("{session}.jsonl"));
         write_transcript(
@@ -212,6 +212,132 @@ fn session_start_lists_published_skills_or_says_there_are_none() {
     let text = hook::session_start(&vault, None).unwrap();
     assert!(text.contains("rust-tests"));
     assert!(text.contains("Use when running tests"));
+}
+
+// --- Devin hooks (flag-based; the payloads carry no transcript) -------------
+
+fn devin_tool(session: &str, tool: &str) -> String {
+    json!({"session_id": session, "tool_name": tool}).to_string()
+}
+
+fn devin_stop_input(session: &str, stop_hook_active: bool) -> String {
+    json!({"session_id": session, "stop_hook_active": stop_hook_active}).to_string()
+}
+
+#[test]
+fn devin_work_blocks_once_then_not_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "exec")).unwrap();
+    let input = devin_stop_input("s1", false);
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
+}
+
+#[test]
+fn devin_review_tool_marks_the_span_reviewed() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    for (session, review_tool) in [
+        ("s1", "mcp__skillvolution__report_skill_outcome"),
+        ("s2", "mcp__skillvolution__publish_skill"),
+    ] {
+        hook::devin_tool_use(&vault, &devin_tool(session, "write")).unwrap();
+        hook::devin_tool_use(&vault, &devin_tool(session, review_tool)).unwrap();
+        let input = devin_stop_input(session, false);
+        assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
+    }
+}
+
+#[test]
+fn devin_stop_hook_active_never_blocks_and_keeps_the_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "edit")).unwrap();
+    assert!(
+        hook::devin_stop(&vault, &devin_stop_input("s1", true))
+            .unwrap()
+            .is_none()
+    );
+    // The flags survive, so the next real stop still sees the unreviewed work.
+    assert!(
+        hook::devin_stop(&vault, &devin_stop_input("s1", false))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn devin_new_work_after_a_block_blocks_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let input = devin_stop_input("s1", false);
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+    hook::devin_tool_use(&vault, &devin_tool("s1", "apply_patch")).unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
+fn devin_unrelated_tools_and_sessions_leave_flags_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "read")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "run_subagent")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("other", "exec")).unwrap();
+    let input = devin_stop_input("s1", false);
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
+}
+
+#[test]
+fn devin_session_end_clears_the_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "exec")).unwrap();
+    hook::devin_session_end(&vault, &json!({"session_id": "s1"}).to_string()).unwrap();
+    let input = devin_stop_input("s1", false);
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
+}
+
+#[test]
+fn devin_approve_only_approves_subagent_and_vault_tools() {
+    for tool in [
+        "run_subagent",
+        "read_subagent",
+        "mcp__skillvolution__search_skills",
+        "mcp__skillvolution__publish_skill",
+    ] {
+        let input = json!({"session_id": "s1", "tool_name": tool}).to_string();
+        assert!(hook::devin_approve(&input).unwrap().is_some(), "{tool}");
+    }
+    for tool in [
+        "exec",
+        "write",
+        "mcp__github__create_issue",
+        "mcp__skillvolution",
+    ] {
+        let input = json!({"session_id": "s1", "tool_name": tool}).to_string();
+        assert!(hook::devin_approve(&input).unwrap().is_none(), "{tool}");
+    }
+}
+
+#[test]
+fn devin_session_start_wraps_the_catalog_in_hook_specific_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("rust-tests")
+        .description("Use when running tests")
+        .publish(&mut vault);
+    let output: serde_json::Value =
+        serde_json::from_str(&hook::devin_session_start(&vault, None).unwrap()).unwrap();
+    assert_eq!(
+        output["hookSpecificOutput"]["hookEventName"],
+        "SessionStart"
+    );
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("rust-tests"));
 }
 
 // --- CLI ------------------------------------------------------------------
@@ -404,4 +530,107 @@ fn session_start_explicit_project_overrides_detection() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("override-skill"));
     assert!(!stdout.contains("proja-skill"));
+}
+
+// --- CLI: Devin hook events ---------------------------------------------------
+
+/// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
+fn run_hook(db: &Path, args: &[&str], input: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("--db")
+        .arg(db)
+        .arg("hook")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn cli_devin_stop_prints_a_block_decision_once_per_unreviewed_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let vault = Vault::open(&db).unwrap();
+    vault.set_devin_hook_state("s1", true, false).unwrap();
+    drop(vault);
+
+    let blocked = run_hook(
+        &db,
+        &["stop", "--client", "devin"],
+        &devin_stop_input("s1", false),
+    );
+    assert!(blocked.status.success());
+    let decision: serde_json::Value =
+        serde_json::from_slice(&blocked.stdout).expect("stdout must be the decision JSON");
+    assert_eq!(decision["decision"], "block");
+    assert!(
+        decision["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Skillvolution"),
+        "{decision}"
+    );
+
+    // The span was consumed: an unchanged second stop prints nothing.
+    let clean = run_hook(
+        &db,
+        &["stop", "--client", "devin"],
+        &devin_stop_input("s1", false),
+    );
+    assert!(clean.status.success());
+    assert!(clean.stdout.is_empty());
+}
+
+#[test]
+fn cli_devin_tool_use_then_stop_flows_through_the_flag_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+
+    let tool = run_hook(&db, &["tool-use"], &devin_tool("s1", "exec"));
+    assert!(tool.status.success());
+    assert!(tool.stdout.is_empty());
+
+    let blocked = run_hook(
+        &db,
+        &["stop", "--client", "devin"],
+        &devin_stop_input("s1", false),
+    );
+    assert!(blocked.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&blocked.stdout).unwrap()["decision"],
+        "block"
+    );
+}
+
+#[test]
+fn cli_hook_approve_prints_an_approve_decision_only_for_our_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    Vault::open(&db).unwrap();
+
+    let approved = run_hook(
+        &db,
+        &["approve"],
+        &json!({"session_id": "s", "tool_name": "run_subagent"}).to_string(),
+    );
+    assert!(approved.status.success());
+    let decision: serde_json::Value = serde_json::from_slice(&approved.stdout).unwrap();
+    assert_eq!(decision["decision"], "approve");
+
+    let other = run_hook(
+        &db,
+        &["approve"],
+        &json!({"session_id": "s", "tool_name": "exec"}).to_string(),
+    );
+    assert!(other.status.success());
+    assert!(other.stdout.is_empty());
 }

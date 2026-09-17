@@ -62,12 +62,22 @@ fn shell_words(command: &str) -> Vec<String> {
     words
 }
 
+/// Hook subcommand names that mark a command as ours, in their CLI spelling.
+const HOOK_EVENTS: [&str; 5] = [
+    "session-start",
+    "tool-use",
+    "stop",
+    "session-end",
+    "approve",
+];
+
 /// A Skillvolution-owned hook command: one whose first shell word is a path named
-/// `skillvolution` and whose remaining words end with `hook stop` or contain `hook
-/// session-start` as whole words. Independent of the bin path, db path, or project key,
-/// so a changed one replaces the old entry instead of duplicating it; independent of the
-/// command text otherwise, so a foreign command that merely contains the substring
-/// " hook stop" (e.g. another tool's own `hook stop`, or a `hook stopwatch`) is left alone.
+/// `skillvolution` and whose remaining words contain `hook <event>` as whole words
+/// (`hook session-start`, `hook stop`, `hook tool-use --client devin`, ...).
+/// Independent of the bin path, db path, or project key, so a changed one replaces
+/// the old entry instead of duplicating it; independent of the command text
+/// otherwise, so a foreign command that merely contains the substring " hook stop"
+/// (e.g. another tool's own `hook stop`, or a `hook stopwatch`) is left alone.
 fn owned_command(command: &str) -> bool {
     let words = shell_words(command);
     let Some(first) = words.first() else {
@@ -76,12 +86,9 @@ fn owned_command(command: &str) -> bool {
     if Path::new(first).file_name() != Some(std::ffi::OsStr::new("skillvolution")) {
         return false;
     }
-    let ends_with_hook_stop =
-        words.len() >= 2 && words[words.len() - 2] == "hook" && words[words.len() - 1] == "stop";
-    let has_hook_session_start = words
+    words
         .windows(2)
-        .any(|pair| pair[0] == "hook" && pair[1] == "session-start");
-    ends_with_hook_stop || has_hook_session_start
+        .any(|pair| pair[0] == "hook" && HOOK_EVENTS.contains(&pair[1].as_str()))
 }
 
 fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<()> {
@@ -111,19 +118,28 @@ fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<()> {
     Ok(())
 }
 
-fn append_group(hooks: &mut Map<String, Value>, event: &str, command: String) -> Result<()> {
+fn append_group(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    matcher: Option<&str>,
+    command: String,
+) -> Result<()> {
     let groups = hooks
         .entry(event)
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .with_context(|| format!("hooks.{event} must be an array"))?;
-    groups.push(json!({"hooks": [{"type": "command", "command": command, "timeout": 10}]}));
+    let mut group = json!({"hooks": [{"type": "command", "command": command, "timeout": 10}]});
+    if let Some(matcher) = matcher {
+        group["matcher"] = json!(matcher);
+    }
+    groups.push(group);
     Ok(())
 }
 
-/// Replaces our SessionStart/Stop entries in `config["hooks"]` with `session_start`/`stop`,
-/// preserving every other event and every foreign hook.
-pub fn merge(config: &mut Value, session_start: String, stop: String) -> Result<()> {
+/// Replaces our entries in `config["hooks"]` with `entries` (event, optional
+/// `matcher` regex, command), preserving every other event and every foreign hook.
+pub fn merge(config: &mut Value, entries: &[(&str, Option<&str>, String)]) -> Result<()> {
     let hooks = config
         .as_object_mut()
         .context("config must be an object")?
@@ -131,10 +147,17 @@ pub fn merge(config: &mut Value, session_start: String, stop: String) -> Result<
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .context("hooks must be an object")?;
-    strip_owned(hooks, "SessionStart")?;
-    strip_owned(hooks, "Stop")?;
-    append_group(hooks, "SessionStart", session_start)?;
-    append_group(hooks, "Stop", stop)?;
+    merge_entries(hooks, entries)
+}
+
+fn merge_entries(
+    hooks: &mut Map<String, Value>,
+    entries: &[(&str, Option<&str>, String)],
+) -> Result<()> {
+    for (event, matcher, command) in entries {
+        strip_owned(hooks, event)?;
+        append_group(hooks, event, *matcher, command.clone())?;
+    }
     Ok(())
 }
 
@@ -164,6 +187,14 @@ mod tests {
             "{} hook stop",
             shell_quote("/opt/it's-a-path/skillvolution")
         )));
+        // Devin-format commands carry a --client flag after the event name.
+        for event in ["tool-use", "session-end", "approve"] {
+            assert!(owned_command(&format!("/opt/skillvolution hook {event}")));
+        }
+        assert!(owned_command("/opt/skillvolution hook stop --client devin"));
+        assert!(owned_command(
+            "/opt/skillvolution hook session-start --client devin"
+        ));
     }
 
     #[test]

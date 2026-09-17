@@ -22,11 +22,6 @@ enum Command {
         #[arg(long)]
         project: Option<String>,
     },
-    /// List drafts awaiting review.
-    Drafts {
-        #[arg(long)]
-        json: bool,
-    },
     /// Show one revision: its status, evidence, and a diff against its base.
     Show {
         id: String,
@@ -35,20 +30,6 @@ enum Command {
         /// Print the full revision as JSON instead of the readable summary.
         #[arg(long)]
         json: bool,
-    },
-    /// Publish a draft revision.
-    Publish {
-        id: String,
-        #[arg(long, value_name = "VERSION")]
-        version: i64,
-    },
-    /// Reject a draft revision.
-    Reject {
-        id: String,
-        #[arg(long, value_name = "VERSION")]
-        version: i64,
-        #[arg(long)]
-        note: Option<String>,
     },
     /// Hide a skill from search without deleting its history.
     Deprecate { id: String },
@@ -70,6 +51,17 @@ enum Command {
     Setup(setup::SetupArgs),
 }
 
+/// The client emitting a hook payload: payloads and blocking conventions differ
+/// (`claude-code` scans a transcript and blocks via stderr + exit 2; `devin`
+/// tracks per-session flags and blocks via a `{"decision":"block"}` JSON on
+/// stdout).
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
+enum HookClient {
+    #[default]
+    ClaudeCode,
+    Devin,
+}
+
 #[derive(Subcommand)]
 enum HookEvent {
     /// Print the skill catalog as session context.
@@ -78,9 +70,20 @@ enum HookEvent {
         /// Detected automatically from the working directory's git root when omitted.
         #[arg(long)]
         project: Option<String>,
+        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        client: HookClient,
     },
-    /// Ask for an evolution review after unreviewed work (exit 2 blocks the stop).
-    Stop,
+    /// Record work/review tool calls for a session (Devin PostToolUse).
+    ToolUse,
+    /// Ask for an evolution review after unreviewed work.
+    Stop {
+        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        client: HookClient,
+    },
+    /// Drop a session's hook state (Devin SessionEnd).
+    SessionEnd,
+    /// Approve the tools the evolution flow needs (Devin PermissionRequest).
+    Approve,
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
@@ -139,25 +142,6 @@ fn main() -> Result<()> {
             );
             skillvolution::mcp::serve(open(&cli.db)?, project)?;
         }
-        Command::Drafts { json } => {
-            let drafts = open(&cli.db)?.drafts()?;
-            if json {
-                print_json(&drafts)?;
-            } else if drafts.is_empty() {
-                println!("No drafts.");
-            } else {
-                for draft in drafts {
-                    println!(
-                        "{} v{} (base v{}, {}): {}",
-                        draft.id,
-                        draft.version,
-                        draft.expected_version,
-                        draft.scope.as_deref().unwrap_or("global"),
-                        draft.description
-                    );
-                }
-            }
-        }
         Command::Show { id, version, json } => {
             let vault = open(&cli.db)?;
             let revision = vault.inspect(&id, version)?;
@@ -181,14 +165,6 @@ fn main() -> Result<()> {
                 println!("\nevidence:\n{}", revision.evidence);
                 println!("\n{}", vault.diff(&id, version)?);
             }
-        }
-        Command::Publish { id, version } => {
-            let version = open(&cli.db)?.publish(&id, version)?;
-            println!("Published {id} v{version}");
-        }
-        Command::Reject { id, version, note } => {
-            let version = open(&cli.db)?.reject(&id, version, note.as_deref())?;
-            println!("Rejected {id} v{version}");
         }
         Command::Deprecate { id } => open(&cli.db)?.set_deprecated(&id, true)?,
         Command::Undeprecate { id } => open(&cli.db)?.set_deprecated(&id, false)?,
@@ -224,20 +200,55 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Hook(HookEvent::SessionStart { project }) => {
+        Command::Hook(HookEvent::SessionStart { project, client }) => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            print!(
-                "{}",
-                hook::session_start(&open(&cli.db)?, project.as_deref())?
-            );
+            let output = match client {
+                HookClient::ClaudeCode => hook::session_start(&open(&cli.db)?, project.as_deref())?,
+                HookClient::Devin => {
+                    hook::devin_session_start(&open(&cli.db)?, project.as_deref())?
+                }
+            };
+            print!("{output}");
         }
-        Command::Hook(HookEvent::Stop) => {
+        Command::Hook(HookEvent::ToolUse) => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
-            if let Some(reason) = hook::stop(&open(&cli.db)?, &input)? {
-                eprintln!("{reason}");
-                std::process::exit(2);
+            hook::devin_tool_use(&open(&cli.db)?, &input)?;
+        }
+        Command::Hook(HookEvent::Stop { client }) => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            match client {
+                HookClient::ClaudeCode => {
+                    if let Some(reason) = hook::stop(&open(&cli.db)?, &input)? {
+                        eprintln!("{reason}");
+                        std::process::exit(2);
+                    }
+                }
+                HookClient::Devin => {
+                    if let Some(reason) = hook::devin_stop(&open(&cli.db)?, &input)? {
+                        println!(
+                            "{}",
+                            serde_json::json!({"decision": "block", "reason": reason})
+                        );
+                    }
+                }
+            }
+        }
+        Command::Hook(HookEvent::SessionEnd) => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            hook::devin_session_end(&open(&cli.db)?, &input)?;
+        }
+        Command::Hook(HookEvent::Approve) => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            if let Some(reason) = hook::devin_approve(&input)? {
+                println!(
+                    "{}",
+                    serde_json::json!({"decision": "approve", "reason": reason})
+                );
             }
         }
     }

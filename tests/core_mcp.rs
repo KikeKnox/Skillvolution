@@ -141,21 +141,21 @@ fn tools_list_exposes_the_four_tools() {
             "search_skills",
             "get_skill",
             "report_skill_outcome",
-            "propose_skill_change"
+            "publish_skill"
         ]
     );
 }
 
 #[test]
-fn propose_then_cli_publish_is_visible_to_the_same_running_server() {
+fn publish_skill_is_immediately_visible_to_the_same_running_server() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
 
     let mut server = McpServer::spawn(&db, None);
     server.initialize("2025-06-18");
-    let propose = server.call(
+    let publish = server.call(
         2,
-        "propose_skill_change",
+        "publish_skill",
         json!({
             "id": "rust-tests",
             "description": "Use when running the Rust test suite",
@@ -164,28 +164,11 @@ fn propose_then_cli_publish_is_visible_to_the_same_running_server() {
             "expected_version": 0
         }),
     );
-    assert_eq!(propose["result"]["isError"], false);
-    let body = text_of(&propose);
+    assert_eq!(publish["result"]["isError"], false);
+    let body = text_of(&publish);
     assert_eq!(body["id"], "rust-tests");
     assert_eq!(body["version"], 1);
-
-    let not_yet_visible = server.call(3, "search_skills", json!({"query": "cargo"}));
-    assert_eq!(text_of(&not_yet_visible)["total"], 0);
-
-    let publish = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-        .arg("--db")
-        .arg(&db)
-        .arg("publish")
-        .arg("rust-tests")
-        .arg("--version")
-        .arg("1")
-        .output()
-        .unwrap();
-    assert!(
-        publish.status.success(),
-        "{}",
-        String::from_utf8_lossy(&publish.stderr)
-    );
+    assert_eq!(body["status"], "published");
 
     let search = server.call(4, "search_skills", json!({"query": "cargo"}));
     let search_body = text_of(&search);
@@ -214,9 +197,9 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
 
     let mut proja_server = McpServer::spawn(&db, Some("proja"));
     proja_server.initialize("2025-06-18");
-    let propose = proja_server.call(
+    let publish = proja_server.call(
         2,
-        "propose_skill_change",
+        "publish_skill",
         json!({
             "id": "proj-only",
             "description": "Use when working on this repository",
@@ -226,16 +209,7 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
             "scope": "project"
         }),
     );
-    assert_eq!(propose["result"]["isError"], false);
-    Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-        .arg("--db")
-        .arg(&db)
-        .arg("publish")
-        .arg("proj-only")
-        .arg("--version")
-        .arg("1")
-        .output()
-        .unwrap();
+    assert_eq!(publish["result"]["isError"], false);
 
     let visible = proja_server.call(3, "search_skills", json!({}));
     assert_eq!(text_of(&visible)["total"], 1);
@@ -259,7 +233,7 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
     global_server.initialize("2025-06-18");
     let scope_without_project = global_server.call(
         2,
-        "propose_skill_change",
+        "publish_skill",
         json!({
             "id": "needs-project",
             "description": "Use when this needs a project key",

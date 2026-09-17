@@ -71,13 +71,13 @@ impl Draft {
     }
 
     /// Proposes the draft, panicking on failure (test setup, not the case under test).
+    /// Proposals are published immediately, so the returned revision is live.
     pub fn propose(&self, vault: &mut Vault) -> Revision {
         vault.propose(&self.proposal()).unwrap()
     }
 
-    /// Proposes then immediately publishes it, returning the published version.
+    /// Proposes it and returns the published version.
     pub fn publish(&self, vault: &mut Vault) -> i64 {
-        let revision = self.propose(vault);
-        vault.publish(&self.id, revision.version).unwrap()
+        self.propose(vault).version
     }
 }

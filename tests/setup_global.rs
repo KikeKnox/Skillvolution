@@ -66,6 +66,10 @@ impl Env {
     fn opencode_dir(&self) -> PathBuf {
         self.xdg_config.join("opencode")
     }
+
+    fn devin_dir(&self) -> PathBuf {
+        self.home.path().join(".config/devin")
+    }
 }
 
 fn assert_success(output: &Output) {
@@ -184,6 +188,10 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     );
     assert!(stop_cmd.ends_with(" hook stop"), "{stop_cmd}");
     assert!(!session_cmd.contains("--project"));
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!(["Task", "mcp__skillvolution"])
+    );
 
     // OpenCode: opencode.json entry with no --project, skill, AGENTS.md, plugin.
     let oc = read_json(env.opencode_dir().join("opencode.json"));
@@ -194,6 +202,8 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert_eq!(command[2], env.db.to_str().unwrap());
     assert_eq!(command[3], "serve");
     assert_eq!(oc["mcp"]["skillvolution"]["type"], "local");
+    assert_eq!(oc["permission"]["task"], "allow");
+    assert_eq!(oc["permission"]["skillvolution_publish_skill"], "allow");
 
     let oc_skill =
         fs::read_to_string(env.opencode_dir().join("skills/evolution/SKILL.md")).unwrap();
@@ -693,6 +703,170 @@ fn unmanaged_plugin_is_refused_globally() {
 
     assert_eq!(fs::read_to_string(&plugin_path).unwrap(), original);
     assert!(!env.opencode_dir().join("opencode.json").exists());
+}
+
+#[test]
+fn global_devin_writes_expected_files() {
+    let env = Env::new();
+
+    let output = env.command().arg("--client").arg("devin").output().unwrap();
+    assert_success(&output);
+
+    let skill = fs::read_to_string(env.devin_dir().join("skills/evolution/SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\nname: evolution\n"));
+
+    let mcp = read_json(env.devin_dir().join("mcp_config.json"));
+    assert_eq!(
+        mcp["mcpServers"]["skillvolution"],
+        serde_json::json!({
+            "command": env.bin,
+            "args": ["--db", env.db, "serve"],
+        })
+    );
+
+    let config = read_json(env.devin_dir().join("config.json"));
+    assert_eq!(
+        config["permissions"]["allow"],
+        serde_json::json!(["run_subagent", "read_subagent", "mcp__skillvolution__*"])
+    );
+    for event in [
+        "SessionStart",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+        "PermissionRequest",
+    ] {
+        let groups = config["hooks"][event].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{event}");
+    }
+    // Global hooks carry no --project; the Devin variants carry --client devin.
+    let session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        session_cmd.contains("hook session-start --client devin"),
+        "{session_cmd}"
+    );
+    assert!(!session_cmd.contains("--project"), "{session_cmd}");
+    let stop_cmd = config["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(stop_cmd.contains("hook stop --client devin"), "{stop_cmd}");
+    assert!(
+        config["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("hook approve")
+    );
+
+    let agents = fs::read_to_string(env.devin_dir().join("AGENTS.md")).unwrap();
+    assert!(agents.contains("<!-- skillvolution:start -->"));
+    assert!(agents.contains("<!-- skillvolution:end -->"));
+}
+
+#[test]
+fn global_devin_preserves_existing_config_and_is_idempotent() {
+    let env = Env::new();
+    fs::create_dir_all(env.devin_dir()).unwrap();
+    fs::write(
+        env.devin_dir().join("config.json"),
+        "{\"permissions\":{\"deny\":[\"Exec(sudo)\"]},\"model\":\"existing\"}",
+    )
+    .unwrap();
+    fs::write(
+        env.devin_dir().join("mcp_config.json"),
+        "{\"mcpServers\":{\"other\":{\"command\":\"npx\"}}}",
+    )
+    .unwrap();
+    fs::write(env.devin_dir().join("AGENTS.md"), "# My rules\n").unwrap();
+
+    let output = env.command().arg("--client").arg("devin").output().unwrap();
+    assert_success(&output);
+
+    let config = read_json(env.devin_dir().join("config.json"));
+    assert_eq!(
+        config["permissions"]["deny"],
+        serde_json::json!(["Exec(sudo)"])
+    );
+    assert_eq!(config["model"], "existing");
+    let mcp = read_json(env.devin_dir().join("mcp_config.json"));
+    assert_eq!(mcp["mcpServers"]["other"]["command"], "npx");
+    let agents = fs::read_to_string(env.devin_dir().join("AGENTS.md")).unwrap();
+    assert!(agents.starts_with("# My rules\n"));
+
+    // A second run must be a no-op: same bytes, no extra backups.
+    let before = fs::read(env.devin_dir().join("config.json")).unwrap();
+    let output = env.command().arg("--client").arg("devin").output().unwrap();
+    assert_success(&output);
+    assert_eq!(
+        fs::read(env.devin_dir().join("config.json")).unwrap(),
+        before
+    );
+    assert!(
+        !env.devin_dir()
+            .join("config.json.skillvolution.bak.1")
+            .exists(),
+        "second run must not create another backup"
+    );
+}
+
+#[test]
+fn global_detect_only_devin_config_dir_present_configures_devin() {
+    // No `--client`: a `~/.config/devin` directory alone counts as installed.
+    let env = Env::new();
+    fs::create_dir_all(env.devin_dir()).unwrap();
+
+    let output = env.command().output().unwrap();
+    assert_success(&output);
+
+    assert!(env.devin_dir().join("skills/evolution/SKILL.md").exists());
+    assert!(env.devin_dir().join("mcp_config.json").exists());
+    assert!(!env.claude_dir().join("settings.json").exists());
+    assert!(!env.opencode_dir().join("opencode.json").exists());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Skipped Claude Code"), "{stdout}");
+    assert!(stdout.contains("Skipped OpenCode"), "{stdout}");
+    assert!(!stdout.contains("Skipped Devin CLI"), "{stdout}");
+}
+
+#[test]
+fn global_detect_devin_on_path_configures_devin() {
+    // A `devin` executable on PATH counts as installed even without a config dir.
+    let env = Env::new();
+    let bin_dir = env.home.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let devin = bin_dir.join("devin");
+    fs::write(&devin, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&devin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = env.command().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+    assert!(env.devin_dir().join("config.json").exists());
+}
+
+#[test]
+fn global_detect_all_three_present_configures_all_noninteractively() {
+    // No `--client`, all three detected, and no terminal (the test's pipes): every
+    // detected client is configured without asking.
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = write_fake_claude(&env.home.path().join("bin"), &log, false);
+    fs::create_dir_all(env.opencode_dir()).unwrap();
+    fs::create_dir_all(env.devin_dir()).unwrap();
+
+    let output = env.command().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+
+    assert!(env.claude_dir().join("settings.json").exists());
+    assert!(env.opencode_dir().join("opencode.json").exists());
+    assert!(env.devin_dir().join("config.json").exists());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("Skipped"), "{stdout}");
 }
 
 #[test]

@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = include_str!("schema.sql");
 const MAX_TAGS: usize = 8;
 const MAX_TAG_BYTES: usize = 32;
@@ -57,6 +57,42 @@ impl Vault {
             "INSERT INTO hook_state (session_id, transcript_offset) VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET transcript_offset = excluded.transcript_offset",
             rusqlite::params![session_id, offset as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The Devin review flags for a session: whether it did work and whether it
+    /// called a review tool since. Missing row means (false, false).
+    pub fn devin_hook_state(&self, session_id: &str) -> Result<(bool, bool)> {
+        let row: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT worked, reviewed FROM devin_hook_state WHERE session_id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(w, r)| (w != 0, r != 0)).unwrap_or((false, false)))
+    }
+
+    pub fn set_devin_hook_state(
+        &self,
+        session_id: &str,
+        worked: bool,
+        reviewed: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO devin_hook_state (session_id, worked, reviewed) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET worked = excluded.worked, reviewed = excluded.reviewed",
+            rusqlite::params![session_id, worked as i64, reviewed as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_devin_hook_state(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM devin_hook_state WHERE session_id = ?1",
+            [session_id],
         )?;
         Ok(())
     }
@@ -112,6 +148,16 @@ fn migrate(conn: &Connection) -> Result<()> {
                 "database uses the pre-1 schema; move it aside and create a new one"
             );
             tx.execute_batch(SCHEMA)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        1 => {
+            tx.execute_batch(
+                "CREATE TABLE devin_hook_state (
+                    session_id TEXT PRIMARY KEY,
+                    worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
+                    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
+                )",
+            )?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}

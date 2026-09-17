@@ -53,8 +53,8 @@ fn tools() -> Value {
             }
         },
         {
-            "name": "propose_skill_change",
-            "description": "Store a draft of a new skill or a complete replacement of an existing one, for human review. Only propose verified, reusable, non-obvious lessons. Drafts are never visible to agents until a human publishes them.",
+            "name": "publish_skill",
+            "description": "Publish a new skill or a complete replacement of an existing one, visible to agents immediately. Publish only lessons that a fresh-context evaluation judged worth keeping: verified, reusable, non-obvious.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -106,7 +106,7 @@ struct OutcomeArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProposeArgs {
+struct PublishArgs {
     id: String,
     description: String,
     #[serde(default)]
@@ -251,8 +251,8 @@ impl Server {
                 )?;
                 Ok(json!({"recorded": true}))
             }
-            "propose_skill_change" => {
-                let args: ProposeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+            "publish_skill" => {
+                let args: PublishArgs = serde_json::from_value(arguments).map_err(parse_error)?;
                 let scope = match args.scope.as_deref() {
                     None | Some("global") => None,
                     Some("project") => Some(project.context(
@@ -275,7 +275,7 @@ impl Server {
                     "status": revision.status,
                     "expected_version": revision.expected_version,
                     "scope": revision.scope,
-                    "next": "Tell the user a draft awaits human review: skillvolution show ID --version N, then publish or reject. Never publish it yourself."
+                    "next": "Published and immediately visible to agents. Tell the user the skill id and version; they can hide it later with `skillvolution deprecate ID`."
                 }))
             }
             other => bail!("unknown tool: {other}"),

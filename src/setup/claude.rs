@@ -1,7 +1,7 @@
 //! Claude Code: .mcp.json entry, session-start/stop hooks, native skill file,
 //! and removal of the legacy CLAUDE.md `@import` block.
 
-use super::{fs_safe, hooks};
+use super::{fs_safe, hooks, permissions};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -33,6 +33,7 @@ pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(
     let settings_path = project.join(".claude/settings.local.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
     merge_hooks(&mut settings, bin, db, key)?;
+    permissions::merge_claude(&mut settings)?;
     changes.push((
         settings_path,
         serde_json::to_string_pretty(&settings)? + "\n",
@@ -47,5 +48,8 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: &str) -> Result<(
     let key = hooks::shell_quote(key);
     let session_start = format!("{bin} --db {db} hook session-start --project {key}");
     let stop = format!("{bin} --db {db} hook stop");
-    hooks::merge(config, session_start, stop)
+    hooks::merge(
+        config,
+        &[("SessionStart", None, session_start), ("Stop", None, stop)],
+    )
 }

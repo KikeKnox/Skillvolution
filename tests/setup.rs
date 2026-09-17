@@ -151,6 +151,12 @@ fn rejects_conflicts_before_writing_any_client() {
             ".claude/settings.local.json",
             "{\"hooks\": {\"SessionStart\": \"nope\"}}",
         ),
+        (".claude/settings.local.json", "{\"permissions\": \"nope\"}"),
+        (
+            ".claude/settings.local.json",
+            "{\"permissions\": {\"allow\": \"nope\"}}",
+        ),
+        ("opencode.json", "{\"permission\": \"ask\"}"),
     ];
     for (file, text) in cases {
         let temp = tempfile::tempdir().unwrap();
@@ -310,7 +316,7 @@ fn installs_both_documented_clients_with_absolute_argv() {
             "search_skills",
             "get_skill",
             "report_skill_outcome",
-            "propose_skill_change",
+            "publish_skill",
         ] {
             assert!(skill.contains(required), "missing {required}");
         }
@@ -323,6 +329,55 @@ fn installs_both_documented_clients_with_absolute_argv() {
     let settings = fs::read_to_string(temp.path().join(".claude/settings.local.json")).unwrap();
     assert!(settings.contains("hook stop"));
     assert!(settings.contains("hook session-start"));
+}
+
+#[test]
+fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    fs::create_dir_all(p.join(".claude")).unwrap();
+    fs::write(
+        p.join(".claude/settings.local.json"),
+        "{\"permissions\":{\"allow\":[\"Bash(git status)\"],\"deny\":[\"Bash(rm)\"]}}",
+    )
+    .unwrap();
+    fs::write(
+        p.join("opencode.json"),
+        "{\"permission\":{\"task\":\"deny\",\"edit\":\"ask\"}}",
+    )
+    .unwrap();
+    install(p, "both").unwrap();
+
+    let settings = read_json(p.join(".claude/settings.local.json"));
+    assert_eq!(
+        settings["permissions"]["allow"],
+        json!(["Bash(git status)", "Task", "mcp__skillvolution"])
+    );
+    assert_eq!(settings["permissions"]["deny"], json!(["Bash(rm)"]));
+
+    let oc = read_json(p.join("opencode.json"));
+    // An explicit user choice wins over the grant; only absent keys are filled in.
+    assert_eq!(oc["permission"]["task"], "deny");
+    assert_eq!(oc["permission"]["edit"], "ask");
+    for tool in [
+        "skillvolution_search_skills",
+        "skillvolution_get_skill",
+        "skillvolution_report_skill_outcome",
+        "skillvolution_publish_skill",
+    ] {
+        assert_eq!(oc["permission"][tool], "allow", "{tool}");
+    }
+
+    // Fresh installs get task allowed outright.
+    let temp2 = tempfile::tempdir().unwrap();
+    install(temp2.path(), "both").unwrap();
+    let oc2 = read_json(temp2.path().join("opencode.json"));
+    assert_eq!(oc2["permission"]["task"], "allow");
+    let settings2 = read_json(temp2.path().join(".claude/settings.local.json"));
+    assert_eq!(
+        settings2["permissions"]["allow"],
+        json!(["Task", "mcp__skillvolution"])
+    );
 }
 
 #[test]
@@ -574,6 +629,177 @@ fn installs_opencode_plugin_with_placeholders_replaced() {
     let db = command[2].as_str().unwrap();
     assert!(plugin.contains(&serde_json::to_string(bin).unwrap()));
     assert!(plugin.contains(&serde_json::to_string(db).unwrap()));
+}
+
+#[test]
+fn installs_devin_project_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    install(p, "devin").unwrap();
+
+    let skill = fs::read_to_string(p.join(".devin/skills/evolution/SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\nname: evolution\n"));
+    assert!(skill.contains("skillvolution-managed:evolution:"));
+
+    let mcp = read_json(p.join(".devin/mcp_config.json"));
+    let server = &mcp["mcpServers"]["skillvolution"];
+    assert_eq!(
+        server["command"].as_str().unwrap(),
+        p.join(DEFAULT_BIN).to_str().unwrap()
+    );
+    let args = server["args"].as_array().unwrap();
+    assert_eq!(args[0], "--db");
+    assert!(args[1].as_str().unwrap().ends_with("vault.sqlite3"));
+    assert_eq!(args[2], "serve");
+    assert_eq!(args[3], "--project");
+
+    let config = read_json(p.join(".devin/config.json"));
+    assert_eq!(
+        config["permissions"]["allow"],
+        json!(["run_subagent", "read_subagent", "mcp__skillvolution__*"])
+    );
+    for event in [
+        "SessionStart",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+        "PermissionRequest",
+    ] {
+        let groups = config["hooks"][event].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{event}");
+        let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("skillvolution"), "{event}: {command}");
+    }
+    let stop_cmd = config["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(stop_cmd.contains("hook stop --client devin"), "{stop_cmd}");
+    let session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        session_cmd.contains("hook session-start --client devin --project"),
+        "{session_cmd}"
+    );
+    // PostToolUse and PermissionRequest carry a tool-name matcher; the others don't.
+    assert!(config["hooks"]["PostToolUse"][0]["matcher"].is_string());
+    assert!(config["hooks"]["PermissionRequest"][0]["matcher"].is_string());
+    assert!(config["hooks"]["Stop"][0].get("matcher").is_none());
+
+    let agents = fs::read_to_string(p.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("<!-- skillvolution:start -->"));
+    assert!(agents.contains("<!-- skillvolution:end -->"));
+}
+
+#[test]
+fn devin_project_setup_preserves_existing_config_and_is_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    fs::create_dir_all(p.join(".devin")).unwrap();
+    fs::write(
+        p.join(".devin/config.json"),
+        "{\"permissions\":{\"deny\":[\"Exec(rm)\"]},\"other\":1}",
+    )
+    .unwrap();
+    fs::write(
+        p.join(".devin/mcp_config.json"),
+        "{\"mcpServers\":{\"other\":{\"command\":\"npx\",\"args\":[\"-y\",\"x\"]}}}",
+    )
+    .unwrap();
+    fs::write(p.join("AGENTS.md"), "# Team notes\n").unwrap();
+
+    install(p, "devin").unwrap();
+    let config = read_json(p.join(".devin/config.json"));
+    assert_eq!(config["permissions"]["deny"], json!(["Exec(rm)"]));
+    assert_eq!(config["other"], 1);
+    let mcp = read_json(p.join(".devin/mcp_config.json"));
+    assert_eq!(mcp["mcpServers"]["other"]["command"], "npx");
+    assert!(p.join("AGENTS.md.skillvolution.bak").exists());
+
+    let before = fs::read(p.join(".devin/config.json")).unwrap();
+    install(p, "devin").unwrap();
+    assert_eq!(fs::read(p.join(".devin/config.json")).unwrap(), before);
+    assert!(!p.join(".devin/config.json.skillvolution.bak.1").exists());
+}
+
+#[test]
+fn rejects_devin_conflicts_before_writing() {
+    for (file, text) in [
+        (".devin/mcp_config.json", "not json"),
+        (".devin/mcp_config.json", "{\"mcpServers\":[]}"),
+        (
+            ".devin/mcp_config.json",
+            "{\"mcpServers\":{\"skillvolution\":false}}",
+        ),
+        (".devin/config.json", "{\"hooks\":\"nope\"}"),
+        (
+            ".devin/config.json",
+            "{\"permissions\":{\"allow\":\"nope\"}}",
+        ),
+        (
+            ".devin/skills/evolution/SKILL.md",
+            "# My own evolution skill",
+        ),
+        (
+            "AGENTS.md",
+            "Team notes\n<!-- skillvolution:start -->\nmissing end",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join(file);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, text).unwrap();
+        let result = install(temp.path(), "devin");
+        assert!(result.is_err(), "must reject {file}: {text}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), text);
+        if file != ".devin/mcp_config.json" {
+            assert!(
+                !temp.path().join(".devin/mcp_config.json").exists(),
+                "partial write for {file}"
+            );
+        }
+        if file != "AGENTS.md" {
+            assert!(
+                !temp.path().join("AGENTS.md").exists(),
+                "partial write for {file}"
+            );
+        }
+    }
+}
+
+#[test]
+fn project_setup_without_client_configures_all_three() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let bin = p.join(DEFAULT_BIN);
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::write(&bin, "test binary").unwrap();
+    let argv = vec![
+        "setup".to_owned(),
+        "--project".to_owned(),
+        p.to_string_lossy().into_owned(),
+        "--bin".to_owned(),
+        bin.to_string_lossy().into_owned(),
+        "--db".to_owned(),
+        p.join("data/vault.sqlite3").to_string_lossy().into_owned(),
+    ];
+    setup::run(Cli::parse_from(argv).setup).unwrap();
+    assert!(p.join("opencode.json").exists());
+    assert!(p.join(".mcp.json").exists());
+    assert!(p.join(".devin/config.json").exists());
+    // AGENTS.md is shared: one marker block even though two clients write it.
+    let agents = fs::read_to_string(p.join("AGENTS.md")).unwrap();
+    assert_eq!(agents.matches("<!-- skillvolution:start -->").count(), 1);
+}
+
+#[test]
+fn comma_separated_client_list_configures_a_subset() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    install(p, "devin,opencode").unwrap();
+    assert!(p.join("opencode.json").exists());
+    assert!(p.join(".devin/config.json").exists());
+    assert!(!p.join(".mcp.json").exists());
 }
 
 #[test]

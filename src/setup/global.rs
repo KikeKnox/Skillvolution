@@ -2,54 +2,71 @@
 //! project, and registers the Claude Code MCP server via the `claude` CLI instead of
 //! editing `~/.claude.json` (see `claude_cli`).
 
-use super::{detect, global_claude, global_opencode, write_all};
+use super::{Clients, detect, global_claude, global_devin, global_opencode, prompt, write_all};
 use anyhow::Result;
 use std::path::Path;
 
-pub fn run(client: &str, bin: &Path, db: &Path) -> Result<()> {
-    configure(client != "claude-code", client != "opencode", bin, db)
+pub fn run(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
+    configure(clients, bin, db)
 }
 
-/// Detects which clients are installed and configures only those, printing a one-line
-/// note for each client skipped. If neither is detected, prints a note and returns
+/// Detects which clients are installed, asks which to configure when a terminal
+/// is attached (see `prompt`), and configures the selection. Prints a one-line
+/// note for each skipped client; if none is detected, prints a note and returns
 /// without writing any client files.
 pub fn run_detected(bin: &Path, db: &Path) -> Result<()> {
     let detected = detect::detect();
-    if !detected.claude_code && !detected.opencode {
+    if !detected.any() {
         println!(
             "No AI client detected; skipping setup (run `skillvolution setup --client <name>` after installing one)."
         );
         return Ok(());
     }
-    if !detected.opencode {
-        println!(
-            "Skipped OpenCode: not detected (run `skillvolution setup --client opencode` after installing it)."
-        );
+    for (present, name, token) in detected.list() {
+        if !present {
+            println!(
+                "Skipped {name}: not detected (run `skillvolution setup --client {token}` after installing it)."
+            );
+        }
     }
-    if !detected.claude_code {
-        println!(
-            "Skipped Claude Code: not detected (run `skillvolution setup --client claude-code` after installing it)."
-        );
+    let selected = prompt::choose(detected);
+    for ((was_present, name, _), (still, _, _)) in detected.list().into_iter().zip(selected.list())
+    {
+        if was_present && !still {
+            println!("Skipped {name}: not selected.");
+        }
     }
-    configure(detected.opencode, detected.claude_code, bin, db)
+    if !selected.any() {
+        println!("No clients selected; nothing configured.");
+        return Ok(());
+    }
+    configure(selected, bin, db)
 }
 
-fn configure(opencode: bool, claude_code: bool, bin: &Path, db: &Path) -> Result<()> {
+fn configure(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
     let mut changes = Vec::new();
-    if opencode {
+    if clients.opencode {
         changes.extend(global_opencode::changes(bin, db)?);
     }
-    if claude_code {
+    if clients.claude_code {
         changes.extend(global_claude::changes(bin, db)?);
+    }
+    if clients.devin {
+        changes.extend(global_devin::changes(bin, db)?);
     }
     write_all(changes)?;
 
-    if opencode {
+    if clients.opencode {
         println!("Configured OpenCode (global): skill, config entry, AGENTS.md, plugin.");
     }
-    if claude_code {
-        println!("Configured Claude Code (global): skill, settings.json hooks.");
+    if clients.claude_code {
+        println!("Configured Claude Code (global): skill, settings.json hooks + permissions.");
         println!("{}", global_claude::register_mcp(bin, db)?);
+    }
+    if clients.devin {
+        println!(
+            "Configured Devin CLI (global): skill, mcp_config.json, config.json permissions + hooks, AGENTS.md."
+        );
     }
     Ok(())
 }
