@@ -18,7 +18,7 @@ pub const STOP_REASON: &str = "Skillvolution review: you changed files or ran co
 Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, \
 and for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent now \
 — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
-If there is nothing to report or evaluate, reply only \"No lesson.\" and stop.";
+If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     let page = vault.search("", project, CATALOG_LIMIT, 0)?;

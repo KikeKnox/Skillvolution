@@ -222,8 +222,18 @@ fn main() -> Result<()> {
             match client {
                 HookClient::ClaudeCode => {
                     if let Some(reason) = hook::stop(&open(&cli.db)?, &input)? {
-                        eprintln!("{reason}");
-                        std::process::exit(2);
+                        // additionalContext (stdout, exit 0) keeps the same stop_hook_active
+                        // loop protection as decision:block, but the transcript labels it
+                        // "Stop hook feedback" instead of a hook error notification.
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": "Stop",
+                                    "additionalContext": reason
+                                }
+                            })
+                        );
                     }
                 }
                 HookClient::Devin => {

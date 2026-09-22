@@ -115,6 +115,22 @@ writes and how the review hooks, the OpenCode plugin, and the evolution skill wo
   live session. Tests cover the CLI, the MCP protocol over a real subprocess, the OpenCode
   plugin's logic, and the files `setup` writes, not an authenticated client actually reading them.
 
+## FAQ
+
+**Claude Code (or another client) blocked the session and printed a "Stop hook feedback" /
+"Skillvolution review" message — is something broken?**
+
+No. `hook stop` scans the session's transcript for work (file edits) done since the last review; if
+it finds unreviewed work, it prints `{"hookSpecificOutput": {"additionalContext": ...}}` to stdout
+and exits 0. Claude Code still blocks the stop and feeds that text back to the model — it is the
+deliberate signal this project uses to make the agent follow the Report/Reflect/Evaluate/Publish
+steps of the `evolution` skill before ending its turn — but `additionalContext` is documented to
+show up in the transcript as ordinary "Stop hook feedback" rather than a hook error notification,
+which is why it doesn't look like a crash. There is no way to make it fully silent: any mechanism
+that blocks the stop and reaches the model necessarily shows something in the transcript. See
+`docs/integrations.md` for the full hook wiring, and `src/hook.rs`'s `STOP_REASON` for the exact
+text shown.
+
 ## Development
 
 ```bash

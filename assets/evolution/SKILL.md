@@ -2,7 +2,7 @@
 name: evolution
 description: Use at the start of any non-trivial task to find proven procedures in the shared Skillvolution vault, and after finishing work to report whether skills helped and publish verified, reusable lessons.
 ---
-<!-- skillvolution-managed:evolution:v5 -->
+<!-- skillvolution-managed:evolution:v7 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
@@ -26,10 +26,11 @@ Call `report_skill_outcome` once per applied skill, with the version you loaded:
 Draft a candidate lesson only if ALL of these hold:
 1. Verified: a test, command, or observed result confirmed it.
 2. Non-obvious: not in official docs or general knowledge.
-3. Reusable: applies beyond this task.
+3. Reusable: a meaningful share of future sessions would plausibly hit this exact situation —
+   not just "it would apply if someone happened to be doing this."
 4. Costly to miss: another agent would repeat the mistake or waste significant time.
 
-Good triggers: the user corrected you; a failed approach was diagnosed; a workaround emerged after a dead end; an applied skill failed. If any criterion fails, write nothing and answer "No lesson." when asked for a review.
+Good triggers: the user corrected you; a failed approach was diagnosed; a workaround emerged after a dead end; an applied skill failed. If any criterion fails, say so in one short line with no elaboration and no heading, then continue.
 
 ## 4. Write
 

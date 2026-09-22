@@ -90,13 +90,16 @@ rely on the same auto-detection as `serve`; project-mode hooks bake in `--projec
 offset last recorded for that session in `hook_state`. If that span used a work tool that edits
 files directly (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` — shell commands such as `Bash` no
 longer count as work) without a matching `report_skill_outcome` or `publish_skill` call, it prints
-a reason to stderr (`STOP_REASON` in `src/hook.rs`) and exits 2, which Claude Code treats as
-"block the stop and show the model this reason." That reason tells the model to relay the
-fresh-context evaluator's verdict and its one-line reason to `publish_skill` as the
-`verdict`/`verdict_reason` arguments; `publish_skill` rejects the call if either is missing. The
-reviewed offset always advances to the last complete transcript line, so a given unreviewed span
-blocks at most once, and `stop_hook_active` is honored so a stop already continued by this hook is
-never blocked again.
+`{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": <STOP_REASON>}}` to stdout
+and exits 0. Claude Code still blocks the stop and feeds `STOP_REASON` (`src/hook.rs`) back to the
+model, with the same `stop_hook_active` loop protection as the older `decision: "block"`/exit-2
+mechanism, but the transcript labels it "Stop hook feedback" rather than a hook error notification
+— `additionalContext` is documented as the softer of the two for the exact same blocking effect.
+That reason tells the model to relay the fresh-context evaluator's verdict and its one-line reason
+to `publish_skill` as the `verdict`/`verdict_reason` arguments; `publish_skill` rejects the call if
+either is missing. The reviewed offset always advances to the last complete transcript line, so a
+given unreviewed span blocks at most once, and `stop_hook_active` is honored so a stop already
+continued by this hook is never blocked again.
 
 ## Devin hooks
 

@@ -363,7 +363,7 @@ fn run_hook_stop(db: &std::path::Path, input: &str) -> std::process::Output {
 }
 
 #[test]
-fn cli_hook_stop_exits_2_with_a_reason_when_blocking_and_0_otherwise() {
+fn cli_hook_stop_feeds_additional_context_when_blocking_and_prints_nothing_otherwise() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     Vault::open(&db).unwrap();
@@ -371,12 +371,24 @@ fn cli_hook_stop_exits_2_with_a_reason_when_blocking_and_0_otherwise() {
     write_transcript(&transcript, &[assistant_tool_use("Edit")]);
     let input = stop_input("s1", &transcript, false);
 
+    // additionalContext (stdout, exit 0) still blocks the stop, but the transcript
+    // shows it as feedback rather than a hook-error notification.
     let blocked = run_hook_stop(&db, &input);
-    assert_eq!(blocked.status.code(), Some(2));
-    assert!(!blocked.stderr.is_empty());
+    assert!(blocked.status.success());
+    assert!(blocked.stderr.is_empty());
+    let decision: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(decision["hookSpecificOutput"]["hookEventName"], "Stop");
+    assert!(
+        decision["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Skillvolution"),
+        "{decision}"
+    );
 
     let clean = run_hook_stop(&db, &input);
     assert!(clean.status.success());
+    assert!(clean.stdout.is_empty());
     assert!(clean.stderr.is_empty());
 }
 
