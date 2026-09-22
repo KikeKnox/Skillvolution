@@ -13,7 +13,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search_skills",
-            "description": "Search the shared skill vault before starting a non-trivial task. Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance. Returns metadata only (id, version, description, tags, helped/failed counts); call get_skill for the body. An empty query lists the catalog.",
+            "description": "Search the shared skill vault before starting a non-trivial task. Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance and by reported outcomes: a skill with more failed than helped reports on its current version is demoted, so it can land below a weaker text match, while a proven one is promoted. Returns metadata only (id, version, description, tags, helped/failed counts); call get_skill for the body. An empty query lists the catalog.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -64,9 +64,12 @@ fn tools() -> Value {
                     "content": {"type": "string", "description": "Full markdown body with sections: When to use, Procedure, Pitfalls, Verification"},
                     "evidence": {"type": "string", "description": "Observed / Tried / Result: what actually happened in this session"},
                     "expected_version": {"type": "integer", "minimum": 0, "description": "Current published version of the skill, or 0 for a new skill"},
-                    "scope": {"type": "string", "enum": ["global", "project"], "default": "global", "description": "project when the lesson only applies to this repository"}
+                    "scope": {"type": "string", "enum": ["global", "project"], "default": "global", "description": "project when the lesson only applies to this repository"},
+                    "verdict": {"type": "string", "enum": ["keep global", "keep project"], "description": "The fresh-context evaluator's verdict line, verbatim. A discard verdict must never be published."},
+                    "verdict_reason": {"type": "string", "description": "The evaluator's one-line reason for that verdict, verbatim"},
+                    "replaces_proven": {"type": "boolean", "default": false, "description": "Set true only when replacing a version with more helped than failed reports, after merging its content rather than rewriting it"}
                 },
-                "required": ["id", "description", "content", "evidence", "expected_version"],
+                "required": ["id", "description", "content", "evidence", "expected_version", "verdict", "verdict_reason"],
                 "additionalProperties": false
             }
         }
@@ -116,6 +119,10 @@ struct PublishArgs {
     expected_version: i64,
     #[serde(default)]
     scope: Option<String>,
+    verdict: String,
+    verdict_reason: String,
+    #[serde(default)]
+    replaces_proven: bool,
 }
 
 struct Server {
@@ -268,6 +275,9 @@ impl Server {
                     evidence: &args.evidence,
                     expected_version: args.expected_version,
                     scope,
+                    verdict: &args.verdict,
+                    verdict_reason: &args.verdict_reason,
+                    replaces_proven: args.replaces_proven,
                 })?;
                 Ok(json!({
                     "id": revision.id,

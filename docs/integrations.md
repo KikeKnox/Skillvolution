@@ -87,12 +87,16 @@ to the project (id, version, description, helped/failed counts). Global hooks om
 rely on the same auto-detection as `serve`; project-mode hooks bake in `--project <key>`.
 
 `hook stop` reads the Claude Code Stop payload from stdin and scans the transcript since the
-offset last recorded for that session in `hook_state`. If that span used a work tool (`Edit`,
-`Write`, `MultiEdit`, `NotebookEdit`, `Bash`) without a matching `report_skill_outcome` or
-`publish_skill` call, it prints a reason to stderr and exits 2, which Claude Code treats as
-"block the stop and show the model this reason." The reviewed offset always advances to the last
-complete transcript line, so a given unreviewed span blocks at most once, and `stop_hook_active` is
-honored so a stop already continued by this hook is never blocked again.
+offset last recorded for that session in `hook_state`. If that span used a work tool that edits
+files directly (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` — shell commands such as `Bash` no
+longer count as work) without a matching `report_skill_outcome` or `publish_skill` call, it prints
+a reason to stderr (`STOP_REASON` in `src/hook.rs`) and exits 2, which Claude Code treats as
+"block the stop and show the model this reason." That reason tells the model to relay the
+fresh-context evaluator's verdict and its one-line reason to `publish_skill` as the
+`verdict`/`verdict_reason` arguments; `publish_skill` rejects the call if either is missing. The
+reviewed offset always advances to the last complete transcript line, so a given unreviewed span
+blocks at most once, and `stop_hook_active` is honored so a stop already continued by this hook is
+never blocked again.
 
 ## Devin hooks
 
@@ -102,7 +106,8 @@ judgment is kept as per-session flags in the vault's `devin_hook_state` table. T
 
 - `SessionStart` → `hook session-start --client devin` prints the catalog inside a
   `hookSpecificOutput.additionalContext` envelope, the only form Devin injects.
-- `PostToolUse` (matched on `exec|write|edit|apply_patch|notebook_edit|mcp__skillvolution__.*`) →
+- `PostToolUse` (matched on `write|edit|apply_patch|notebook_edit|mcp__skillvolution__.*`, built
+  from `DEVIN_WORK_TOOLS` — shell commands such as `exec` no longer count as work) →
   `hook tool-use` marks the session as having worked or reviewed.
 - `Stop` → `hook stop --client devin` prints `{"decision":"block","reason":...}` once per
   unreviewed span; the span is consumed on block, `stop_hook_active` is honored, and a stop after
@@ -121,8 +126,9 @@ judgment is kept as per-session flags in the vault's `devin_hook_state` table. T
 `plugins/skillvolution.js` (global) or `.opencode/plugins/skillvolution.js` (project) does two
 things: injects the skill catalog into the system prompt once per session by running
 `skillvolution hook session-start` in the project directory; and, once a turn that did work
-(`edit`, `write`, `patch`/`apply_patch`, `bash`) goes idle without a `report_skill_outcome` or
-`publish_skill` call, adds a review reminder for the evolution skill's report/reflect steps to the
+(`edit`, `write`, `multiedit`, `patch`/`apply_patch` — shell commands such as `bash` no longer
+count as work) goes idle without a `report_skill_outcome` or `publish_skill` call, adds a review
+reminder for the evolution skill's report/reflect steps to the
 system prompt of the following turns until a review tool is called. It never prompts the session
 itself, so no extra model turn is spent; subagent (task) sessions hand their work and reviews to
 the parent session, whose context alone carries the reminder; and a span ending in an error or

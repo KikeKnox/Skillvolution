@@ -51,18 +51,22 @@ fn hook_entries(
     bin: &Path,
     db: &Path,
     key: Option<&str>,
-) -> Result<Vec<(&'static str, Option<&'static str>, String)>> {
+) -> Result<Vec<(&'static str, Option<String>, String)>> {
     let bin = hooks::shell_quote(hooks::require_utf8(bin, "--bin")?);
     let db = hooks::shell_quote(hooks::require_utf8(db, "--db")?);
     let mut session_start = format!("{bin} --db {db} hook session-start --client devin");
     if let Some(key) = key {
         session_start = format!("{session_start} --project {}", hooks::shell_quote(key));
     }
+    let post_tool_use_matcher = format!(
+        "^({}|mcp__skillvolution__.*)$",
+        crate::hook::DEVIN_WORK_TOOLS.join("|")
+    );
     Ok(vec![
         ("SessionStart", None, session_start),
         (
             "PostToolUse",
-            Some("^(exec|write|edit|apply_patch|notebook_edit|mcp__skillvolution__.*)$"),
+            Some(post_tool_use_matcher),
             format!("{bin} --db {db} hook tool-use"),
         ),
         (
@@ -77,7 +81,7 @@ fn hook_entries(
         ),
         (
             "PermissionRequest",
-            Some("^(run_subagent|read_subagent|mcp__skillvolution__.*)$"),
+            Some("^(run_subagent|read_subagent|mcp__skillvolution__.*)$".to_owned()),
             format!("{bin} --db {db} hook approve"),
         ),
     ])

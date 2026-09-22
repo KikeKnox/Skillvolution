@@ -139,7 +139,7 @@ fn append_group(
 
 /// Replaces our entries in `config["hooks"]` with `entries` (event, optional
 /// `matcher` regex, command), preserving every other event and every foreign hook.
-pub fn merge(config: &mut Value, entries: &[(&str, Option<&str>, String)]) -> Result<()> {
+pub fn merge(config: &mut Value, entries: &[(&str, Option<String>, String)]) -> Result<()> {
     let hooks = config
         .as_object_mut()
         .context("config must be an object")?
@@ -152,11 +152,11 @@ pub fn merge(config: &mut Value, entries: &[(&str, Option<&str>, String)]) -> Re
 
 fn merge_entries(
     hooks: &mut Map<String, Value>,
-    entries: &[(&str, Option<&str>, String)],
+    entries: &[(&str, Option<String>, String)],
 ) -> Result<()> {
     for (event, matcher, command) in entries {
         strip_owned(hooks, event)?;
-        append_group(hooks, event, *matcher, command.clone())?;
+        append_group(hooks, event, matcher.as_deref(), command.clone())?;
     }
     Ok(())
 }

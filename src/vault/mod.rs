@@ -17,6 +17,12 @@ const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = include_str!("schema.sql");
 const MAX_TAGS: usize = 8;
 const MAX_TAG_BYTES: usize = 32;
+const CONTENT_SECTIONS: [&str; 4] = [
+    "## When to use",
+    "## Procedure",
+    "## Pitfalls",
+    "## Verification",
+];
 
 pub struct Vault {
     conn: Connection,
@@ -234,6 +240,117 @@ fn validate_tags(tags: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The four sections the evolution skill prescribes, in order. Extra `##`
+/// sections and prose before the first heading are fine; the order is enforced
+/// by advancing one heading iterator across all four searches.
+fn validate_sections(content: &str) -> Result<()> {
+    let mut headings = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("## "));
+    ensure!(
+        CONTENT_SECTIONS
+            .iter()
+            .all(|section| headings.any(|heading| heading.eq_ignore_ascii_case(section))),
+        "content must contain the headings {}, each on its own line and in that order",
+        CONTENT_SECTIONS.join(", ")
+    );
+    Ok(())
+}
+
+/// Credential shapes with a fixed, high-signal prefix: (prefix, minimum body
+/// length, label). Case-sensitive on purpose: real credentials have fixed case,
+/// so `GHP_` or `Akia` in prose never matches.
+const SECRET_SHAPES: [(&str, usize, &str); 10] = [
+    ("AKIA", 16, "an AWS access key id"),
+    ("ASIA", 16, "an AWS temporary access key id"),
+    ("ghp_", 30, "a GitHub token"),
+    ("gho_", 30, "a GitHub token"),
+    ("ghu_", 30, "a GitHub token"),
+    ("ghs_", 30, "a GitHub token"),
+    ("ghr_", 30, "a GitHub token"),
+    ("github_pat_", 30, "a GitHub token"),
+    ("sk-", 20, "an OpenAI API key"),
+    ("AIza", 35, "a Google API key"),
+];
+const BEARER_MINIMUM: usize = 32;
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The credential-shaped run at the start of `rest`: real credentials are long
+/// and mix letters with digits, which placeholders (`ghp_xxx`, `<token>`,
+/// `$GITHUB_TOKEN`, `sk-...`) never are.
+fn credential_body(rest: &str, minimum: usize) -> bool {
+    let body = rest
+        .split(|c: char| !is_token_char(c))
+        .next()
+        .unwrap_or_default();
+    body.len() >= minimum
+        && body.bytes().any(|b| b.is_ascii_digit())
+        && body.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
+/// `prefix` must start the token or follow a character that cannot be part of a
+/// credential, so `task-1a2b3c4d5e6f7a8b` is never read as an OpenAI key.
+fn has_credential(token: &str, prefix: &str, minimum: usize) -> bool {
+    token.match_indices(prefix).any(|(at, _)| {
+        (at == 0 || !token[..at].chars().next_back().is_some_and(is_token_char))
+            && credential_body(&token[at + prefix.len()..], minimum)
+    })
+}
+
+/// A complete three-segment JWT; truncated teaching examples
+/// (`eyJhbGciOiJIUzI1NiJ9.<payload>.<sig>`) don't match.
+fn is_jwt(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| !is_token_char(c) && c != '.');
+    let segments: Vec<&str> = token.split('.').collect();
+    matches!(segments.as_slice(), [header, payload, signature]
+        if header.starts_with("eyJ") && header.len() >= 16
+            && payload.len() >= 24 && signature.len() >= 16
+            && segments.iter().all(|s| s.chars().all(is_token_char)))
+}
+
+/// Refuses credential-shaped tokens before anything is written to a vault that
+/// publishes immediately. Line- and token-local: no entropy scoring, and no
+/// generic `key=value` rule (deliberately — see the false-positive discussion
+/// in docs/architecture.md).
+fn validate_no_secrets(name: &str, text: &str) -> Result<()> {
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        if line.trim_start().starts_with("-----BEGIN") && line.contains("PRIVATE KEY") {
+            bail!(
+                "{name} must not contain credentials: a private key block appears on line {number}; \
+                 describe the key instead of pasting it, then publish again"
+            );
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for (at, token) in tokens.iter().enumerate() {
+            let label = SECRET_SHAPES
+                .iter()
+                .find(|(prefix, minimum, _)| has_credential(token, prefix, *minimum))
+                .map(|(_, _, label)| *label)
+                .or_else(|| is_jwt(token).then_some("a JSON Web Token"))
+                .or_else(|| {
+                    let after_bearer = at > 0
+                        && tokens[at - 1]
+                            .trim_end_matches(':')
+                            .eq_ignore_ascii_case("bearer");
+                    (after_bearer && credential_body(token, BEARER_MINIMUM))
+                        .then_some("a bearer token")
+                });
+            if let Some(label) = label {
+                bail!(
+                    "{name} must not contain credentials: {label} appears on line {number}; \
+                     replace the value with a placeholder like <token> or $ENV_VAR and publish again"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn join_tags(tags: &[String]) -> String {
     let mut unique: Vec<&str> = Vec::new();
     for tag in tags {
@@ -246,4 +363,88 @@ fn join_tags(tags: &[String]) -> String {
 
 fn split_tags(tags: &str) -> Vec<String> {
     tags.split_whitespace().map(str::to_owned).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 40 bytes, mixes letters and digits, contains none of the fixed
+    /// prefixes below — a generic stand-in for "a long random credential".
+    const REAL_BODY: &str = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0";
+
+    #[test]
+    fn secret_shapes_detect_a_real_credential_shaped_value() {
+        for (prefix, minimum, label) in SECRET_SHAPES {
+            let token = format!("{prefix}{REAL_BODY}");
+            assert!(
+                has_credential(&token, prefix, minimum),
+                "expected {label} ({prefix:?}) to match {token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_shapes_do_not_flag_their_placeholder_forms() {
+        let placeholders = [
+            ("AKIA", "AKIAEXAMPLE"),
+            ("ASIA", "ASIAEXAMPLE"),
+            ("ghp_", "ghp_xxx"),
+            ("gho_", "gho_xxx"),
+            ("ghu_", "ghu_xxx"),
+            ("ghs_", "ghs_xxx"),
+            ("ghr_", "ghr_xxx"),
+            ("github_pat_", "github_pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            ("sk-", "sk-..."),
+            ("AIza", "AIza..."),
+        ];
+        for (prefix, placeholder) in placeholders {
+            let (_, minimum, label) = SECRET_SHAPES
+                .into_iter()
+                .find(|(p, _, _)| *p == prefix)
+                .unwrap();
+            assert!(
+                !has_credential(placeholder, prefix, minimum),
+                "expected placeholder {placeholder:?} not to match {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_prefix_inside_a_larger_identifier_is_not_flagged() {
+        // `sk-` is preceded by a token character (`a` of `task`, `i` of
+        // `disk`) in both cases, so it is part of a larger word, not the
+        // start of a credential.
+        assert!(!has_credential("task-1a2b3c4d5e6f7a8b", "sk-", 20));
+        assert!(!has_credential("disk-abc123456789012345", "sk-", 20));
+    }
+
+    #[test]
+    fn private_key_block_is_detected() {
+        let text = format!("before\n-----BEGIN RSA PRIVATE KEY-----\n{REAL_BODY}\nafter");
+        let error = validate_no_secrets("content", &text)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("private key"), "{error}");
+        assert!(error.contains("line 2"), "{error}");
+    }
+
+    #[test]
+    fn full_jwt_is_detected_but_a_truncated_teaching_example_is_not() {
+        let full = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.\
+SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        assert!(is_jwt(full), "{full}");
+        assert!(!is_jwt("eyJhbGciOiJIUzI1NiJ9.<payload>.<sig>"));
+    }
+
+    #[test]
+    fn bearer_prefixed_long_token_is_detected_but_env_var_placeholder_is_not() {
+        let real = format!("Authorization: Bearer {REAL_BODY}");
+        let error = validate_no_secrets("content", &real)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bearer token"), "{error}");
+        assert!(validate_no_secrets("content", "Authorization: Bearer $TOKEN").is_ok());
+    }
 }

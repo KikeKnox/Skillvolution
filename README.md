@@ -101,6 +101,10 @@ writes and how the review hooks, the OpenCode plugin, and the evolution skill wo
 
 ## Limitations
 
+- The vault rejects credential-shaped values (AWS/GitHub/OpenAI/Google-style keys, private key
+  blocks, full JWTs, bearer tokens) and `content` bodies missing the four required sections, but it
+  still does not independently verify evidence, and it does not scan the free-text notes attached
+  to `report_skill_outcome`.
 - Evidence attached to a publication is supplied by the publishing agent and is not independently
   verified by the vault; the evaluator subagent judges it from the text alone, so deprecate
   publications whose evidence looks invented.

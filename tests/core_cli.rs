@@ -42,12 +42,21 @@ fn show_exposes_a_published_revision() {
     assert!(shown_out.contains("published"));
     assert!(shown_out.contains("Observed / Tried / Result"));
     assert!(shown_out.contains("+description"));
+    // The evaluator verdict is persisted as the review note and surfaced here.
+    assert!(shown_out.contains("keep global"), "{shown_out}");
 
     let shown_json = run(&db, &["show", "example", "--version", "1", "--json"]);
     assert_success(&shown_json);
     let shown_json: serde_json::Value = serde_json::from_slice(&shown_json.stdout).unwrap();
     assert_eq!(shown_json["id"], "example");
     assert_eq!(shown_json["status"], "published");
+    assert!(
+        shown_json["review_note"]
+            .as_str()
+            .is_some_and(|note| note.starts_with("keep global: ")),
+        "{shown_json}"
+    );
+    assert!(shown_json["reviewed_at"].is_string(), "{shown_json}");
 }
 
 #[test]

@@ -77,6 +77,7 @@ fn get_and_inspect_reject_non_positive_versions() {
 #[test]
 fn rejects_invalid_proposals_before_writing() {
     let (_dir, mut vault) = open();
+    let valid_content = support::sectioned("Content body");
     let base = |id, description, content, evidence, expected_version| Proposal {
         id,
         description,
@@ -85,15 +86,18 @@ fn rejects_invalid_proposals_before_writing() {
         evidence,
         expected_version,
         scope: None,
+        verdict: "keep global",
+        verdict_reason: "Verified and reusable",
+        replaces_proven: false,
     };
     let long_id = "a".repeat(65);
     for id in ["", "Upper", long_id.as_str()] {
-        let proposal = base(id, "Use when testing", "Content body", "Evidence text", 0);
+        let proposal = base(id, "Use when testing", &valid_content, "Evidence text", 0);
         assert!(vault.propose(&proposal).is_err(), "accepted id {id:?}");
     }
     let long_description = "d".repeat(281);
     for description in ["", long_description.as_str(), "two\nlines"] {
-        let proposal = base("valid-id", description, "Content body", "Evidence text", 0);
+        let proposal = base("valid-id", description, &valid_content, "Evidence text", 0);
         assert!(
             vault.propose(&proposal).is_err(),
             "accepted description {description:?}"
@@ -109,7 +113,7 @@ fn rejects_invalid_proposals_before_writing() {
     }
     let long_evidence = "x".repeat(16_385);
     for evidence in ["", long_evidence.as_str(), "nul\0evidence"] {
-        let proposal = base("valid-id", "Use when testing", "Content body", evidence, 0);
+        let proposal = base("valid-id", "Use when testing", &valid_content, evidence, 0);
         assert!(
             vault.propose(&proposal).is_err(),
             "accepted evidence {evidence:?}"
@@ -120,7 +124,7 @@ fn rejects_invalid_proposals_before_writing() {
             .propose(&base(
                 "valid-id",
                 "Use when testing",
-                "Content body",
+                &valid_content,
                 "Evidence text",
                 -1
             ))
@@ -154,6 +158,203 @@ fn rejects_invalid_tags_and_keeps_valid_ones_in_order() {
         .propose(&Draft::new("skill-d").tags(&["rust", "sqlite"]).proposal())
         .unwrap();
     assert_eq!(revision.tags, vec!["rust", "sqlite"]);
+}
+
+#[test]
+fn content_missing_any_required_section_is_rejected() {
+    let (_dir, mut vault) = open();
+    let sections = [
+        "## When to use\nDo the thing.\n",
+        "## Procedure\n1. Do it.\n",
+        "## Pitfalls\n- None.\n",
+        "## Verification\nCheck it.\n",
+    ];
+    for skip in 0..sections.len() {
+        let content: String = sections
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != skip)
+            .map(|(_, s)| *s)
+            .collect();
+        assert!(
+            vault
+                .propose(&Draft::new("skill").raw_content(&content).proposal())
+                .is_err(),
+            "accepted content missing section {skip}: {content:?}"
+        );
+    }
+}
+
+#[test]
+fn sections_present_but_out_of_order_are_rejected() {
+    let (_dir, mut vault) = open();
+    let content = "## Procedure\n1. Do it.\n## When to use\nDo the thing.\n\
+                   ## Verification\nCheck it.\n## Pitfalls\n- None.\n";
+    assert!(
+        vault
+            .propose(&Draft::new("skill").raw_content(content).proposal())
+            .is_err()
+    );
+}
+
+#[test]
+fn sections_accept_case_variation_whitespace_extra_sections_and_leading_prose() {
+    let (_dir, mut vault) = open();
+    let content = "Some prose before the first heading.\n\n  ## WHEN TO USE  \n\
+                   Do the thing.\n## Rollback\nUndo if needed.\n## Procedure\n1. Do it.\n\
+                   ## Pitfalls\n- None.\n## Verification\nCheck it.\n";
+    assert!(
+        vault
+            .propose(&Draft::new("skill").raw_content(content).proposal())
+            .is_ok()
+    );
+}
+
+#[test]
+fn requires_a_keep_verdict_and_records_it_as_the_review_note() {
+    let (_dir, mut vault) = open();
+    let reason = "Reproduced twice and reusable outside this repository";
+    let published = Draft::new("skill")
+        .verdict_reason(reason)
+        .propose(&mut vault);
+    assert_eq!(
+        published.review_note.as_deref(),
+        Some(format!("keep global: {reason}").as_str())
+    );
+    assert!(published.reviewed_at.is_some());
+    let stored = vault.inspect("skill", published.version).unwrap();
+    assert_eq!(stored.review_note, published.review_note);
+    assert_eq!(stored.reviewed_at, published.reviewed_at);
+}
+
+#[test]
+fn rejects_a_discard_verdict_and_a_verdict_that_contradicts_the_scope() {
+    let (_dir, mut vault) = open();
+    let discarded = vault
+        .propose(&Draft::new("skill-a").verdict("discard").proposal())
+        .unwrap_err()
+        .to_string();
+    assert!(discarded.contains("discard"), "{discarded}");
+
+    let project_as_global = vault
+        .propose(
+            &Draft::new("skill-b")
+                .scope("proja")
+                .verdict("keep global")
+                .proposal(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        project_as_global.contains("does not match scope"),
+        "{project_as_global}"
+    );
+
+    let global_as_project = vault
+        .propose(&Draft::new("skill-c").verdict("keep project").proposal())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        global_as_project.contains("does not match scope"),
+        "{global_as_project}"
+    );
+
+    let paraphrased = vault
+        .propose(&Draft::new("skill-d").verdict("keep it, global").proposal())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        paraphrased.contains("verdict must be exactly"),
+        "{paraphrased}"
+    );
+
+    // Nothing was written by any of the four.
+    assert_eq!(vault.search("", Some("proja"), 20, 0).unwrap().total, 0);
+}
+
+#[test]
+fn replacing_a_proven_version_requires_an_acknowledgement() {
+    let (_dir, mut vault) = open();
+    let v1 = Draft::new("proven").publish(&mut vault);
+    for note in ["worked once", "worked twice"] {
+        vault
+            .record_outcome("proven", v1, "helped", note, None)
+            .unwrap();
+    }
+    let replacement = Draft::new("proven").expected_version(v1);
+    let refused = vault
+        .propose(&replacement.proposal())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("proven"), "{refused}");
+    assert!(refused.contains("helped 2"), "{refused}");
+    assert_eq!(vault.get("proven", None, None).unwrap().version, v1);
+
+    let acknowledged = vault
+        .propose(&replacement.replaces_proven(true).proposal())
+        .unwrap();
+    assert_eq!(acknowledged.version, 2);
+
+    // Control: a version with as many failures as successes is not proven, so
+    // it can be replaced freely.
+    let net_zero = Draft::new("unproven").publish(&mut vault);
+    for result in ["helped", "failed"] {
+        vault
+            .record_outcome("unproven", net_zero, result, "note", None)
+            .unwrap();
+    }
+    let free = vault
+        .propose(&Draft::new("unproven").expected_version(net_zero).proposal())
+        .unwrap();
+    assert_eq!(free.version, 2);
+}
+
+#[test]
+fn rejects_credential_shaped_values_in_content_and_evidence() {
+    let (_dir, mut vault) = open();
+    let content_secret = "AKIA1234567890ABCDEF";
+    let content = support::sectioned(&format!("export AWS_ACCESS_KEY_ID={content_secret}"));
+    let error = vault
+        .propose(&Draft::new("skill").raw_content(&content).proposal())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("AWS access key id"), "{error}");
+    assert!(error.contains("line 2"), "{error}");
+    assert!(!error.contains(content_secret), "{error}");
+
+    let evidence_secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    let error = vault
+        .propose(
+            &Draft::new("skill2")
+                .evidence(&format!("Observed token {evidence_secret} in logs"))
+                .proposal(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("GitHub token"), "{error}");
+    assert!(error.contains("line 1"), "{error}");
+    assert!(!error.contains(evidence_secret), "{error}");
+}
+
+#[test]
+fn accepts_credential_documentation_without_real_values() {
+    let (_dir, mut vault) = open();
+    let content = "\
+## When to use
+Configuring credentials for the GitHub and OpenAI CLIs.
+## Procedure
+1. `export GITHUB_TOKEN=ghp_<your token>`
+2. `api_key=$OPENAI_API_KEY`
+3. `Authorization: Bearer $TOKEN`
+4. keys look like sk-... or AKIA...
+5. `git switch task-1a2b3c4d5e6f7a8b`
+## Pitfalls
+- Never paste a real token into a skill body.
+## Verification
+Re-run the command with the placeholder substituted.
+";
+    let result = vault.propose(&Draft::new("skill").raw_content(content).proposal());
+    assert!(result.is_ok(), "{:?}", result.err());
 }
 
 // --- lifecycle -----------------------------------------------------------
@@ -207,7 +408,7 @@ fn proposals_publish_immediately_and_keep_history() {
     assert_eq!(vault.get("rust-tests", None, None).unwrap().version, 2);
     assert_eq!(
         vault.get("rust-tests", Some(1), None).unwrap().content,
-        "First body"
+        support::sectioned("First body")
     );
     assert!(vault.get("rust-tests", Some(99), None).is_err());
 }
@@ -397,6 +598,59 @@ fn ranking_prefers_id_and_description_matches_over_content_only_matches() {
     let page = vault.search("widget", None, 20, 0).unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(page.skills[0].id, "widget-cache");
+}
+
+#[test]
+fn a_net_negative_history_demotes_a_stronger_text_match() {
+    let (_dir, mut vault) = open();
+    let cache = Draft::new("widget-cache")
+        .description("Widget caching guide")
+        .content("unrelated body")
+        .publish(&mut vault);
+    Draft::new("other-skill")
+        .description("Unrelated description")
+        .content("uses a widget somewhere")
+        .publish(&mut vault);
+    let page = vault.search("widget", None, 20, 0).unwrap();
+    assert_eq!(page.skills[0].id, "widget-cache");
+
+    for _ in 0..3 {
+        vault
+            .record_outcome("widget-cache", cache, "failed", "did not work", None)
+            .unwrap();
+    }
+    let page = vault.search("widget", None, 20, 0).unwrap();
+    assert_eq!(
+        page.skills
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        ["other-skill", "widget-cache"],
+        "three failures must outweigh a stronger text match"
+    );
+    assert_eq!(page.total, 2);
+}
+
+#[test]
+fn equal_helped_and_failed_counts_leave_the_text_ranking_unchanged() {
+    let (_dir, mut vault) = open();
+    let cache = Draft::new("widget-cache")
+        .description("Widget caching guide")
+        .content("unrelated body")
+        .publish(&mut vault);
+    Draft::new("other-skill")
+        .description("Unrelated description")
+        .content("uses a widget somewhere")
+        .publish(&mut vault);
+    for result in ["helped", "failed", "helped", "failed", "helped", "failed"] {
+        vault
+            .record_outcome("widget-cache", cache, result, "n", None)
+            .unwrap();
+    }
+    assert_eq!(
+        vault.search("widget", None, 20, 0).unwrap().skills[0].id,
+        "widget-cache"
+    );
 }
 
 #[test]

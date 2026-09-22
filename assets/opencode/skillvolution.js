@@ -16,10 +16,10 @@ const REVIEW_REMINDER =
   "call report_skill_outcome for any vault skill you applied, and for any candidate " +
   "lesson that meets every lesson criterion, dispatch a fresh subagent now — " +
   "without asking the user — to judge it " +
-  "(global scope, project scope, or discard), then call publish_skill with the verdict.";
+  "(global scope, project scope, or discard), then call publish_skill with the verdict and its reason.";
 
 // OpenCode built-in tool ids that change files or run commands.
-const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch", "bash"]);
+const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"]);
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
 const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
 

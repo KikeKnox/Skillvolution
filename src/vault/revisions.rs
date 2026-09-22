@@ -1,5 +1,6 @@
 use super::{
-    Vault, join_tags, split_tags, validate_id, validate_single_line, validate_tags, validate_text,
+    Vault, join_tags, split_tags, validate_id, validate_no_secrets, validate_sections,
+    validate_single_line, validate_tags, validate_text,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -8,6 +9,9 @@ const REVISION_SELECT: &str = "SELECT r.id, r.version, s.scope, r.description, r
     r.evidence, r.expected_version, r.status, r.created_at, r.reviewed_at, r.review_note
     FROM revisions r JOIN skills s ON s.id = r.id";
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
+/// The only evaluator verdicts that may be published; `discard` and anything
+/// else is refused.
+const KEEP_VERDICTS: [&str; 2] = ["keep global", "keep project"];
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Revision {
@@ -44,6 +48,13 @@ pub struct Proposal<'a> {
     pub evidence: &'a str,
     pub expected_version: i64,
     pub scope: Option<&'a str>,
+    /// The fresh-context evaluator's verdict line, verbatim.
+    pub verdict: &'a str,
+    /// Its one-line reason, verbatim.
+    pub verdict_reason: &'a str,
+    /// Acknowledges that the version being replaced has more helped than
+    /// failed reports and that its content was merged, not rewritten.
+    pub replaces_proven: bool,
 }
 
 fn revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Revision> {
@@ -68,6 +79,17 @@ fn current_version(conn: &Connection, id: &str) -> Result<i64> {
         "SELECT COALESCE(MAX(version), 0) FROM revisions WHERE id = ?1 AND status = 'published'",
         [id],
         |row| row.get(0),
+    )?)
+}
+
+/// The helped/failed reports recorded against `version` — the history a
+/// wholesale replacement resets, since outcome counts are per revision.
+fn outcome_score(conn: &Connection, id: &str, version: i64) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(result = 'helped'), 0), COALESCE(SUM(result = 'failed'), 0)
+         FROM outcomes WHERE id = ?1 AND version = ?2",
+        params![id, version],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
 }
 
@@ -106,12 +128,27 @@ impl Vault {
             evidence,
             expected_version,
             scope,
+            verdict,
+            verdict_reason,
+            replaces_proven,
         } = *proposal;
         validate_id(id)?;
         validate_single_line("description", description, 280)?;
         validate_tags(tags)?;
         validate_text("content", content, 65_536)?;
+        validate_sections(content)?;
         validate_text("evidence", evidence, 16_384)?;
+        validate_single_line("verdict_reason", verdict_reason, 280)?;
+        let verdict = verdict.trim().to_ascii_lowercase();
+        ensure!(
+            verdict != "discard",
+            "the evaluator discarded this candidate; do not publish it — tell the user the lesson was evaluated and dropped"
+        );
+        ensure!(
+            KEEP_VERDICTS.contains(&verdict.as_str()),
+            "verdict must be exactly {} — relay the evaluator's verdict line, do not paraphrase it",
+            KEEP_VERDICTS.join(" or ")
+        );
         ensure!(
             expected_version >= 0,
             "expected_version must be nonnegative"
@@ -119,6 +156,14 @@ impl Vault {
         if let Some(scope) = scope {
             validate_id(scope).context("invalid project scope")?;
         }
+        ensure!(
+            (verdict == "keep project") == scope.is_some(),
+            "verdict {verdict} does not match scope {}; keep project requires scope project and keep global requires scope global",
+            scope.unwrap_or("global")
+        );
+        validate_no_secrets("description", description)?;
+        validate_no_secrets("content", content)?;
+        validate_no_secrets("evidence", evidence)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -140,16 +185,25 @@ impl Vault {
             current == expected_version,
             "stale base: expected {expected_version}, current published version is {current}"
         );
+        let (helped, failed) = outcome_score(&tx, id, expected_version)?;
+        ensure!(
+            replaces_proven || helped <= failed,
+            "version {expected_version} of {id} is proven (helped {helped}, failed {failed}) and publishing over it resets those counts; \
+             merge it into your lesson instead of rewriting it and set replaces_proven true, or publish the new lesson under its own id"
+        );
         let version: i64 = tx.query_row(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM revisions WHERE id = ?1",
             [id],
             |row| row.get(0),
         )?;
+        let review_note = format!("{verdict}: {verdict_reason}");
         let revision = tx.query_row(
-            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'published')
-             RETURNING description, tags, content, evidence, status, created_at, reviewed_at, review_note",
-            params![id, version, description, join_tags(tags), content, evidence, expected_version],
+            &format!(
+                "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status, reviewed_at, review_note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'published', {NOW}, ?8)
+                 RETURNING description, tags, content, evidence, status, created_at, reviewed_at, review_note"
+            ),
+            params![id, version, description, join_tags(tags), content, evidence, expected_version, review_note],
             |row| {
                 Ok(Revision {
                     id: id.to_owned(),

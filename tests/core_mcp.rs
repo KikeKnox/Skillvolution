@@ -153,15 +153,18 @@ fn publish_skill_is_immediately_visible_to_the_same_running_server() {
 
     let mut server = McpServer::spawn(&db, None);
     server.initialize("2025-06-18");
+    let content = support::sectioned("Run cargo test --all-targets before committing.");
     let publish = server.call(
         2,
         "publish_skill",
         json!({
             "id": "rust-tests",
             "description": "Use when running the Rust test suite",
-            "content": "Run cargo test --all-targets before committing.",
+            "content": content,
             "evidence": "Verified on commit abc123; tests caught two regressions.",
-            "expected_version": 0
+            "expected_version": 0,
+            "verdict": "keep global",
+            "verdict_reason": "Verified, reusable, and not obvious from the docs"
         }),
     );
     assert_eq!(publish["result"]["isError"], false);
@@ -183,11 +186,30 @@ fn publish_skill_is_immediately_visible_to_the_same_running_server() {
 
     let get = server.call(5, "get_skill", json!({"id": "rust-tests"}));
     let get_body = text_of(&get);
-    assert_eq!(
-        get_body["content"],
-        "Run cargo test --all-targets before committing."
-    );
+    assert_eq!(get_body["content"], content.as_str());
     assert_eq!(get_body["version"], 1);
+}
+
+#[test]
+fn publish_skill_requires_the_evaluator_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let response = server.call(
+        2,
+        "publish_skill",
+        json!({
+            "id": "rust-tests",
+            "description": "Use when running the Rust test suite",
+            "content": support::sectioned("Run cargo test --all-targets before committing."),
+            "evidence": "Verified on commit abc123.",
+            "expected_version": 0
+        }),
+    );
+    assert_eq!(response["result"]["isError"], true);
+    let error = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(error.contains("verdict"), "{error}");
 }
 
 #[test]
@@ -203,10 +225,12 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
         json!({
             "id": "proj-only",
             "description": "Use when working on this repository",
-            "content": "Body",
+            "content": support::sectioned("Body"),
             "evidence": "Evidence",
             "expected_version": 0,
-            "scope": "project"
+            "scope": "project",
+            "verdict": "keep project",
+            "verdict_reason": "Only applies to this repository's layout"
         }),
     );
     assert_eq!(publish["result"]["isError"], false);
@@ -237,10 +261,12 @@ fn project_filters_search_and_get_and_scope_project_requires_a_project_key() {
         json!({
             "id": "needs-project",
             "description": "Use when this needs a project key",
-            "content": "Body",
+            "content": support::sectioned("Body"),
             "evidence": "Evidence",
             "expected_version": 0,
-            "scope": "project"
+            "scope": "project",
+            "verdict": "keep project",
+            "verdict_reason": "Only applies to this repository's layout"
         }),
     );
     assert_eq!(scope_without_project["result"]["isError"], true);

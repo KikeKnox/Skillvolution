@@ -87,7 +87,7 @@ fn new_lines_appended_after_the_offset_block_again() {
         .append(true)
         .open(&transcript)
         .unwrap();
-    writeln!(file, "{}", assistant_tool_use("Bash")).unwrap();
+    writeln!(file, "{}", assistant_tool_use("Edit")).unwrap();
     assert!(hook::stop(&vault, &input).unwrap().is_some());
 }
 
@@ -228,7 +228,7 @@ fn devin_stop_input(session: &str, stop_hook_active: bool) -> String {
 fn devin_work_blocks_once_then_not_again() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
-    hook::devin_tool_use(&vault, &devin_tool("s1", "exec")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
     let input = devin_stop_input("s1", false);
     assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
     assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
@@ -284,7 +284,7 @@ fn devin_unrelated_tools_and_sessions_leave_flags_alone() {
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
     hook::devin_tool_use(&vault, &devin_tool("s1", "read")).unwrap();
     hook::devin_tool_use(&vault, &devin_tool("s1", "run_subagent")).unwrap();
-    hook::devin_tool_use(&vault, &devin_tool("other", "exec")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("other", "write")).unwrap();
     let input = devin_stop_input("s1", false);
     assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
 }
@@ -293,7 +293,7 @@ fn devin_unrelated_tools_and_sessions_leave_flags_alone() {
 fn devin_session_end_clears_the_flags() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
-    hook::devin_tool_use(&vault, &devin_tool("s1", "exec")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
     hook::devin_session_end(&vault, &json!({"session_id": "s1"}).to_string()).unwrap();
     let input = devin_stop_input("s1", false);
     assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
@@ -595,7 +595,7 @@ fn cli_devin_tool_use_then_stop_flows_through_the_flag_table() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
 
-    let tool = run_hook(&db, &["tool-use"], &devin_tool("s1", "exec"));
+    let tool = run_hook(&db, &["tool-use"], &devin_tool("s1", "write"));
     assert!(tool.status.success());
     assert!(tool.stdout.is_empty());
 

@@ -3,6 +3,21 @@ use anyhow::{Result, ensure};
 use rusqlite::named_params;
 
 const VISIBLE: &str = "c.deprecated = 0 AND (c.scope IS NULL OR c.scope = :project)";
+/// Text relevance as a nonnegative number: `bm25` scores are negative (more
+/// negative = better match), so the sign is flipped once, here, and every
+/// query below reads "larger strength is a better match". The clamp makes the
+/// direction independent of that sign convention, so scaling by the outcome
+/// factor can never invert the ranking.
+const STRENGTH: &str = "MAX(-bm25(skills_fts, 4.0, 3.0, 2.0, 1.0), 0.0)";
+/// Relevance scaled by the current version's track record. With
+/// `net = helped - failed`, the factor `1 + net / (ABS(net) + 2.0)` stays in
+/// (0, 2): exactly 1.0 when `helped = failed` (an unreported skill ranks purely
+/// on text), 0.5 at two net failures, and at most 2.0 for a proven skill, so
+/// history can demote a match but never replace relevance. The `2.0` also
+/// forces real division: with `2` this would be integer division and the whole
+/// penalty would silently truncate to zero.
+const RANKED: &str =
+    "h.strength * (1.0 + (c.helped - c.failed) / (ABS(c.helped - c.failed) + 2.0))";
 
 #[derive(Debug, serde::Serialize)]
 pub struct SkillMetadata {
@@ -105,14 +120,14 @@ impl Vault {
                 .conn
                 .prepare(&format!(
                     "WITH hits AS (
-                         SELECT id, bm25(skills_fts, 4.0, 3.0, 2.0, 1.0) AS rank
+                         SELECT id, {STRENGTH} AS strength
                          FROM skills_fts WHERE skills_fts MATCH :expression
                      )
                      SELECT c.id, c.version, c.description, c.tags, c.scope, c.helped, c.failed,
                             COUNT(*) OVER () AS total
                      FROM hits h JOIN current_skills c ON c.id = h.id
                      WHERE {VISIBLE}
-                     ORDER BY h.rank, c.helped - c.failed DESC, c.id
+                     ORDER BY {RANKED} DESC, c.helped - c.failed DESC, c.id
                      LIMIT :limit OFFSET :offset"
                 ))?
                 .query_map(
@@ -130,7 +145,7 @@ impl Vault {
                 let total = self.conn.query_row(
                     &format!(
                         "WITH hits AS (
-                             SELECT id, bm25(skills_fts, 4.0, 3.0, 2.0, 1.0) AS rank
+                             SELECT id, {STRENGTH} AS strength
                              FROM skills_fts WHERE skills_fts MATCH :expression
                          )
                          SELECT COUNT(*) FROM hits h JOIN current_skills c ON c.id = h.id

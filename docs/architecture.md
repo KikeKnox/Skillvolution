@@ -4,7 +4,11 @@
 
 - `src/vault/mod.rs` — opens the SQLite connection (WAL, busy timeout, foreign keys), runs schema
   migration, and holds shared validation helpers, transcript-offset storage, and deprecation
-  toggling.
+  toggling. Validation includes `validate_sections` (the four required `content` headings, in
+  order) and `validate_no_secrets` (rejects credential-shaped values in `description`, `content`,
+  and `evidence` by prefix/JWT/bearer-token shape); there is deliberately no generic `key=value`
+  rule, since that flags legitimate documentation about *how* to configure a credential (e.g.
+  `api_key=$OPENAI_API_KEY`) as if it were one.
 - `src/vault/revisions.rs` — `propose` (publishes immediately), `inspect`, `diff`, `get`.
 - `src/vault/search.rs` — builds and ranks FTS5 queries.
 - `src/vault/outcomes.rs` — records and summarizes `helped`/`failed`/`not_applicable` reports.
@@ -45,15 +49,25 @@
   proposals published directly. `expected_version` names the published version a proposal was based
   on (`0` for a new skill); proposing checks it still matches and marks any legacy draft sharing
   that same base as `superseded` with a `review_note` noting the published version that superseded
-  them. `reviewed_at` records when a legacy draft was published, rejected, or superseded.
+  them. Every normal publish also fills `reviewed_at` (the publish timestamp) and `review_note`,
+  set to `"<verdict>: <verdict_reason>"` from the evaluator's verdict and its one-line reason —
+  not just the legacy `superseded` path.
 - **outcomes**(`id`, `version`, `result`, `note`, `project`, `created_at`) — `result` is `helped`,
   `failed`, or `not_applicable`; only recordable against a published revision visible to `project`.
 - **hook_state**(`session_id`, `transcript_offset`) — the byte offset each Claude Code session's
   transcript has been reviewed up to.
 - **skills_fts** — an FTS5 virtual table (`id`, `description`, `tags`, `content`, tokenizer
   `unicode61 remove_diacritics 2`) rewritten for a skill each time a revision is published; search
-  ranks matches by `bm25` weighted 4:3:2:1 across those columns, tied-broken by `helped - failed`
-  then id.
+  ranks matches by `bm25` weighted 4:3:2:1 across those columns, scaled by a factor
+  `1 + (helped - failed) / (ABS(helped - failed) + 2.0)` derived from the *current published
+  version's* outcome counts. That factor stays in the open range `(0, 2)`: exactly `1.0` when
+  `helped = failed` (an unreported or evenly-split skill ranks purely on text relevance), below
+  `1.0` as `failed` grows past `helped` (a weaker text match can then outrank it), and up to `2.0`
+  for a proven skill — `not_applicable` reports never enter the count either way. Ties break on
+  `helped - failed` then id. Outcome counts are per published *version*, so republishing a skill
+  (even as a wholesale replacement) starts its ranking factor fresh at `1.0`. The empty-query
+  catalog (used for the SessionStart listing) does not use this factor at all: it is ordered only
+  by `helped - failed` then id.
 - **current_skills** — a view joining each skill to its latest published revision and outcome
   counts; backs search and the outcome summary.
 - The schema is versioned with SQLite's `user_version` pragma. A fresh database is initialized to
@@ -68,8 +82,16 @@
   Bodies are never returned.
 - `get_skill(id, version?)` — fetch one published skill's body, defaulting to its latest version.
 - `report_skill_outcome(id, version, result, note)` — record whether an applied skill helped.
-- `publish_skill(id, description, tags?, content, evidence, expected_version, scope?)` — publish a
-  new or replacement skill immediately; meant to be called only after a fresh-context evaluation.
+- `publish_skill(id, description, tags?, content, evidence, expected_version, scope?, verdict,
+  verdict_reason, replaces_proven?)` — publish a new or replacement skill immediately; meant to be
+  called only after a fresh-context evaluation. `verdict` must be exactly `"keep global"` or
+  `"keep project"` (a `"discard"` verdict is refused outright) and must agree with `scope` (`keep
+  project` requires a project `scope`, `keep global` requires none); `verdict_reason` is the
+  evaluator's one-line reason, at most 280 bytes. `content` must contain the four required
+  headings — `## When to use`, `## Procedure`, `## Pitfalls`, `## Verification` — in order.
+  `description`, `content`, and `evidence` are scanned for credential-shaped values and the
+  publish is refused if one is found. `replaces_proven` (default `false`) must be `true` to
+  overwrite a version whose `helped` count exceeds its `failed` count.
 
 ## Concurrency
 

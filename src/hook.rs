@@ -8,16 +8,16 @@ use std::{
 };
 
 const CATALOG_LIMIT: i64 = 30;
-const WORK_TOOLS: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
+const WORK_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
 // Devin tool names are lowercase and its hook payloads carry no transcript path,
 // so the same worked/reviewed judgment is kept as per-session flags instead.
-const DEVIN_WORK_TOOLS: [&str; 5] = ["exec", "write", "edit", "apply_patch", "notebook_edit"];
+pub(crate) const DEVIN_WORK_TOOLS: [&str; 4] = ["write", "edit", "apply_patch", "notebook_edit"];
 
 pub const STOP_REASON: &str = "Skillvolution review: you changed files or ran commands since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, \
 and for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent now \
-— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict. \
+— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
 If there is nothing to report or evaluate, reply only \"No lesson.\" and stop.";
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
@@ -142,7 +142,7 @@ pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
         return Ok(None);
     };
     let (worked, reviewed) = vault.devin_hook_state(session)?;
-    if !(worked && !reviewed) {
+    if !worked || reviewed {
         return Ok(None);
     }
     vault.set_devin_hook_state(session, false, false)?;
