@@ -1,6 +1,6 @@
 //! The AI clients setup can configure, sets of them, and where their files go.
 
-use super::{Change, claude, claude_cli, devin, opencode};
+use super::{Change, Edit, claude, claude_cli, devin, opencode};
 use anyhow::{Result, bail, ensure};
 use std::path::{Path, PathBuf};
 
@@ -60,6 +60,17 @@ impl ClientKind {
             Self::ClaudeCode => claude::changes(scope, bin, db),
             Self::OpenCode => opencode::changes(scope, bin, db),
             Self::Devin => devin::changes(scope, bin, db),
+        }
+    }
+
+    /// Every edit that undoes this client's `changes` in `scope` (see `remove`'s module
+    /// doc comment for what a client's `removals` must do). `notes` collects anything
+    /// worth telling the user that isn't a file edit.
+    pub(crate) fn removals(self, scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+        match self {
+            Self::ClaudeCode => claude::removals(scope, notes),
+            Self::OpenCode => opencode::removals(scope, notes),
+            Self::Devin => devin::removals(scope, notes),
         }
     }
 }

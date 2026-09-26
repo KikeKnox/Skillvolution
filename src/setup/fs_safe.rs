@@ -125,6 +125,17 @@ pub fn check_skill(path: &Path) -> Result<()> {
     check_owner(path, SKILL_OWNER_PREFIX, "Evolution skill")
 }
 
+/// Whether the managed skill file at `path` is ours to delete (any version). A missing
+/// file is `false`, same as one without our marker.
+pub fn is_our_skill(path: &Path) -> Result<bool> {
+    is_marked(path, SKILL_OWNER_PREFIX)
+}
+
+/// Whether `path` exists and its content carries `marker`. A missing file is `false`.
+pub fn is_marked(path: &Path, marker: &str) -> Result<bool> {
+    Ok(read_optional(path)?.is_some_and(|text| text.contains(marker)))
+}
+
 /// Refuses an existing file at `path` that doesn't carry `marker`, so we never clobber
 /// a user's own file there. `what` names the file kind in the error message.
 pub fn check_owner(path: &Path, marker: &str, what: &str) -> Result<()> {
@@ -169,6 +180,28 @@ pub fn merge_server(config: &mut Value, key: &str, entry: Value) -> Result<()> {
     Ok(())
 }
 
+/// Removes `config[container][name]`, dropping `container` entirely if that empties it
+/// (the removal counterpart of `merge_server`, which may have created it). Returns
+/// whether anything was removed.
+pub fn remove_server(config: &mut Value, container: &str, name: &str) -> Result<bool> {
+    let Some(root) = config.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(value) = root.get_mut(container) else {
+        return Ok(false);
+    };
+    let entries = value
+        .as_object_mut()
+        .with_context(|| format!("{container} must be an object"))?;
+    if entries.remove(name).is_none() {
+        return Ok(false);
+    }
+    if entries.is_empty() {
+        root.remove(container);
+    }
+    Ok(true)
+}
+
 /// Finds the single well-formed `start..end` marker block, if any.
 /// Missing markers return `Ok(None)`; malformed or duplicate markers are refused.
 fn find_marker_block(text: &str, start: &str, end: &str) -> Result<Option<(usize, usize)>> {
@@ -196,10 +229,18 @@ pub fn merge_marker_block(mut text: String, start: &str, end: &str, block: &str)
     Ok(text)
 }
 
-/// Removes a legacy marker block if present. `Ok(None)` means the file is untouched.
+/// Removes a marker block if present, along with the one newline right after it that
+/// `merge_marker_block` adds when it appends a block (so removing a freshly-appended
+/// block is its exact inverse, not a block plus a stray blank line). `Ok(None)` means the
+/// file is untouched.
 pub fn remove_marker_block(mut text: String, start: &str, end: &str) -> Result<Option<String>> {
     match find_marker_block(&text, start, end)? {
         Some((s, e)) => {
+            let e = if text[e..].starts_with('\n') {
+                e + 1
+            } else {
+                e
+            };
             text.replace_range(s..e, "");
             Ok(Some(text))
         }
@@ -518,6 +559,28 @@ mod tests {
     }
 
     #[test]
+    fn remove_server_drops_the_entry_and_an_emptied_container() {
+        let mut config = json!({"mcp": {"skillvolution": {"type": "local"}, "other": {}}});
+        assert!(remove_server(&mut config, "mcp", "skillvolution").unwrap());
+        assert_eq!(config, json!({"mcp": {"other": {}}}));
+
+        let mut config = json!({"mcp": {"skillvolution": {"type": "local"}}});
+        assert!(remove_server(&mut config, "mcp", "skillvolution").unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn remove_server_is_a_no_op_when_absent() {
+        let mut config = json!({"mcp": {"other": {}}});
+        assert!(!remove_server(&mut config, "mcp", "skillvolution").unwrap());
+        assert_eq!(config, json!({"mcp": {"other": {}}}));
+
+        let mut config = json!({});
+        assert!(!remove_server(&mut config, "mcp", "skillvolution").unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
     fn merge_server_inserts_the_whole_entry_when_absent() {
         let mut config = json!({});
         let entry = json!({"type": "local", "command": ["x"], "enabled": true});
@@ -535,6 +598,19 @@ mod tests {
                 .unwrap();
         assert_eq!(value["a"]["b"][1], json!({"c": null}));
         assert_eq!(value["big"].to_string(), "12345678901234567890123");
+    }
+
+    #[test]
+    fn is_our_skill_recognizes_any_marker_version_and_rejects_a_users_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        assert!(!is_our_skill(&path).unwrap(), "missing file");
+
+        fs::write(&path, "# my own notes").unwrap();
+        assert!(!is_our_skill(&path).unwrap());
+
+        fs::write(&path, "<!-- skillvolution-managed:evolution:3 -->\nv3").unwrap();
+        assert!(is_our_skill(&path).unwrap());
     }
 
     #[test]

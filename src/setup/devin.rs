@@ -9,7 +9,7 @@
 //! PermissionRequest auto-approves the subagent/vault tools the flow needs
 //! (`run_subagent`/`read_subagent` aren't documented permission rule names).
 
-use super::{Change, Scope, common, fs_safe, hooks, permissions};
+use super::{Change, Edit, Scope, common, fs_safe, hooks, permissions};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -52,6 +52,53 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     changes.push(common::agents_change(&root.join("AGENTS.md"))?);
 
     Ok(changes)
+}
+
+/// The removal counterpart of `changes`: deletes the managed skill file, strips our
+/// server entry from `mcp_config.json` and our hooks + permission grant from
+/// `config.json` (keeping `run_subagent`/`read_subagent`), and removes our trigger block
+/// from AGENTS.md (shared with OpenCode; deleted here only if that empties it, same as
+/// `changes` writes it either way regardless of which client's setup ran first).
+pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+    let (root, dir) = match scope {
+        Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".devin")),
+        Scope::Global => {
+            let dir = global_dir()?;
+            (dir.clone(), dir)
+        }
+    };
+    let mut edits = Vec::new();
+    if let Some(edit) = common::skill_removal(&dir, notes)? {
+        edits.push(edit);
+    }
+
+    let mcp_path = dir.join("mcp_config.json");
+    let mut mcp = fs_safe::load_json(&mcp_path)?;
+    if fs_safe::remove_server(&mut mcp, "mcpServers", "skillvolution")? {
+        edits.push(Edit::Write(mcp_path, common::json_text(&mcp)?));
+    }
+
+    let config_path = dir.join("config.json");
+    let mut config = fs_safe::load_json(&config_path)?;
+    let mut changed = hooks::remove_owned(&mut config)?;
+    let (removed, kept) = permissions::remove_devin(&mut config)?;
+    changed |= removed;
+    if !kept.is_empty() {
+        notes.push(format!(
+            "{} still allows {} (Skillvolution granted it; remove manually if you no longer want it)",
+            config_path.display(),
+            kept.join(", "),
+        ));
+    }
+    if changed {
+        edits.push(Edit::Write(config_path, common::json_text(&config)?));
+    }
+
+    if let Some(edit) = common::agents_removal(&root.join("AGENTS.md"))? {
+        edits.push(edit);
+    }
+
+    Ok(edits)
 }
 
 /// The `hooks` entries for a Devin config: session catalog, per-tool

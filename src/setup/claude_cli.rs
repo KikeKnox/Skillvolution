@@ -28,6 +28,12 @@ pub fn add_json_command(bin: &Path, db: &Path) -> String {
     )
 }
 
+/// The exact `claude mcp remove` invocation, shown to the user when `claude` isn't on
+/// PATH so they can remove the registration themselves.
+pub fn remove_command() -> String {
+    "claude mcp remove --scope user skillvolution".to_owned()
+}
+
 /// Finds `claude` on `PATH`, the same way a shell would: the first executable regular
 /// file named `claude` in a `PATH` entry.
 pub fn resolve() -> Option<PathBuf> {
@@ -151,4 +157,28 @@ pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
             add_json_command(bin, db)
         ),
     }
+}
+
+/// Removes the user-scope `skillvolution` registration. Idempotent, like `register`: the
+/// CLI's exact wording for "nothing registered under that name" isn't a documented,
+/// stable string, so any failure whose output mentions "not found" or "no such" is
+/// treated as already-removed rather than an error.
+pub fn unregister(claude: &Path) -> Result<()> {
+    let output = run(
+        claude,
+        &["mcp", "remove", "--scope", "user", "skillvolution"],
+    )?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let not_registered = |text: &str| text.contains("not found") || text.contains("no such");
+    if not_registered(&stdout) || not_registered(&stderr) {
+        return Ok(());
+    }
+    bail!(
+        "claude mcp remove failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

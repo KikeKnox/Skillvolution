@@ -13,6 +13,7 @@ mod prompt;
 mod remove;
 
 pub(crate) use client::{ClientKind, Clients, Scope};
+pub(crate) use remove::Edit;
 
 use crate::vault::Vault;
 use anyhow::{Context, Result, ensure};
@@ -23,7 +24,9 @@ use std::{
 
 pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 
-/// A file setup writes, with its full new content.
+/// A file setup writes, with its full new content. `write_clients` turns each into an
+/// `Edit::Write` before handing it to `write_all`; `remove::run` builds `Edit`s directly,
+/// since a removal can also delete a file outright.
 pub(crate) type Change = (PathBuf, String);
 
 #[derive(clap::Args)]
@@ -54,9 +57,10 @@ pub struct SetupArgs {
     project_key: Option<String>,
     /// Remove Skillvolution from the selected clients instead of configuring them,
     /// keeping every entry setup does not own.
-    #[arg(long, conflicts_with_all = ["bin", "project_key", "dry_run"])]
+    #[arg(long, conflicts_with_all = ["bin", "project_key"])]
     remove: bool,
-    /// Print a unified diff of every file setup would write, without writing anything.
+    /// Print a unified diff of every file setup would write (or remove), without writing
+    /// anything.
     #[arg(long)]
     dry_run: bool,
 }
@@ -77,19 +81,23 @@ pub fn run(args: SetupArgs) -> Result<()> {
         "--project-key requires --project"
     );
     if args.remove {
-        let clients = if args.client.is_empty() {
-            Clients::all()
+        let explicit = if args.client.is_empty() {
+            None
         } else {
-            Clients::parse(&args.client)?
+            Some(Clients::parse(&args.client)?)
         };
-        return remove::run(clients, args.project.as_deref());
+        let db = resolve_db(args.db)?;
+        return remove::run(explicit, args.project.as_deref(), &db, args.dry_run);
     }
-    ensure!(!args.dry_run, "--dry-run is not implemented yet");
-    let bin = resolve_bin(args.bin)?;
-    let db = resolve_db(args.db)?;
+    let bin = resolve_bin(args.bin.clone())?;
+    let db = resolve_db(args.db.clone())?;
     // Client configs embed these paths as JSON strings, which must be valid UTF-8.
     hooks::require_utf8(&bin, "--bin")?;
     hooks::require_utf8(&db, "--db")?;
+
+    if args.dry_run {
+        return dry_run_install(&args, &bin, &db);
+    }
     // Before any client config is written, so an unusable --db leaves no config
     // pointing at it.
     Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
@@ -110,6 +118,70 @@ pub fn run(args: SetupArgs) -> Result<()> {
                 global::run(Clients::parse(&args.client)?, &bin, &db)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// `--dry-run` without `--remove`: computes exactly the edits a real run would write and
+/// prints their diffs, plus the `claude` CLI command a global Claude Code install would
+/// run, without writing anything or opening the vault (so it never creates the database
+/// file). Client selection mirrors the real run, except that global setup with no
+/// `--client` uses detection alone (skipping the interactive prompt, since a preview
+/// shouldn't block on stdin).
+fn dry_run_install(args: &SetupArgs, bin: &Path, db: &Path) -> Result<()> {
+    match &args.project {
+        Some(project) => {
+            let project = fs::canonicalize(project).context("project must exist")?;
+            ensure!(project.is_dir(), "project must be a directory");
+            let key = resolve_project_key(args.project_key.as_deref(), &project)?;
+            let clients = if args.client.is_empty() {
+                Clients::all()
+            } else {
+                Clients::parse(&args.client)?
+            };
+            print_install_diff(
+                clients,
+                Scope::Project {
+                    dir: &project,
+                    key: &key,
+                },
+                bin,
+                db,
+            )
+        }
+        None => {
+            let clients = if args.client.is_empty() {
+                ClientKind::ALL
+                    .into_iter()
+                    .filter(|kind| kind.detect())
+                    .collect()
+            } else {
+                Clients::parse(&args.client)?
+            };
+            print_install_diff(clients, Scope::Global, bin, db)
+        }
+    }
+}
+
+/// Prints the diffs `clients` would write for `scope`, plus the `claude mcp add-json`
+/// command a global Claude Code install would run. Prints "No changes." if there's
+/// nothing to show.
+fn print_install_diff(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Result<()> {
+    let mut changes = Vec::new();
+    for kind in clients.iter() {
+        changes.extend(kind.changes(scope, bin, db)?);
+    }
+    let edits: Vec<Edit> = changes
+        .into_iter()
+        .map(|(path, content)| Edit::Write(path, content))
+        .collect();
+    let mut printed = remove::print_diffs(&edits);
+    if matches!(scope, Scope::Global) && clients.contains(ClientKind::ClaudeCode) {
+        println!("Would run: {}", claude_cli::add_json_command(bin, db));
+        printed = true;
+    }
+    if !printed {
+        println!("No changes.");
     }
     Ok(())
 }
@@ -173,14 +245,19 @@ fn write_clients(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Resul
     for kind in clients.iter() {
         changes.extend(kind.changes(scope, bin, db)?);
     }
-    write_all(changes)
+    let edits = changes
+        .into_iter()
+        .map(|(path, content)| Edit::Write(path, content))
+        .collect();
+    write_all(edits)
 }
 
 /// Validates every write target before touching any of them, so a bad target further
-/// down the list leaves everything already-checked untouched. If a write still fails,
-/// the files written before it are put back as they were (see `roll_back`).
-fn write_all(changes: Vec<Change>) -> Result<()> {
-    for (path, _) in &changes {
+/// down the list leaves everything already-checked untouched. If an edit still fails,
+/// the edits applied before it are put back as they were (see `roll_back`).
+fn write_all(edits: Vec<Edit>) -> Result<()> {
+    for edit in &edits {
+        let path = edit.path();
         fs_safe::check_target(path)?;
         fs_safe::check_backups(path)?;
         for parent in path.ancestors().skip(1) {
@@ -189,11 +266,11 @@ fn write_all(changes: Vec<Change>) -> Result<()> {
             }
         }
     }
-    // Each written path with its previous content (`None`: it didn't exist).
+    // Each edited path with its previous content (`None`: it didn't exist).
     let mut written: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
-    for (path, content) in changes {
-        let result = fs_safe::read_optional_bytes(&path)
-            .and_then(|old| fs_safe::write(&path, &content).map(|()| old));
+    for edit in edits {
+        let path = edit.path().to_owned();
+        let result = apply(&edit);
         match result {
             Ok(old) => written.push((path, old)),
             Err(e) => {
@@ -213,6 +290,25 @@ fn write_all(changes: Vec<Change>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Applies one edit, returning the path's previous content (`None` if it didn't exist)
+/// so a later failure can restore it. Every `removals` implementation only emits a
+/// `Delete` for a path it already found on disk, so deleting an already-absent one here
+/// is not expected; if it happens anyway, it's a no-op that reports `None`, same as a
+/// path that never existed.
+fn apply(edit: &Edit) -> Result<Option<Vec<u8>>> {
+    let path = edit.path();
+    let old = fs_safe::read_optional_bytes(path)?;
+    match edit {
+        Edit::Write(_, content) => fs_safe::write(path, content)?,
+        Edit::Delete(_) => {
+            if old.is_some() {
+                fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
+    }
+    Ok(old)
 }
 
 /// Undoes `written` newest first: a created file is deleted, a changed one gets its
