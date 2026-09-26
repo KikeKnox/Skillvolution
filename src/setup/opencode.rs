@@ -3,7 +3,7 @@
 //! root and the rest under `.opencode/`; globally everything lives in the config dir,
 //! where an existing `opencode.jsonc` is used instead of `opencode.json`.
 
-use super::{Change, Scope, common, fs_safe, permissions, plugin};
+use super::{Change, Edit, Scope, common, fs_safe, permissions, plugin};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -89,6 +89,43 @@ fn load_config(path: &Path) -> Result<Value> {
             format!("{} must be valid JSON", path.display())
         }
     })
+}
+
+/// The removal counterpart of `changes`: deletes the managed skill file and plugin file,
+/// strips our `mcp` server entry and permission grants from the config (config selection
+/// mirrors `changes`: `config_path` refuses an unsupported `opencode.jsonc` setup the
+/// same way it does when installing), and removes our trigger block from AGENTS.md.
+pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+    let (root, dir) = match scope {
+        Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".opencode")),
+        Scope::Global => {
+            let dir = global_dir()?;
+            (dir.clone(), dir)
+        }
+    };
+    let mut edits = Vec::new();
+    if let Some(edit) = common::skill_removal(&dir, notes)? {
+        edits.push(edit);
+    }
+
+    let config_path = config_path(&root, scope)?;
+    let mut config = load_config(&config_path)?;
+    let mut changed = fs_safe::remove_server(&mut config, "mcp", "skillvolution")?;
+    changed |= permissions::remove_opencode(&mut config)?;
+    if changed {
+        edits.push(Edit::Write(config_path, common::json_text(&config)?));
+    }
+
+    if let Some(edit) = common::agents_removal(&root.join("AGENTS.md"))? {
+        edits.push(edit);
+    }
+
+    let plugin_path = dir.join("plugins/skillvolution.js");
+    if let Some(edit) = plugin::removal(&plugin_path, notes)? {
+        edits.push(edit);
+    }
+
+    Ok(edits)
 }
 
 /// The old always-on `instructions` entry loaded the whole skill on every turn; drop it if

@@ -213,13 +213,7 @@ fn merge_entries(
     hooks: &mut Map<String, Value>,
     entries: &[(&str, Option<String>, String)],
 ) -> Result<()> {
-    let events: Vec<String> = hooks.keys().cloned().collect();
-    let mut emptied = Vec::new();
-    for event in events {
-        if strip_owned(hooks, &event)? && hooks[&event].as_array().is_some_and(Vec::is_empty) {
-            emptied.push(event);
-        }
-    }
+    let (_, emptied) = strip_owned_from_all(hooks)?;
     for (event, matcher, command) in entries {
         append_group(hooks, event, matcher.as_deref(), command.clone())?;
     }
@@ -228,6 +222,45 @@ fn merge_entries(
         !(emptied.contains(event) && groups.as_array().is_some_and(Vec::is_empty))
     });
     Ok(())
+}
+
+/// Strips our commands from every event in `hooks`. Returns whether anything was
+/// removed, and which events that stripping alone left with an empty group array
+/// (before any new entries are appended back).
+fn strip_owned_from_all(hooks: &mut Map<String, Value>) -> Result<(bool, Vec<String>)> {
+    let events: Vec<String> = hooks.keys().cloned().collect();
+    let mut removed_anything = false;
+    let mut emptied = Vec::new();
+    for event in events {
+        let removed = strip_owned(hooks, &event)?;
+        removed_anything |= removed;
+        if removed && hooks[&event].as_array().is_some_and(Vec::is_empty) {
+            emptied.push(event);
+        }
+    }
+    Ok((removed_anything, emptied))
+}
+
+/// The removal counterpart of `merge`: strips our commands from every event of
+/// `config["hooks"]` without adding anything back, dropping any event that leaves empty
+/// and the whole `hooks` object if that in turn empties it. A config with no `hooks` key
+/// at all, or none of ours, is left untouched. Returns whether anything was removed.
+pub fn remove_owned(config: &mut Value) -> Result<bool> {
+    let Some(root) = config.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(hooks_value) = root.get_mut("hooks") else {
+        return Ok(false);
+    };
+    let hooks = hooks_value
+        .as_object_mut()
+        .context("hooks must be an object")?;
+    let (removed, emptied) = strip_owned_from_all(hooks)?;
+    hooks.retain(|event, _| !emptied.contains(event));
+    if hooks.is_empty() {
+        root.remove("hooks");
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -318,6 +351,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["hooks"]["Notification"], json!([]));
+    }
+
+    #[test]
+    fn remove_owned_strips_our_hooks_and_drops_emptied_events_and_the_hooks_object() {
+        let ours = |event: &str| json!({"type": "command", "command": format!("/old/skillvolution hook {event}")});
+        let foreign = json!({"type": "command", "command": "echo foreign"});
+        let mut config = json!({"model": "existing", "hooks": {
+            "SessionStart": [{"hooks": [ours("session-start")]}],
+            "PreToolUse": [{"matcher": "Bash", "hooks": [ours("tool-use"), foreign.clone()]}],
+            "Stop": [{"hooks": [ours("stop")]}],
+        }});
+
+        assert!(remove_owned(&mut config).unwrap());
+
+        assert_eq!(
+            config,
+            json!({
+                "model": "existing",
+                "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [foreign]}]},
+            })
+        );
+    }
+
+    #[test]
+    fn remove_owned_drops_the_hooks_object_entirely_when_only_ours_was_there() {
+        let mut config = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/x/skillvolution hook stop"}]}]}});
+        assert!(remove_owned(&mut config).unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn remove_owned_is_a_no_op_without_a_hooks_key_or_our_entries() {
+        let mut config = json!({"model": "existing"});
+        assert!(!remove_owned(&mut config).unwrap());
+        assert_eq!(config, json!({"model": "existing"}));
+
+        let mut config = json!({"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "echo foreign"}]}]}});
+        let before = config.clone();
+        assert!(!remove_owned(&mut config).unwrap());
+        assert_eq!(config, before);
     }
 
     #[test]

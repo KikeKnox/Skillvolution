@@ -1,7 +1,7 @@
 //! `skillvolution relocate`: moves the vault database to a new local path and
 //! points every configured client at it.
 
-use crate::setup::{ClientKind, Scope, absolutize, register_claude_code_mcp, write_all};
+use crate::setup::{ClientKind, Edit, Scope, absolutize, register_claude_code_mcp, write_all};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
@@ -98,7 +98,12 @@ fn repoint_clients(from: &Path, to: &Path) -> Result<()> {
         if !referenced {
             continue;
         }
-        write_all(changes)?;
+        write_all(
+            changes
+                .into_iter()
+                .map(|(path, content)| Edit::Write(path, content))
+                .collect(),
+        )?;
         println!("Repointed {} to {}.", kind.display_name(), to.display());
         if kind == ClientKind::ClaudeCode {
             println!("{}", register_claude_code_mcp(&client_bin, to)?);

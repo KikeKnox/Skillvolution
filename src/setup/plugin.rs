@@ -4,7 +4,7 @@
 //! The asset embeds `skillvolution-managed:opencode-plugin` in a comment so reruns
 //! recognize their own prior output, exactly like the Evolution skill's marker.
 
-use super::fs_safe;
+use super::{Edit, fs_safe};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -43,6 +43,19 @@ pub fn content(bin: &Path, db: &Path, key: Option<&str>) -> Result<String> {
 /// clobber a user's own file at that path.
 pub fn check_owner(path: &Path) -> Result<()> {
     fs_safe::check_owner(path, OWNER_MARKER, "Skillvolution OpenCode plugin")
+}
+
+/// The plugin file's removal at `path`: `Some` deletion when it carries our marker,
+/// `None` when there's nothing there. A file that exists but isn't ours is left alone,
+/// with a note so the user knows it was skipped rather than silently ignored.
+pub fn removal(path: &Path, notes: &mut Vec<String>) -> Result<Option<Edit>> {
+    if fs_safe::is_marked(path, OWNER_MARKER)? {
+        return Ok(Some(Edit::Delete(path.to_owned())));
+    }
+    if fs_safe::read_optional(path)?.is_some() {
+        notes.push(format!("skipped {} (not ours)", path.display()));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
