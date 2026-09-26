@@ -31,16 +31,16 @@ $bin = Join-Path $installDir "skillvolution.exe"
 if (-not (Test-Path $bin -PathType Leaf)) {
     $found = Get-Command skillvolution -ErrorAction SilentlyContinue
     if (-not $found) {
-        Write-Error "skillvolution binary not found after installation"
-        exit 1
+        throw "skillvolution binary not found after installation"
     }
     $bin = $found.Source
 }
 
 if ($env:SKILLVOLUTION_NO_SETUP -eq "1") {
     Write-Output "Skipped client setup; run 'skillvolution setup' when ready."
-    exit 0
+    return
 }
 
+# Never `exit` here: under `irm | iex` it would close the user's PowerShell session.
 & $bin setup
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { throw "skillvolution setup failed with exit code $LASTEXITCODE" }
