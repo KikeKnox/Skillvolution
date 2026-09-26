@@ -1,8 +1,10 @@
+mod location;
 mod outcomes;
 mod revisions;
 mod search;
 mod transfer;
 
+pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
 pub use revisions::{Proposal, Revision, SkillView};
 pub use search::{SearchPage, SkillMetadata};
@@ -297,7 +299,14 @@ fn schema_stamp(conn: &Connection) -> Result<(i64, i64)> {
 
 /// `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an absolute, nonempty path;
 /// otherwise `$HOME/.local/share/skillvolution/skills.db` (`$USERPROFILE` if `$HOME` is unset).
+/// `SKILLVOLUTION_DB`, when set to a nonempty value, overrides all of that for every
+/// command (a `--db` flag still wins over it; that precedence lives in the callers that
+/// only reach here once `--db` was absent). Left as-is, not absolutized: a relative value
+/// resolves against the current directory the same way `--db` already does.
 pub fn default_database() -> Result<PathBuf> {
+    if let Some(db) = std::env::var_os("SKILLVOLUTION_DB").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(db));
+    }
     let nonempty_env = |name| {
         std::env::var_os(name)
             .filter(|value| !value.is_empty())

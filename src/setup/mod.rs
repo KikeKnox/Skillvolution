@@ -86,16 +86,17 @@ pub fn run(args: SetupArgs) -> Result<()> {
     }
     ensure!(!args.dry_run, "--dry-run is not implemented yet");
     let bin = resolve_bin(args.bin)?;
-    let db = resolve_db(args.db)?;
-    // Client configs embed these paths as JSON strings, which must be valid UTF-8.
+    // Client configs embed this path as a JSON string, which must be valid UTF-8.
     hooks::require_utf8(&bin, "--bin")?;
-    hooks::require_utf8(&db, "--db")?;
-    // Before any client config is written, so an unusable --db leaves no config
-    // pointing at it.
-    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
 
     match args.project {
         Some(project) => {
+            let db = resolve_db(args.db)?;
+            hooks::require_utf8(&db, "--db")?;
+            // Before any client config is written, so an unusable --db leaves no config
+            // pointing at it.
+            Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+            crate::vault::warn_if_unsafe(&db);
             let clients = if args.client.is_empty() {
                 Clients::all()
             } else {
@@ -104,11 +105,12 @@ pub fn run(args: SetupArgs) -> Result<()> {
             run_project(project, clients, &bin, &db, args.project_key.as_deref())?;
         }
         None => {
-            if args.client.is_empty() {
-                global::run_detected(&bin, &db)?;
+            let clients = if args.client.is_empty() {
+                None
             } else {
-                global::run(Clients::parse(&args.client)?, &bin, &db)?;
-            }
+                Some(Clients::parse(&args.client)?)
+            };
+            global::run(clients, &bin, args.db)?;
         }
     }
     Ok(())
@@ -126,6 +128,13 @@ fn resolve_bin(bin: Option<PathBuf>) -> Result<PathBuf> {
     ensure!(bin.exists(), "binary must exist: {}", bin.display());
     ensure!(bin.is_file(), "binary must be a regular file");
     Ok(bin)
+}
+
+/// Registers the MCP server at user scope through the `claude` CLI, exactly as global
+/// setup does. Exposed to `relocate`, which is outside this module's tree and so can't
+/// reach `claude::register_mcp` (`pub(super)`) directly.
+pub(crate) fn register_claude_code_mcp(bin: &Path, db: &Path) -> Result<String> {
+    claude::register_mcp(bin, db)
 }
 
 fn resolve_db(db: Option<PathBuf>) -> Result<PathBuf> {
@@ -179,7 +188,7 @@ fn write_clients(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Resul
 /// Validates every write target before touching any of them, so a bad target further
 /// down the list leaves everything already-checked untouched. If a write still fails,
 /// the files written before it are put back as they were (see `roll_back`).
-fn write_all(changes: Vec<Change>) -> Result<()> {
+pub(crate) fn write_all(changes: Vec<Change>) -> Result<()> {
     for (path, _) in &changes {
         fs_safe::check_target(path)?;
         fs_safe::check_backups(path)?;
@@ -235,7 +244,7 @@ fn roll_back(written: Vec<(PathBuf, Option<Vec<u8>>)>) -> Result<()> {
 /// it exists, otherwise absolutizes it against the current directory and lexically
 /// collapses `.`/`..` components. Unlike a plain existence check, this lets a `--db` path
 /// that doesn't exist yet still contain `..`.
-fn absolutize(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()));
     }
