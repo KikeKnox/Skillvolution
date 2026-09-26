@@ -1,9 +1,12 @@
 mod claude;
 mod claude_cli;
 mod client;
+mod codex;
 mod common;
+mod cursor;
 mod devin;
 mod fs_safe;
+mod gemini;
 mod global;
 mod hooks;
 mod inspect;
@@ -47,7 +50,9 @@ pub struct SetupArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        value_parser = ["all", "both", "opencode", "claude-code", "devin"]
+        value_parser = [
+            "all", "both", "opencode", "claude-code", "devin", "codex", "gemini", "cursor"
+        ]
     )]
     client: Vec<String>,
     /// Path to the skillvolution binary; defaults to the currently running executable.

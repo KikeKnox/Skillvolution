@@ -25,6 +25,7 @@ fn is_config_file(kind: ClientKind, path: &Path) -> bool {
         ClientKind::ClaudeCode => name == "settings.json" || name == "settings.local.json",
         ClientKind::OpenCode => name == "opencode.json" || name == "opencode.jsonc",
         ClientKind::Devin => name == "config.json" || name == "mcp_config.json",
+        ClientKind::Codex | ClientKind::Gemini | ClientKind::Cursor => false,
     }
 }
 
@@ -93,6 +94,7 @@ fn project_config_paths(repo: &Path, kind: ClientKind) -> Vec<PathBuf> {
             repo.join(".devin/config.json"),
             repo.join(".devin/mcp_config.json"),
         ],
+        ClientKind::Codex | ClientKind::Gemini | ClientKind::Cursor => Vec::new(),
     }
 }
 

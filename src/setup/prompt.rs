@@ -148,10 +148,11 @@ mod tests {
     use super::*;
     use crate::setup::ClientKind::{self, *};
 
-    /// Runs `choose` over all three clients with `answers` as the typed input.
+    /// Runs `choose` over three detected clients with `answers` as the typed input.
     fn choose_with(answers: &str) -> (Vec<ClientKind>, String) {
         let mut output = Vec::new();
-        let chosen = choose(Clients::all(), &mut answers.as_bytes(), &mut output);
+        let detected: Clients = [ClaudeCode, OpenCode, Devin].into_iter().collect();
+        let chosen = choose(detected, &mut answers.as_bytes(), &mut output);
         (chosen.iter().collect(), String::from_utf8(output).unwrap())
     }
 

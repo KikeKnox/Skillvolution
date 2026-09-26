@@ -103,5 +103,8 @@ fn summary(kind: ClientKind) -> &'static str {
         ClientKind::Devin => {
             "Configured Devin CLI (global): skill, mcp_config.json, config.json permissions + hooks, AGENTS.md."
         }
+        ClientKind::Codex => "Configured Codex CLI (global).",
+        ClientKind::Gemini => "Configured Gemini CLI (global).",
+        ClientKind::Cursor => "Configured Cursor (global).",
     }
 }

@@ -950,7 +950,9 @@ fn global_detect_all_three_present_configures_all_noninteractively() {
     assert!(env.opencode_dir().join("opencode.json").exists());
     assert!(env.devin_dir().join("config.json").exists());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains("Skipped"), "{stdout}");
+    for name in ["Claude Code", "OpenCode", "Devin CLI"] {
+        assert!(!stdout.contains(&format!("Skipped {name}")), "{stdout}");
+    }
 }
 
 #[test]

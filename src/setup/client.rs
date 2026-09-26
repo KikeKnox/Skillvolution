@@ -1,6 +1,6 @@
 //! The AI clients setup can configure, sets of them, and where their files go.
 
-use super::{Change, Edit, claude, claude_cli, devin, opencode};
+use super::{Change, Edit, claude, claude_cli, codex, cursor, devin, gemini, opencode};
 use anyhow::{Result, bail, ensure};
 use std::path::{Path, PathBuf};
 
@@ -10,11 +10,21 @@ pub(crate) enum ClientKind {
     ClaudeCode,
     OpenCode,
     Devin,
+    Codex,
+    Gemini,
+    Cursor,
 }
 
 impl ClientKind {
     /// Every client, in the stable order setup lists, prompts for, and configures them.
-    pub(crate) const ALL: [ClientKind; 3] = [Self::ClaudeCode, Self::OpenCode, Self::Devin];
+    pub(crate) const ALL: [ClientKind; 6] = [
+        Self::ClaudeCode,
+        Self::OpenCode,
+        Self::Devin,
+        Self::Codex,
+        Self::Gemini,
+        Self::Cursor,
+    ];
 
     /// The `--client` token.
     pub(crate) fn token(self) -> &'static str {
@@ -22,6 +32,9 @@ impl ClientKind {
             Self::ClaudeCode => "claude-code",
             Self::OpenCode => "opencode",
             Self::Devin => "devin",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -30,18 +43,26 @@ impl ClientKind {
             Self::ClaudeCode => "Claude Code",
             Self::OpenCode => "OpenCode",
             Self::Devin => "Devin CLI",
+            Self::Codex => "Codex CLI",
+            Self::Gemini => "Gemini CLI",
+            Self::Cursor => "Cursor",
         }
     }
 
     /// Whether the client looks installed: its CLI is on `PATH` or its global config
     /// directory already exists.
     pub(crate) fn detect(self) -> bool {
-        let cli = match self {
-            Self::ClaudeCode => "claude",
-            Self::OpenCode => "opencode",
-            Self::Devin => "devin",
+        let clis: &[&str] = match self {
+            Self::ClaudeCode => &["claude"],
+            Self::OpenCode => &["opencode"],
+            Self::Devin => &["devin"],
+            Self::Codex => &["codex"],
+            Self::Gemini => &["gemini"],
+            Self::Cursor => &["cursor-agent", "cursor"],
         };
-        claude_cli::find_on_path(cli).is_some() || self.global_dir().is_ok_and(|dir| dir.exists())
+        clis.iter()
+            .any(|cli| claude_cli::find_on_path(cli).is_some())
+            || self.global_dir().is_ok_and(|dir| dir.exists())
     }
 
     /// The client's per-user config directory, where global setup writes.
@@ -50,6 +71,9 @@ impl ClientKind {
             Self::ClaudeCode => claude::global_dir(),
             Self::OpenCode => opencode::global_dir(),
             Self::Devin => devin::global_dir(),
+            Self::Codex => codex::global_dir(),
+            Self::Gemini => gemini::global_dir(),
+            Self::Cursor => cursor::global_dir(),
         }
     }
 
@@ -60,6 +84,9 @@ impl ClientKind {
             Self::ClaudeCode => claude::changes(scope, bin, db),
             Self::OpenCode => opencode::changes(scope, bin, db),
             Self::Devin => devin::changes(scope, bin, db),
+            Self::Codex => codex::changes(scope, bin, db),
+            Self::Gemini => gemini::changes(scope, bin, db),
+            Self::Cursor => cursor::changes(scope, bin, db),
         }
     }
 
@@ -71,6 +98,9 @@ impl ClientKind {
             Self::ClaudeCode => claude::removals(scope, notes),
             Self::OpenCode => opencode::removals(scope, notes),
             Self::Devin => devin::removals(scope, notes),
+            Self::Codex => codex::removals(scope, notes),
+            Self::Gemini => gemini::removals(scope, notes),
+            Self::Cursor => cursor::removals(scope, notes),
         }
     }
 }
@@ -169,14 +199,17 @@ mod tests {
     #[test]
     fn client_tokens_parse_into_a_set_in_stable_order() {
         use ClientKind::*;
-        assert_eq!(parse(&["all"]).unwrap(), [ClaudeCode, OpenCode, Devin]);
+        assert_eq!(
+            parse(&["all"]).unwrap(),
+            [ClaudeCode, OpenCode, Devin, Codex, Gemini, Cursor]
+        );
         assert_eq!(parse(&["both"]).unwrap(), [ClaudeCode, OpenCode]);
         assert_eq!(
             parse(&["devin", "claude-code"]).unwrap(),
             [ClaudeCode, Devin]
         );
         assert_eq!(parse(&["opencode", "opencode"]).unwrap(), [OpenCode]);
-        assert!(parse(&["cursor"]).is_err());
+        assert!(parse(&["vscode"]).is_err());
         assert!(parse(&[]).is_err());
     }
 
