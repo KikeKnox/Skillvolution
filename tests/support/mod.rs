@@ -1,6 +1,17 @@
 #![allow(dead_code)]
 
 use skillvolution::vault::{Proposal, Revision, Vault};
+use std::path::{Path, PathBuf};
+
+/// Creates `parent/name` as a git repository root (just enough for
+/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
+/// returns its path. `name` should already be a valid project key so the
+/// detected key matches it exactly.
+pub fn git_repo(parent: &Path, name: &str) -> PathBuf {
+    let repo = parent.join(name);
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    repo
+}
 
 /// Wraps a test body in the four sections `propose` requires, so a test can
 /// keep passing the one distinctive line it searches for or diffs.

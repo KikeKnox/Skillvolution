@@ -69,32 +69,43 @@ impl Vault {
         Ok(())
     }
 
-    /// The Devin review flags for a session: whether it did work and whether it
-    /// called a review tool since. Missing row means (false, false).
-    pub fn devin_hook_state(&self, session_id: &str) -> Result<(bool, bool)> {
-        let row: Option<(i64, i64)> = self
+    // The Devin review flags say whether a session did work since its last stop
+    // and whether a review tool ran after that work. Devin runs PostToolUse
+    // hooks in parallel, so each update is a single statement: a separate read
+    // and write would let concurrent hooks overwrite each other's flag.
+
+    /// Marks work done: any earlier review no longer covers it.
+    pub fn mark_devin_work(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO devin_hook_state (session_id, worked, reviewed) VALUES (?1, 1, 0)
+             ON CONFLICT(session_id) DO UPDATE SET worked = 1, reviewed = 0",
+            [session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_devin_review(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO devin_hook_state (session_id, worked, reviewed) VALUES (?1, 0, 1)
+             ON CONFLICT(session_id) DO UPDATE SET reviewed = 1",
+            [session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the session's (worked, reviewed) flags and resets them, so the
+    /// next stop only sees what happens after this one. Missing row means
+    /// (false, false).
+    pub fn take_devin_hook_state(&self, session_id: &str) -> Result<(bool, bool)> {
+        let row: Option<(bool, bool)> = self
             .conn
             .query_row(
-                "SELECT worked, reviewed FROM devin_hook_state WHERE session_id = ?1",
+                "DELETE FROM devin_hook_state WHERE session_id = ?1 RETURNING worked, reviewed",
                 [session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(row.map(|(w, r)| (w != 0, r != 0)).unwrap_or((false, false)))
-    }
-
-    pub fn set_devin_hook_state(
-        &self,
-        session_id: &str,
-        worked: bool,
-        reviewed: bool,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO devin_hook_state (session_id, worked, reviewed) VALUES (?1, ?2, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET worked = excluded.worked, reviewed = excluded.reviewed",
-            rusqlite::params![session_id, worked as i64, reviewed as i64],
-        )?;
-        Ok(())
+        Ok(row.unwrap_or((false, false)))
     }
 
     pub fn clear_devin_hook_state(&self, session_id: &str) -> Result<()> {

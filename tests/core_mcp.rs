@@ -9,17 +9,7 @@ use std::{
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
 };
-use support::Draft;
-
-/// Creates `parent/name` as a git repository root (just enough for
-/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
-/// returns its path. `name` should already be a valid project key so the
-/// detected key matches it exactly.
-fn git_repo(parent: &Path, name: &str) -> std::path::PathBuf {
-    let repo = parent.join(name);
-    fs::create_dir_all(repo.join(".git")).unwrap();
-    repo
-}
+use support::{Draft, git_repo};
 
 /// A long-lived `skillvolution serve` subprocess, driven one JSON-RPC line at a time
 /// so a test can interleave requests with out-of-process CLI writes.
