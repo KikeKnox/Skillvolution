@@ -75,8 +75,8 @@ fn verify_copy(from: &Vault, to: &Vault) -> Result<()> {
 }
 
 /// Rewrites every global client config that currently references `from` so it points
-/// at `to` instead, using the currently running binary as `--bin` (global setup's own
-/// default when none is given). A config "references `from`" when its file on disk
+/// at `to` instead, keeping the binary the client is already configured with when it
+/// still exists (otherwise the currently running one, global setup's own default). A config "references `from`" when its file on disk
 /// contains that path string — the same simple check setup's own idempotent rerun
 /// relies on for hook commands. Claude Code's MCP registration lives outside any file
 /// we control (see `claude_cli`), so it's unconditionally re-registered at `to`
@@ -87,7 +87,11 @@ fn repoint_clients(from: &Path, to: &Path) -> Result<()> {
     let needle = from.to_str().context("source path must be valid UTF-8")?;
     let mut repointed_any = false;
     for kind in ClientKind::ALL {
-        let changes = kind.changes(Scope::Global, &bin, to)?;
+        let mut changes = kind.changes(Scope::Global, &bin, to)?;
+        let client_bin = crate::setup::configured_bin(kind, &changes).unwrap_or(bin.clone());
+        if client_bin != bin {
+            changes = kind.changes(Scope::Global, &client_bin, to)?;
+        }
         let referenced = changes
             .iter()
             .any(|(path, _)| std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle)));
@@ -97,7 +101,7 @@ fn repoint_clients(from: &Path, to: &Path) -> Result<()> {
         write_all(changes)?;
         println!("Repointed {} to {}.", kind.display_name(), to.display());
         if kind == ClientKind::ClaudeCode {
-            println!("{}", register_claude_code_mcp(&bin, to)?);
+            println!("{}", register_claude_code_mcp(&client_bin, to)?);
         }
         repointed_any = true;
     }
