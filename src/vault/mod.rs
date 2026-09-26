@@ -446,8 +446,11 @@ fn is_placeholder_value(value: &str) -> bool {
         || value.eq_ignore_ascii_case("password")
 }
 
-/// A `scheme://user:password@host` URL whose password is a real-looking value
-/// rather than one of the placeholder forms `is_placeholder_value` accepts.
+/// A `scheme://user:password@host` URL whose password looks real: not one of
+/// the placeholder forms `is_placeholder_value` accepts, not a repeat of the user
+/// name (`postgres:postgres`, `guest:guest`), and at least 8 characters mixing two
+/// or more character classes, so conventional local-development defaults such as
+/// `root:secret@localhost` stay publishable.
 fn url_credential(token: &str) -> bool {
     let Some((_, after_scheme)) = token.split_once("://") else {
         return false;
@@ -459,10 +462,19 @@ fn url_credential(token: &str) -> bool {
     let Some((userinfo, _host)) = authority.rsplit_once('@') else {
         return false;
     };
-    let Some((_user, password)) = userinfo.split_once(':') else {
+    let Some((user, password)) = userinfo.split_once(':') else {
         return false;
     };
+    let classes = [
+        password.bytes().any(|b| b.is_ascii_lowercase()),
+        password.bytes().any(|b| b.is_ascii_uppercase()),
+        password.bytes().any(|b| b.is_ascii_digit()),
+        password.bytes().any(|b| !b.is_ascii_alphanumeric()),
+    ];
     !is_placeholder_value(password)
+        && password != user
+        && password.len() >= 8
+        && classes.iter().filter(|&&present| present).count() >= 2
 }
 
 /// A Slack incoming-webhook URL (`hooks.slack.com/services/<team>/<bot>/<secret>`).
@@ -700,6 +712,9 @@ SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
             "https://user:***@host/path",
             "https://user:password@host/path",
             "https://user@host/path",
+            "postgres://postgres:postgres@localhost:5432/app",
+            "amqp://guest:guest@localhost:5672",
+            "mysql://root:secret@localhost/db",
         ] {
             assert!(validate_no_secrets("content", safe).is_ok(), "{safe}");
         }
