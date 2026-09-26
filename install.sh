@@ -21,7 +21,9 @@ else
 fi
 
 installer=$(mktemp)
-trap 'rm -f "$installer"' EXIT INT TERM
+trap 'rm -f "$installer"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 curl --proto '=https' --tlsv1.2 -LsSf "$installer_url" -o "$installer"
 sh "$installer"
