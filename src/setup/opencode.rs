@@ -1,49 +1,94 @@
-//! OpenCode: opencode.json MCP entry, AGENTS.md trigger block, and the native skill file.
+//! OpenCode: the `opencode.json` MCP entry and permissions, the AGENTS.md trigger block,
+//! the native skill file, and the plugin. A project keeps its config and AGENTS.md at the
+//! root and the rest under `.opencode/`; globally everything lives in the config dir,
+//! where an existing `opencode.jsonc` is used instead of `opencode.json`.
 
-use super::{fs_safe, permissions, plugin};
-use anyhow::{Context, Result, ensure};
+use super::{Change, Scope, common, fs_safe, permissions, plugin};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub(super) const START: &str = "<!-- skillvolution:start -->";
-pub(super) const END: &str = "<!-- skillvolution:end -->";
-pub(super) const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When the skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
 const LEGACY_INSTRUCTION: &str = ".opencode/skills/evolution/SKILL.md";
 
-pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(PathBuf, String)>> {
-    ensure!(
-        !project.join("opencode.jsonc").exists(),
-        "opencode.jsonc is unsupported; merge it into strict opencode.json manually first"
-    );
+/// `$XDG_CONFIG_HOME/opencode` when `XDG_CONFIG_HOME` is an absolute, nonempty path;
+/// otherwise `$HOME/.config/opencode` (`$USERPROFILE` if `$HOME` is unset).
+pub(super) fn global_dir() -> Result<PathBuf> {
+    if let Some(dir) = common::env_dir("XDG_CONFIG_HOME").filter(|path| path.is_absolute()) {
+        return Ok(dir.join("opencode"));
+    }
+    common::home()
+        .map(|home| home.join(".config/opencode"))
+        .context("set XDG_CONFIG_HOME or HOME")
+}
 
-    let mut changes = Vec::new();
+pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+    let (root, dir) = match scope {
+        Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".opencode")),
+        Scope::Global => {
+            let dir = global_dir()?;
+            (dir.clone(), dir)
+        }
+    };
+    let config_path = config_path(&root, scope)?;
+    let mut changes = vec![common::skill_change(&dir)?];
 
-    let skill_path = project.join(".opencode/skills/evolution/SKILL.md");
-    fs_safe::check_skill(&skill_path)?;
-    changes.push((skill_path, super::SKILL.to_owned()));
-
-    let path = project.join("opencode.json");
-    let mut config = fs_safe::load_json(&path)?;
-    let entry = json!({
-        "type": "local",
-        "command": [bin, "--db", db, "serve", "--project", key],
-        "enabled": true,
-    });
+    let mut config = load_config(&config_path)?;
+    let mut command = vec![json!(bin)];
+    command.extend(common::server_args(db, scope.key()));
+    let entry = json!({"type": "local", "command": command, "enabled": true});
     fs_safe::merge_server(&mut config, "mcp", entry)?;
-    remove_legacy_instruction(&mut config)?;
+    if let Scope::Project { .. } = scope {
+        remove_legacy_instruction(&mut config)?;
+    }
     permissions::merge_opencode(&mut config)?;
-    changes.push((path, serde_json::to_string_pretty(&config)? + "\n"));
+    changes.push((config_path, common::json_text(&config)?));
 
-    let agents_path = project.join("AGENTS.md");
-    let text = fs_safe::read_optional(&agents_path)?.unwrap_or_default();
-    let updated = fs_safe::merge_marker_block(text, START, END, AGENTS_BLOCK)?;
-    changes.push((agents_path, updated));
+    changes.push(common::agents_change(&root.join("AGENTS.md"))?);
 
-    let plugin_path = project.join(".opencode/plugins/skillvolution.js");
+    let plugin_path = dir.join("plugins/skillvolution.js");
     plugin::check_owner(&plugin_path)?;
     changes.push((plugin_path, plugin::content(bin, db)?));
 
     Ok(changes)
+}
+
+/// The config file to write: `opencode.json` in a project, where `opencode.jsonc` is
+/// refused; globally, whichever of the two exists (refusing if both do), or
+/// `opencode.json` if neither does.
+fn config_path(root: &Path, scope: Scope) -> Result<PathBuf> {
+    let json = root.join("opencode.json");
+    let jsonc = root.join("opencode.jsonc");
+    if let Scope::Project { .. } = scope {
+        ensure!(
+            !jsonc.exists(),
+            "opencode.jsonc is unsupported; merge it into strict opencode.json manually first"
+        );
+        return Ok(json);
+    }
+    match (json.exists(), jsonc.exists()) {
+        (true, true) => bail!(
+            "both {} and {} exist; remove one before running setup",
+            json.display(),
+            jsonc.display()
+        ),
+        (false, true) => Ok(jsonc),
+        _ => Ok(json),
+    }
+}
+
+fn load_config(path: &Path) -> Result<Value> {
+    let is_jsonc = path.extension().and_then(|ext| ext.to_str()) == Some("jsonc");
+    fs_safe::load_json(path).with_context(|| {
+        if is_jsonc {
+            format!(
+                "{} could not be parsed as strict JSON; add the mcp.skillvolution entry manually, \
+                 or remove the comments/trailing commas and rerun setup",
+                path.display()
+            )
+        } else {
+            format!("{} must be valid JSON", path.display())
+        }
+    })
 }
 
 /// The old always-on `instructions` entry loaded the whole skill on every turn; drop it if

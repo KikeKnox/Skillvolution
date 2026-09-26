@@ -10,25 +10,18 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 
 /// Returns the subset of `detected` the user confirmed, or `detected` unchanged
 /// when no terminal is available to ask.
-pub fn choose(detected: Clients) -> Clients {
+pub fn choose_on_terminal(detected: Clients) -> Clients {
     if std::env::var_os("SKILLVOLUTION_NO_INPUT").is_some_and(|v| !v.is_empty()) {
         return detected;
     }
     let Some(mut tty) = Tty::open() else {
         return detected;
     };
-    let mut chosen = Clients::default();
     let _ = writeln!(tty.writer, "Detected AI clients:");
-    for (present, label, _) in detected.list() {
-        if present && tty.ask(&format!("  Configure {label}? [Y/n] ")) {
-            match label {
-                "Claude Code" => chosen.claude_code = true,
-                "OpenCode" => chosen.opencode = true,
-                _ => chosen.devin = true,
-            }
-        }
-    }
-    chosen
+    detected
+        .iter()
+        .filter(|kind| tty.ask(&format!("  Configure {}? [Y/n] ", kind.display_name())))
+        .collect()
 }
 
 struct Tty {

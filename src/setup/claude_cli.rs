@@ -2,7 +2,7 @@
 //! `claude` CLI. We never edit `~/.claude.json` directly: Claude Code rewrites that file
 //! on its own, so a direct edit would race it and get lost.
 
-use super::hooks;
+use super::{common, hooks};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ fn mcp_json(bin: &Path, db: &Path) -> String {
     serde_json::json!({
         "type": "stdio",
         "command": bin,
-        "args": ["--db", db, "serve"],
+        "args": common::server_args(db, None),
     })
     .to_string()
 }

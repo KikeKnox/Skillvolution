@@ -1,7 +1,7 @@
-//! SessionStart/Stop hook merging shared by project (`.claude/settings.local.json`) and
-//! global (`settings.json`) Claude Code setup. Both own their hook entries by matching on
-//! the command text, so a rerun (even with a changed `--bin`/`--db`) replaces the old
-//! entry instead of duplicating it, and any foreign hook is left untouched.
+//! Hook command building and merging shared by the Claude Code and Devin setups, project
+//! and global. Our hook entries are recognized by their command text, so a rerun (even
+//! with a changed `--bin`/`--db`) replaces the old entry instead of duplicating it, and
+//! any foreign hook is left untouched.
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -18,6 +18,21 @@ pub fn shell_quote(text: &str) -> String {
 pub fn require_utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str()
         .with_context(|| format!("{what} is not valid UTF-8: {}", path.display()))
+}
+
+/// A hook command line, `<bin> --db <db> hook <event><extra>`, with `bin` and `db`
+/// shell-quoted. `extra` is appended as-is, so it must already be shell-safe (see
+/// `project_flag`).
+pub fn hook_cmd(bin: &Path, db: &Path, event: &str, extra: &str) -> Result<String> {
+    let bin = shell_quote(require_utf8(bin, "--bin")?);
+    let db = shell_quote(require_utf8(db, "--db")?);
+    Ok(format!("{bin} --db {db} hook {event}{extra}"))
+}
+
+/// ` --project '<key>'` for a project's hooks; empty for global ones.
+pub fn project_flag(key: Option<&str>) -> String {
+    key.map(|key| format!(" --project {}", shell_quote(key)))
+        .unwrap_or_default()
 }
 
 /// Splits `command` into shell words: single-quoted segments (including the

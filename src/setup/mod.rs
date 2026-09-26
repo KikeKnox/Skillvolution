@@ -1,12 +1,10 @@
 mod claude;
 mod claude_cli;
-mod detect;
+mod client;
+mod common;
 mod devin;
 mod fs_safe;
 mod global;
-mod global_claude;
-mod global_devin;
-mod global_opencode;
 mod hooks;
 mod opencode;
 mod permissions;
@@ -14,8 +12,10 @@ mod plugin;
 mod prompt;
 mod remove;
 
+pub(crate) use client::{ClientKind, Clients, Scope};
+
 use crate::vault::Vault;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -23,66 +23,8 @@ use std::{
 
 pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 
-/// The set of AI clients a setup run configures, whether chosen explicitly via
-/// `--client` or detected/prompted for a global run.
-#[derive(Clone, Copy, Default)]
-struct Clients {
-    claude_code: bool,
-    opencode: bool,
-    devin: bool,
-}
-
-impl Clients {
-    fn all() -> Self {
-        Self {
-            claude_code: true,
-            opencode: true,
-            devin: true,
-        }
-    }
-
-    fn any(self) -> bool {
-        self.claude_code || self.opencode || self.devin
-    }
-
-    /// (selected, display name, `--client` token) in stable order.
-    fn list(self) -> [(bool, &'static str, &'static str); 3] {
-        [
-            (self.claude_code, "Claude Code", "claude-code"),
-            (self.opencode, "OpenCode", "opencode"),
-            (self.devin, "Devin CLI", "devin"),
-        ]
-    }
-
-    /// The `--client` tokens for the selected clients, in stable order.
-    fn cli_names(self) -> Vec<&'static str> {
-        self.list()
-            .into_iter()
-            .filter_map(|(on, _, token)| on.then_some(token))
-            .collect()
-    }
-
-    /// Maps `--client` tokens to flags: `all` selects every client, `both` keeps
-    /// its original meaning (Claude Code + OpenCode).
-    fn parse(tokens: &[String]) -> Result<Self> {
-        let mut clients = Clients::default();
-        for token in tokens {
-            match token.as_str() {
-                "all" => clients = Clients::all(),
-                "both" => {
-                    clients.claude_code = true;
-                    clients.opencode = true;
-                }
-                "claude-code" => clients.claude_code = true,
-                "opencode" => clients.opencode = true,
-                "devin" => clients.devin = true,
-                other => bail!("unknown --client {other}"),
-            }
-        }
-        ensure!(clients.any(), "--client selects no clients");
-        Ok(clients)
-    }
-}
+/// A file setup writes, with its full new content.
+pub(crate) type Change = (PathBuf, String);
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
@@ -210,29 +152,34 @@ fn run_project(
     ensure!(project.is_dir(), "project must be a directory");
     let key = resolve_project_key(project_key, &project)?;
 
-    let mut changes = Vec::new();
-    if clients.opencode {
-        changes.extend(opencode::changes(&project, bin, db, &key)?);
-    }
-    if clients.claude_code {
-        changes.extend(claude::changes(&project, bin, db, &key)?);
-    }
-    if clients.devin {
-        changes.extend(devin::changes(&project, bin, db, &key)?);
-    }
-    write_all(changes)?;
+    let scope = Scope::Project {
+        dir: &project,
+        key: &key,
+    };
+    write_clients(clients, scope, bin, db)?;
+    let tokens: Vec<&str> = clients.iter().map(ClientKind::token).collect();
     println!(
         "Configured {} for {}.",
-        clients.cli_names().join(", "),
+        tokens.join(", "),
         project.display()
     );
     Ok(())
 }
 
+/// Writes every selected client's files for `scope`, all computed (and so validated)
+/// before the first write.
+fn write_clients(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Result<()> {
+    let mut changes = Vec::new();
+    for kind in clients.iter() {
+        changes.extend(kind.changes(scope, bin, db)?);
+    }
+    write_all(changes)
+}
+
 /// Validates every write target before touching any of them, so a bad target further
 /// down the list leaves everything already-checked untouched. If a write still fails,
 /// the files written before it are put back as they were (see `roll_back`).
-fn write_all(changes: Vec<(PathBuf, String)>) -> Result<()> {
+fn write_all(changes: Vec<Change>) -> Result<()> {
     for (path, _) in &changes {
         fs_safe::check_target(path)?;
         fs_safe::check_backups(path)?;
