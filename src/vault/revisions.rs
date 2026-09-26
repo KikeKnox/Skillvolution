@@ -105,6 +105,43 @@ fn load(conn: &Connection, id: &str, version: i64) -> Result<Revision> {
     .with_context(|| format!("no revision {id} version {version}"))
 }
 
+/// Replaces `id`'s `skills_fts` row with fresh content, keyed by rowid so a
+/// stale entry can never linger under the old id text. Shared by `propose`,
+/// whose own new revision is the content, and by `transfer`'s purge/import,
+/// which repoint the row at whichever revision ends up latest-published.
+pub(super) fn replace_fts_row(
+    tx: &Connection,
+    id: &str,
+    description: &str,
+    tags: &str,
+    content: &str,
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM skills_fts WHERE rowid = (SELECT fts_rowid FROM skills WHERE id = ?1)",
+        [id],
+    )?;
+    tx.execute(
+        "INSERT INTO skills_fts (id, description, tags, content) VALUES (?1, ?2, ?3, ?4)",
+        params![id, description, tags, content],
+    )?;
+    tx.execute(
+        "UPDATE skills SET fts_rowid = ?2 WHERE id = ?1",
+        params![id, tx.last_insert_rowid()],
+    )?;
+    Ok(())
+}
+
+/// Removes `id`'s `skills_fts` row without replacing it, for when no
+/// published revision remains to index.
+pub(super) fn clear_fts_row(tx: &Connection, id: &str) -> Result<()> {
+    tx.execute(
+        "DELETE FROM skills_fts WHERE rowid = (SELECT fts_rowid FROM skills WHERE id = ?1)",
+        [id],
+    )?;
+    tx.execute("UPDATE skills SET fts_rowid = NULL WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 fn render(revision: &Revision) -> String {
     let mut text = format!(
         "description: {}\ntags: {}\n\n{}",
@@ -236,23 +273,12 @@ impl Vault {
                 expected_version
             ],
         )?;
-        // Replaced by rowid: a DELETE matching the id column scans the whole index.
-        tx.execute(
-            "DELETE FROM skills_fts WHERE rowid = (SELECT fts_rowid FROM skills WHERE id = ?1)",
-            [id],
-        )?;
-        tx.execute(
-            "INSERT INTO skills_fts (id, description, tags, content) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                id,
-                revision.description,
-                revision.tags.join(" "),
-                revision.content
-            ],
-        )?;
-        tx.execute(
-            "UPDATE skills SET fts_rowid = ?2 WHERE id = ?1",
-            params![id, tx.last_insert_rowid()],
+        replace_fts_row(
+            &tx,
+            id,
+            &revision.description,
+            &revision.tags.join(" "),
+            &revision.content,
         )?;
         tx.commit()?;
         Ok(revision)
@@ -307,9 +333,18 @@ impl Vault {
 
     pub fn diff(&self, id: &str, version: i64) -> Result<String> {
         let revision = self.inspect(id, version)?;
+        // The base revision can be gone (purged): diff against nothing rather
+        // than failing, so a later revision stays inspectable.
+        let mut base_label = format!("{id} v{}", revision.expected_version);
         let base = match revision.expected_version {
             0 => String::new(),
-            base => render(&self.inspect(id, base)?),
+            base_version => match self.inspect(id, base_version) {
+                Ok(base_revision) => render(&base_revision),
+                Err(_) => {
+                    base_label.push_str(" (purged)");
+                    String::new()
+                }
+            },
         };
         let new = render(&revision);
         if base == new {
@@ -318,10 +353,7 @@ impl Vault {
         Ok(similar::TextDiff::from_lines(&base, &new)
             .unified_diff()
             .context_radius(3)
-            .header(
-                &format!("{id} v{}", revision.expected_version),
-                &format!("{id} v{version}"),
-            )
+            .header(&base_label, &format!("{id} v{version}"))
             .to_string())
     }
 }
