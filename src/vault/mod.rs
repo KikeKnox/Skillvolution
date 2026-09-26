@@ -295,14 +295,22 @@ fn schema_stamp(conn: &Connection) -> Result<(i64, i64)> {
     Ok((read("user_version")?, read("application_id")?))
 }
 
-/// `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an absolute, nonempty path;
-/// otherwise `$HOME/.local/share/skillvolution/skills.db` (`$USERPROFILE` if `$HOME` is unset).
+/// On Windows, `%LOCALAPPDATA%\skillvolution\skills.db` (falling back to the logic below if
+/// `LOCALAPPDATA` is unset). Elsewhere, `$XDG_DATA_HOME/skillvolution/skills.db` when
+/// `XDG_DATA_HOME` is an absolute, nonempty path; otherwise
+/// `$HOME/.local/share/skillvolution/skills.db` (`$USERPROFILE` if `$HOME` is unset).
 pub fn default_database() -> Result<PathBuf> {
     let nonempty_env = |name| {
         std::env::var_os(name)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
+
+    #[cfg(windows)]
+    if let Some(local_app_data) = nonempty_env("LOCALAPPDATA") {
+        return Ok(local_app_data.join("skillvolution/skills.db"));
+    }
+
     let base = nonempty_env("XDG_DATA_HOME")
         .filter(|path| path.is_absolute())
         .or_else(|| {

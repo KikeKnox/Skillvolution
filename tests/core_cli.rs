@@ -160,7 +160,10 @@ fn default_database_respects_xdg_then_home() {
         command
             .arg("outcomes")
             .env("HOME", dir.path())
-            .env_remove("XDG_DATA_HOME");
+            .env_remove("XDG_DATA_HOME")
+            // On Windows, LOCALAPPDATA takes priority over this XDG/HOME fallback;
+            // remove it so this test exercises the fallback regardless of platform.
+            .env_remove("LOCALAPPDATA");
         let base = if use_xdg {
             let base = dir.path().join("xdg data");
             command.env("XDG_DATA_HOME", &base);
@@ -176,6 +179,25 @@ fn default_database_respects_xdg_then_home() {
         );
         assert!(base.join("skillvolution/skills.db").exists());
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn default_database_prefers_local_app_data_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_app_data = dir.path().join("Local");
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("outcomes")
+        .env("LOCALAPPDATA", &local_app_data)
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(local_app_data.join("skillvolution/skills.db").exists());
 }
 
 #[test]
@@ -197,6 +219,9 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
         .current_dir(workspace.path())
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &xdg_base)
+        // LOCALAPPDATA outranks XDG_DATA_HOME on Windows; remove it so this
+        // test's expected database path holds on every platform.
+        .env_remove("LOCALAPPDATA")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env("PATH", empty_path.path())
         .output()
