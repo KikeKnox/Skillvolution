@@ -5,8 +5,9 @@
 //! every detected client is configured, matching the pre-prompt behavior.
 //! `SKILLVOLUTION_NO_INPUT` forces that non-interactive path explicitly.
 
-use super::Clients;
+use super::{Clients, absolutize, common};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 /// Returns the subset of `detected` the user confirmed, or `detected` unchanged
 /// when no terminal is available to ask.
@@ -52,6 +53,56 @@ fn ask(question: &str, input: &mut dyn BufRead, output: &mut dyn Write) -> bool 
         }
     }
     true
+}
+
+/// Asks `Vault database path [<default>]: ` on a terminal when one is attached, right
+/// after the client-selection prompt; returns `default` unchanged (without asking)
+/// under `SKILLVOLUTION_NO_INPUT` or with no terminal available.
+pub fn choose_db_on_terminal(default: &Path) -> PathBuf {
+    if std::env::var_os("SKILLVOLUTION_NO_INPUT").is_some_and(|v| !v.is_empty()) {
+        return default.to_owned();
+    }
+    let Some(mut tty) = Tty::open() else {
+        return default.to_owned();
+    };
+    choose_db(
+        default,
+        common::home().as_deref(),
+        &mut tty.reader,
+        &mut tty.writer,
+    )
+}
+
+/// Asks for the database path on `output`, reading the answer from `input`: EOF or a
+/// blank line accepts `default`; any other answer is resolved by `resolve_db_answer`.
+fn choose_db(
+    default: &Path,
+    home: Option<&Path>,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> PathBuf {
+    let _ = write!(output, "Vault database path [{}]: ", default.display());
+    let _ = output.flush();
+    let mut answer = String::new();
+    if input.read_line(&mut answer).unwrap_or(0) == 0 {
+        return default.to_owned();
+    }
+    resolve_db_answer(&answer, default, home)
+}
+
+/// A blank answer keeps `default`; otherwise a leading `~/` is expanded against `home`
+/// and the result is absolutized (falling back to the expanded-but-not-absolutized path
+/// if that somehow fails, rather than losing the user's answer).
+fn resolve_db_answer(answer: &str, default: &Path, home: Option<&Path>) -> PathBuf {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return default.to_owned();
+    }
+    let expanded = match (trimmed.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(trimmed),
+    };
+    absolutize(&expanded).unwrap_or(expanded)
 }
 
 struct Tty {
@@ -129,5 +180,36 @@ mod tests {
         let (chosen, output) = choose_with("maybe\nsure\nn\nn\n");
         assert_eq!(chosen, [ClaudeCode]);
         assert_eq!(output.matches("Configure Claude Code?").count(), 2);
+    }
+
+    fn choose_db_with(answer: &str, home: Option<&Path>) -> (PathBuf, String) {
+        let mut output = Vec::new();
+        let default = Path::new("/default/vault.db");
+        let path = choose_db(default, home, &mut answer.as_bytes(), &mut output);
+        (path, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn a_blank_line_keeps_the_default() {
+        let (path, output) = choose_db_with("\n", None);
+        assert_eq!(path, Path::new("/default/vault.db"));
+        assert!(output.starts_with("Vault database path [/default/vault.db]: "));
+    }
+
+    #[test]
+    fn end_of_input_keeps_the_default() {
+        assert_eq!(choose_db_with("", None).0, Path::new("/default/vault.db"));
+    }
+
+    #[test]
+    fn a_custom_absolute_path_is_kept() {
+        let path = choose_db_with("/somewhere/else/vault.db\n", None).0;
+        assert_eq!(path, Path::new("/somewhere/else/vault.db"));
+    }
+
+    #[test]
+    fn a_tilde_prefixed_path_expands_against_home() {
+        let path = choose_db_with("~/x.db\n", Some(Path::new("/home/user"))).0;
+        assert_eq!(path, Path::new("/home/user/x.db"));
     }
 }
