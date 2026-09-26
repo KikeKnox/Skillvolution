@@ -41,7 +41,7 @@ pub fn changes(project: &Path, bin: &Path, db: &Path, key: &str) -> Result<Vec<(
 
     let plugin_path = project.join(".opencode/plugins/skillvolution.js");
     plugin::check_owner(&plugin_path)?;
-    changes.push((plugin_path, plugin::content(bin, db)?));
+    changes.push((plugin_path, plugin::content(bin, db, Some(key))?));
 
     Ok(changes)
 }
