@@ -59,10 +59,11 @@ enum Command {
     /// Hook entry points for Claude Code, Devin CLI, Codex CLI, Gemini CLI, and Cursor.
     #[command(subcommand)]
     Hook(HookEvent),
-    /// Set up the Skillvolution MCP server for a project or globally, detect clients,
-    /// configure them, or remove Skillvolution from them. Global setup is the default and
-    /// is shared by every project. Use --project for project-specific setup, --remove to
-    /// undo, or --dry-run to preview.
+    /// Configure AI clients to use the vault (per user by default), or remove it.
+    ///
+    /// Global setup is the default: it detects the installed clients, asks which to
+    /// configure, and is shared by every project. Use --project for one project's own
+    /// files, --remove to undo, or --dry-run to preview the changes.
     Setup(setup::SetupArgs),
     /// Permanently delete a skill, or one of its revisions, with its outcomes.
     Purge {
