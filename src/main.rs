@@ -88,15 +88,59 @@ enum Command {
     },
 }
 
-/// The client emitting a hook payload: payloads and blocking conventions differ
-/// (`claude-code` scans a transcript and makes Claude continue via
-/// `hookSpecificOutput.additionalContext` JSON on stdout; `devin` tracks
-/// per-session flags and blocks via a `{"decision":"block"}` JSON on stdout).
-#[derive(Clone, Copy, Default, clap::ValueEnum)]
+/// The client emitting a hook payload: payloads and blocking conventions differ.
+/// `claude-code` scans a transcript and makes Claude continue via
+/// `hookSpecificOutput.additionalContext` JSON on stdout; every other client
+/// tracks per-session flags from `tool-use` and asks to continue with its own
+/// JSON on stdout (`{"decision":"block"}` for Devin and Codex, `{"decision":"deny"}`
+/// for Gemini CLI's AfterAgent, `{"followup_message"}` for Cursor).
+#[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 enum HookClient {
     #[default]
     ClaudeCode,
     Devin,
+    Codex,
+    Gemini,
+    Cursor,
+}
+
+impl HookClient {
+    /// The file-editing tool names `tool-use` counts as work for this client.
+    fn work_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => hook::WORK_TOOLS,
+            Self::Devin => hook::DEVIN_WORK_TOOLS,
+            Self::Codex => hook::CODEX_WORK_TOOLS,
+            Self::Gemini => hook::GEMINI_WORK_TOOLS,
+            Self::Cursor => hook::CURSOR_WORK_TOOLS,
+        }
+    }
+
+    /// The SessionStart output that injects `context` into this client's session.
+    fn session_context(self, context: String) -> String {
+        match self {
+            Self::ClaudeCode => context,
+            Self::Devin | Self::Codex | Self::Gemini => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": context,
+                }
+            })
+            .to_string(),
+            Self::Cursor => serde_json::json!({ "additional_context": context }).to_string(),
+        }
+    }
+
+    /// The Stop output asking a flag-tracked client to continue with `reason`.
+    fn continue_with(self, reason: &str) -> serde_json::Value {
+        match self {
+            Self::ClaudeCode | Self::Devin | Self::Codex => {
+                serde_json::json!({"decision": "block", "reason": reason})
+            }
+            Self::Gemini => serde_json::json!({"decision": "deny", "reason": reason}),
+            Self::Cursor => serde_json::json!({ "followup_message": reason }),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -110,8 +154,12 @@ enum HookEvent {
         #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
         client: HookClient,
     },
-    /// Record work/review tool calls for a session (Devin PostToolUse).
-    ToolUse,
+    /// Record work/review tool calls for a session (PostToolUse of the flag-tracked
+    /// clients: Devin, Codex, Gemini CLI, Cursor).
+    ToolUse {
+        #[arg(long, value_enum, default_value_t = HookClient::Devin)]
+        client: HookClient,
+    },
     /// Ask for an evolution review after unreviewed work.
     Stop {
         #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
@@ -184,13 +232,12 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
         HookEvent::SessionStart { project, client } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let output = match client {
-                HookClient::ClaudeCode => hook::session_start(&open(db)?, project.as_deref())?,
-                HookClient::Devin => hook::devin_session_start(&open(db)?, project.as_deref())?,
-            };
-            print!("{output}");
+            let context = hook::session_start(&open(db)?, project.as_deref())?;
+            print!("{}", client.session_context(context));
         }
-        HookEvent::ToolUse => hook::devin_tool_use(&open(db)?, &read_stdin()?)?,
+        HookEvent::ToolUse { client } => {
+            hook::tool_use(&open(db)?, &read_stdin()?, client.work_tools())?
+        }
         HookEvent::Stop { client } => {
             let input = read_stdin()?;
             match client {
@@ -211,12 +258,9 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                         );
                     }
                 }
-                HookClient::Devin => {
+                flagged => {
                     if let Some(reason) = hook::devin_stop(&open(db)?, &input)? {
-                        println!(
-                            "{}",
-                            serde_json::json!({"decision": "block", "reason": reason})
-                        );
+                        println!("{}", flagged.continue_with(reason));
                     }
                 }
             }

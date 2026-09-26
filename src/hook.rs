@@ -9,11 +9,16 @@ use std::{
 };
 
 const CATALOG_LIMIT: i64 = 30;
-const WORK_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+pub const WORK_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
 // Devin tool names are lowercase and its hook payloads carry no transcript path,
 // so the same worked/reviewed judgment is kept as per-session flags instead.
-pub(crate) const DEVIN_WORK_TOOLS: [&str; 4] = ["write", "edit", "apply_patch", "notebook_edit"];
+pub const DEVIN_WORK_TOOLS: &[&str] = &["write", "edit", "apply_patch", "notebook_edit"];
+// The file-editing tool names of the other flag-tracked clients, as their
+// PostToolUse-style hook payloads report them in `tool_name`.
+pub const CODEX_WORK_TOOLS: &[&str] = &["apply_patch"];
+pub const GEMINI_WORK_TOOLS: &[&str] = &["write_file", "replace"];
+pub const CURSOR_WORK_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit"];
 
 pub const STOP_REASON: &str = "Skillvolution review: you edited files since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, \
@@ -147,18 +152,32 @@ pub fn devin_session_start(vault: &Vault, project: Option<&str>) -> Result<Strin
     .to_string())
 }
 
-/// Devin PostToolUse: flags the session as having done work (which a previous
-/// review no longer covers) or as having reviewed it, based on the tool that
-/// just ran. Any other tool leaves the flags alone.
+/// The session a hook payload belongs to: `session_id`, or `conversation_id`
+/// for clients that name it that way.
+fn session_of(input: &Value) -> Option<&str> {
+    input["session_id"]
+        .as_str()
+        .or_else(|| input["conversation_id"].as_str())
+}
+
+/// Devin PostToolUse: `tool_use` with Devin's file-editing tools.
 pub fn devin_tool_use(vault: &Vault, input: &str) -> Result<()> {
+    tool_use(vault, input, DEVIN_WORK_TOOLS)
+}
+
+/// PostToolUse for the flag-tracked clients (every client but Claude Code, whose
+/// transcript is scanned instead): flags the session as having done work (which a
+/// previous review no longer covers) when the tool is one of `work_tools`, or as
+/// having reviewed it after a review tool. Any other tool leaves the flags alone.
+/// The flags live in `devin_hook_state`, whatever the client.
+pub fn tool_use(vault: &Vault, input: &str, work_tools: &[&str]) -> Result<()> {
     let input: Value = serde_json::from_str(input)?;
-    let (Some(session), Some(tool)) = (input["session_id"].as_str(), input["tool_name"].as_str())
-    else {
+    let (Some(session), Some(tool)) = (session_of(&input), input["tool_name"].as_str()) else {
         return Ok(());
     };
     if is_review_tool(tool) {
         vault.mark_devin_review(session)
-    } else if DEVIN_WORK_TOOLS.contains(&tool) {
+    } else if work_tools.contains(&tool) {
         vault.mark_devin_work(session)
     } else {
         Ok(())
@@ -170,12 +189,13 @@ pub fn devin_tool_use(vault: &Vault, input: &str) -> Result<()> {
 /// a stop caused by the agent simply ignoring the reminder is not blocked
 /// again. A stop already continued by this hook (stop_hook_active) is never
 /// blocked and leaves the flags alone.
+/// The same judgment serves every flag-tracked client.
 pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
     if input["stop_hook_active"].as_bool() == Some(true) {
         return Ok(None);
     }
-    let Some(session) = input["session_id"].as_str() else {
+    let Some(session) = session_of(&input) else {
         return Ok(None);
     };
     let (worked, reviewed) = vault.take_devin_hook_state(session)?;
@@ -186,7 +206,7 @@ pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
 /// with dead sessions.
 pub fn devin_session_end(vault: &Vault, input: &str) -> Result<()> {
     let input: Value = serde_json::from_str(input)?;
-    if let Some(session) = input["session_id"].as_str() {
+    if let Some(session) = session_of(&input) {
         vault.clear_devin_hook_state(session)?;
     }
     Ok(())
