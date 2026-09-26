@@ -12,6 +12,7 @@ mod opencode;
 mod permissions;
 mod plugin;
 mod prompt;
+mod remove;
 
 use crate::vault::Vault;
 use anyhow::{Context, Result, bail, ensure};
@@ -109,6 +110,13 @@ pub struct SetupArgs {
     /// Requires --project.
     #[arg(long)]
     project_key: Option<String>,
+    /// Remove Skillvolution from the selected clients instead of configuring them,
+    /// keeping every entry setup does not own.
+    #[arg(long, conflicts_with_all = ["bin", "project_key", "dry_run"])]
+    remove: bool,
+    /// Print a unified diff of every file setup would write, without writing anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl SetupArgs {
@@ -126,6 +134,15 @@ pub fn run(args: SetupArgs) -> Result<()> {
         args.project.is_some() || args.project_key.is_none(),
         "--project-key requires --project"
     );
+    if args.remove {
+        let clients = if args.client.is_empty() {
+            Clients::all()
+        } else {
+            Clients::parse(&args.client)?
+        };
+        return remove::run(clients, args.project.as_deref());
+    }
+    ensure!(!args.dry_run, "--dry-run is not implemented yet");
     let bin = resolve_bin(args.bin)?;
     let db = resolve_db(args.db)?;
     // Client configs embed these paths as JSON strings, which must be valid UTF-8.

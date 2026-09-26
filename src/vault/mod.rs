@@ -1,10 +1,12 @@
 mod outcomes;
 mod revisions;
 mod search;
+mod transfer;
 
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
 pub use revisions::{Proposal, Revision, SkillView};
 pub use search::{SearchPage, SkillMetadata};
+pub use transfer::{ImportReport, PurgeReport};
 
 use anyhow::{Result, bail, ensure};
 use rusqlite::{Connection, ErrorCode, OptionalExtension};

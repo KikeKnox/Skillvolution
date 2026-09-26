@@ -49,6 +49,41 @@ enum Command {
     Hook(HookEvent),
     /// Configure a project to use the Skillvolution MCP.
     Setup(setup::SetupArgs),
+    /// Permanently delete a skill, or one of its revisions, with its outcomes.
+    Purge {
+        /// Skill id.
+        id: String,
+        /// Delete only this revision instead of the whole skill.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<i64>,
+    },
+    /// Write every skill, revision, and outcome as JSON.
+    Export {
+        /// Output file; defaults to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Merge a JSON document written by `export` into the vault.
+    Import {
+        /// File written by `export`.
+        path: PathBuf,
+    },
+    /// Write a consistent copy of the vault database to a new file.
+    Backup {
+        /// Destination file; must not exist.
+        path: PathBuf,
+    },
+    /// Check the vault and the client configurations setup wrote.
+    Doctor {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move the vault database to a new local path and repoint configured clients.
+    Relocate {
+        /// New database path.
+        path: PathBuf,
+    },
 }
 
 /// The client emitting a hook payload: payloads and blocking conventions differ
@@ -119,19 +154,59 @@ fn resolve_project(explicit: Option<String>) -> Result<Option<String>> {
     })
 }
 
+/// The database at `--db`, or the default location.
+fn db_path(db: &Option<PathBuf>) -> Result<PathBuf> {
+    db.clone()
+        .map(Ok)
+        .unwrap_or_else(skillvolution::vault::default_database)
+}
+
 /// Opens the database at `--db`, or the default location (setup and every
 /// command create it on first open, so there is no separate init step).
 fn open(db: &Option<PathBuf>) -> Result<Vault> {
-    let path = db
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(skillvolution::vault::default_database)?;
+    let path = db_path(db)?;
     Vault::open(&path).with_context(|| format!("open {}", path.display()))
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Purge { id, version } => {
+            let report = open(&cli.db)?.purge(&id, version)?;
+            println!(
+                "Purged {id}: {} revision(s), {} outcome(s){}.",
+                report.revisions,
+                report.outcomes,
+                if report.skill_removed {
+                    ", skill removed"
+                } else {
+                    ""
+                }
+            );
+        }
+        Command::Export { output } => {
+            let json = open(&cli.db)?.export_json()?;
+            match output {
+                Some(path) => std::fs::write(&path, json)
+                    .with_context(|| format!("write {}", path.display()))?,
+                None => println!("{json}"),
+            }
+        }
+        Command::Import { path } => {
+            let json = std::fs::read_to_string(&path)
+                .with_context(|| format!("read {}", path.display()))?;
+            print_json(&open(&cli.db)?.import_json(&json)?)?;
+        }
+        Command::Backup { path } => {
+            open(&cli.db)?.backup(&path)?;
+            println!("Backed up to {}.", path.display());
+        }
+        Command::Doctor { json } => {
+            if !skillvolution::doctor::run(&db_path(&cli.db)?, json)? {
+                std::process::exit(1);
+            }
+        }
+        Command::Relocate { path } => skillvolution::relocate::run(&db_path(&cli.db)?, &path)?,
         Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
         Command::Serve { project } => {
             validate_project(&project)?;
