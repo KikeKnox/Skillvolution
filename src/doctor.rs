@@ -235,7 +235,12 @@ fn client_checks(db: &Path) -> Result<(Vec<Check>, Vec<ClientKind>)> {
             checks.push(Check::ok(display, "not installed"));
             continue;
         }
-        let changes = kind.changes(Scope::Global, &bin, db)?;
+        let mut changes = kind.changes(Scope::Global, &bin, db)?;
+        if let Some(configured_bin) = setup::configured_bin(kind, &changes)
+            && configured_bin != bin
+        {
+            changes = kind.changes(Scope::Global, &configured_bin, db)?;
+        }
         let (configured, mismatched) = diff_changes(&changes)?;
         if mismatched.is_empty() {
             checks.push(Check::ok(display, "configured, up to date"));

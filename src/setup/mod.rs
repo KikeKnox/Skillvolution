@@ -15,7 +15,8 @@ mod remove;
 
 pub(crate) use client::{ClientKind, Clients, Scope};
 pub(crate) use inspect::{
-    claude_mcp_registered, double_install_warning, missing_configured_bin, skill_marker_version,
+    claude_mcp_registered, configured_bin, double_install_warning, missing_configured_bin,
+    skill_marker_version,
 };
 
 use crate::vault::Vault;

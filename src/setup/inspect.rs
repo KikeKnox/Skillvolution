@@ -52,6 +52,14 @@ fn configured_bins(kind: ClientKind, changes: &[Change]) -> Vec<PathBuf> {
     bins
 }
 
+/// The first configured binary that still exists and is executable, so a
+/// client set up with `--bin` is compared against that binary, not this one.
+pub(crate) fn configured_bin(kind: ClientKind, changes: &[Change]) -> Option<PathBuf> {
+    configured_bins(kind, changes)
+        .into_iter()
+        .find(|path| claude_cli::is_executable(path))
+}
+
 /// The first binary path among `configured_bins` that no longer exists or
 /// isn't executable, if any.
 pub(crate) fn missing_configured_bin(kind: ClientKind, changes: &[Change]) -> Option<PathBuf> {
