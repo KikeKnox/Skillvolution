@@ -978,9 +978,7 @@ fn prune_hook_state_drops_only_sessions_idle_past_the_cutoff() {
     let vault = Vault::open(&path).unwrap();
     vault.set_transcript_offset("old", 10).unwrap();
     vault.set_transcript_offset("touched", 20).unwrap();
-    vault
-        .set_devin_hook_state("old-devin", true, false)
-        .unwrap();
+    vault.mark_devin_work("old-devin").unwrap();
     backdate_hook_state(&path, "2000-01-01T00:00:00Z");
     // A later write refreshes updated_at, so this session survives the prune.
     vault.set_transcript_offset("touched", 30).unwrap();
@@ -989,7 +987,10 @@ fn prune_hook_state_drops_only_sessions_idle_past_the_cutoff() {
 
     assert_eq!(vault.transcript_offset("old").unwrap(), 0);
     assert_eq!(vault.transcript_offset("touched").unwrap(), 30);
-    assert_eq!(vault.devin_hook_state("old-devin").unwrap(), (false, false));
+    assert_eq!(
+        vault.take_devin_hook_state("old-devin").unwrap(),
+        (false, false)
+    );
 }
 
 #[test]
@@ -998,16 +999,15 @@ fn open_prunes_hook_state_older_than_thirty_days() {
     let path = dir.path().join("skills.db");
     let vault = Vault::open(&path).unwrap();
     vault.set_transcript_offset("stale", 10).unwrap();
-    vault
-        .set_devin_hook_state("stale-devin", true, true)
-        .unwrap();
+    vault.mark_devin_work("stale-devin").unwrap();
+    vault.mark_devin_review("stale-devin").unwrap();
     backdate_hook_state(&path, "2000-01-01T00:00:00Z");
     drop(vault);
 
     let vault = Vault::open(&path).unwrap();
     assert_eq!(vault.transcript_offset("stale").unwrap(), 0);
     assert_eq!(
-        vault.devin_hook_state("stale-devin").unwrap(),
+        vault.take_devin_hook_state("stale-devin").unwrap(),
         (false, false)
     );
 }
@@ -1149,11 +1149,9 @@ fn migrates_a_v1_database_to_v3() {
     let vault = Vault::open(&path).unwrap();
     assert_eq!(pragma(&path, "user_version"), 3);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
-    vault
-        .set_devin_hook_state("devin-session", true, false)
-        .unwrap();
+    vault.mark_devin_work("devin-session").unwrap();
     assert_eq!(
-        vault.devin_hook_state("devin-session").unwrap(),
+        vault.take_devin_hook_state("devin-session").unwrap(),
         (true, false)
     );
     assert_eq!(vault.search("beta", None, 20, 0).unwrap().total, 1);
@@ -1194,7 +1192,7 @@ fn migrates_a_v2_database_to_v3_preserving_data() {
 
     assert_eq!(vault.transcript_offset("claude-session").unwrap(), 42);
     assert_eq!(
-        vault.devin_hook_state("devin-session").unwrap(),
+        vault.take_devin_hook_state("devin-session").unwrap(),
         (true, false)
     );
 

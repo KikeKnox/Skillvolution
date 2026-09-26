@@ -24,9 +24,11 @@ enum Command {
     },
     /// Show one revision: its status, evidence, and a diff against its base.
     Show {
+        /// Skill id.
         id: String,
+        /// Revision to show; defaults to the skill's latest revision.
         #[arg(long, value_name = "VERSION")]
-        version: i64,
+        version: Option<i64>,
         /// Print the full revision as JSON instead of the readable summary.
         #[arg(long)]
         json: bool,
@@ -283,6 +285,10 @@ fn main() -> Result<()> {
         }
         Command::Show { id, version, json } => {
             let vault = open(&cli.db)?;
+            let version = match version {
+                Some(version) => version,
+                None => vault.latest_version(&id)?,
+            };
             let revision = vault.inspect(&id, version)?;
             if json {
                 print_json(&revision)?;
