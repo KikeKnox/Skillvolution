@@ -88,7 +88,7 @@ pub fn changes(bin: &Path, db: &Path) -> Result<Vec<(PathBuf, String)>> {
 
     let plugin_path = dir.join("plugins/skillvolution.js");
     plugin::check_owner(&plugin_path)?;
-    changes.push((plugin_path, plugin::content(bin, db)?));
+    changes.push((plugin_path, plugin::content(bin, db, None)?));
 
     Ok(changes)
 }
