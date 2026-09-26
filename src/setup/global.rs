@@ -2,71 +2,72 @@
 //! project, and registers the Claude Code MCP server via the `claude` CLI instead of
 //! editing `~/.claude.json` (see `claude_cli`).
 
-use super::{Clients, detect, global_claude, global_devin, global_opencode, prompt, write_all};
+use super::{ClientKind, Clients, Scope, claude, prompt, write_clients};
 use anyhow::Result;
 use std::path::Path;
-
-pub fn run(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
-    configure(clients, bin, db)
-}
 
 /// Detects which clients are installed, asks which to configure when a terminal
 /// is attached (see `prompt`), and configures the selection. Prints a one-line
 /// note for each skipped client; if none is detected, prints a note and returns
 /// without writing any client files.
 pub fn run_detected(bin: &Path, db: &Path) -> Result<()> {
-    let detected = detect::detect();
-    if !detected.any() {
+    let detected: Clients = ClientKind::ALL
+        .into_iter()
+        .filter(|kind| kind.detect())
+        .collect();
+    if detected.is_empty() {
         println!(
             "No AI client detected; skipping setup (run `skillvolution setup --client <name>` after installing one)."
         );
         return Ok(());
     }
-    for (present, name, token) in detected.list() {
-        if !present {
+    for kind in ClientKind::ALL {
+        if !detected.contains(kind) {
             println!(
-                "Skipped {name}: not detected (run `skillvolution setup --client {token}` after installing it)."
+                "Skipped {}: not detected (run `skillvolution setup --client {}` after installing it).",
+                kind.display_name(),
+                kind.token()
             );
         }
     }
-    let selected = prompt::choose(detected);
-    for ((was_present, name, _), (still, _, _)) in detected.list().into_iter().zip(selected.list())
-    {
-        if was_present && !still {
-            println!("Skipped {name}: not selected.");
+    let selected = prompt::choose_on_terminal(detected);
+    for kind in detected.iter() {
+        if !selected.contains(kind) {
+            println!("Skipped {}: not selected.", kind.display_name());
         }
     }
-    if !selected.any() {
+    if selected.is_empty() {
         println!("No clients selected; nothing configured.");
         return Ok(());
     }
-    configure(selected, bin, db)
+    run(selected, bin, db)
 }
 
-fn configure(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
-    let mut changes = Vec::new();
-    if clients.opencode {
-        changes.extend(global_opencode::changes(bin, db)?);
+pub fn run(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
+    if clients.contains(ClientKind::ClaudeCode) {
+        claude::warn_about_project_install();
     }
-    if clients.claude_code {
-        changes.extend(global_claude::changes(bin, db)?);
-    }
-    if clients.devin {
-        changes.extend(global_devin::changes(bin, db)?);
-    }
-    write_all(changes)?;
-
-    if clients.opencode {
-        println!("Configured OpenCode (global): skill, config entry, AGENTS.md, plugin.");
-    }
-    if clients.claude_code {
-        println!("Configured Claude Code (global): skill, settings.json hooks + permissions.");
-        println!("{}", global_claude::register_mcp(bin, db)?);
-    }
-    if clients.devin {
-        println!(
-            "Configured Devin CLI (global): skill, mcp_config.json, config.json permissions + hooks, AGENTS.md."
-        );
+    write_clients(clients, Scope::Global, bin, db)?;
+    for kind in clients.iter() {
+        println!("{}", summary(kind));
+        if kind == ClientKind::ClaudeCode {
+            println!("{}", claude::register_mcp(bin, db)?);
+        }
     }
     Ok(())
+}
+
+/// The line printed once a client's global files are written.
+fn summary(kind: ClientKind) -> &'static str {
+    match kind {
+        ClientKind::ClaudeCode => {
+            "Configured Claude Code (global): skill, settings.json hooks + permissions."
+        }
+        ClientKind::OpenCode => {
+            "Configured OpenCode (global): skill, config entry, AGENTS.md, plugin."
+        }
+        ClientKind::Devin => {
+            "Configured Devin CLI (global): skill, mcp_config.json, config.json permissions + hooks, AGENTS.md."
+        }
+    }
 }

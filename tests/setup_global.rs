@@ -55,7 +55,9 @@ impl Env {
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", &self.xdg_config)
             .env_remove("CLAUDE_CONFIG_DIR")
-            .env("PATH", self.empty_path.path());
+            .env("PATH", self.empty_path.path())
+            // Outside any git repo, so the project-install warning never fires by accident.
+            .current_dir(self.home.path());
         cmd
     }
 
@@ -106,19 +108,23 @@ fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
 /// Writes an executable fake `claude` that simulates updating an existing user-scope
 /// `skillvolution` registration: its first `mcp add-json` call fails with "already
 /// exists" (as the real CLI does), `mcp remove` succeeds, and its second `add-json` call
-/// succeeds or fails per `second_add_succeeds`. Counts calls itself (in a sibling file,
-/// via shell builtins only) rather than relying on `grep`/`wc`, since the test process
-/// runs this script with `PATH` pointed only at its own directory.
+/// succeeds or fails per `second_add_succeeds`. The "already exists" message goes to
+/// stdout when `message_on_stdout` (some `claude` versions print it there), else stderr.
+/// Counts calls itself (in a sibling file, via shell builtins only) rather than relying
+/// on `grep`/`wc`, since the test process runs this script with `PATH` pointed only at
+/// its own directory.
 fn write_fake_claude_already_registered(
     dir: &Path,
     log: &Path,
     second_add_succeeds: bool,
+    message_on_stdout: bool,
 ) -> PathBuf {
     let second = if second_add_succeeds {
         "exit 0\n".to_owned()
     } else {
         "echo 'fake second add-json boom' >&2; exit 1\n".to_owned()
     };
+    let redirect = if message_on_stdout { "" } else { " >&2" };
     let script = format!(
         "echo \"$@\" >> {{log}}\n\
          if [ \"$1 $2\" = \"mcp add-json\" ]; then\n\
@@ -127,7 +133,7 @@ fn write_fake_claude_already_registered(
          \x20\x20count=$((count + 1))\n\
          \x20\x20echo \"$count\" > {{count_file}}\n\
          \x20\x20if [ \"$count\" = \"1\" ]; then\n\
-         \x20\x20\x20\x20echo 'MCP server skillvolution already exists in user config' >&2\n\
+         \x20\x20\x20\x20echo 'MCP server skillvolution already exists in user config'{redirect}\n\
          \x20\x20\x20\x20exit 1\n\
          \x20\x20fi\n\
          \x20\x20{second}\
@@ -190,7 +196,7 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert!(!session_cmd.contains("--project"));
     assert_eq!(
         settings["permissions"]["allow"],
-        serde_json::json!(["Task", "mcp__skillvolution"])
+        serde_json::json!(["Agent", "Task", "mcp__skillvolution"])
     );
 
     // OpenCode: opencode.json entry with no --project, skill, AGENTS.md, plugin.
@@ -375,47 +381,111 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
     // The first add-json attempt reports the name already exists (as the real `claude`
     // CLI does for a second registration under the same name); setup must then remove
     // the old one and add the new definition, rather than treating the first failure as
-    // fatal and leaving the old (possibly stale) registration in place.
+    // fatal and leaving the old (possibly stale) registration in place. The message is
+    // recognized on either stream.
+    for message_on_stdout in [false, true] {
+        let env = Env::new();
+        let log = env.home.path().join("claude.log");
+        let bin_dir = write_fake_claude_already_registered(
+            &env.home.path().join("bin"),
+            &log,
+            true,
+            message_on_stdout,
+        );
+
+        let output = env
+            .command()
+            .arg("--client")
+            .arg("claude-code")
+            .env("PATH", &bin_dir)
+            .output()
+            .unwrap();
+        assert_success(&output);
+
+        let lines: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                format!(
+                    "mcp add-json --scope user skillvolution {}",
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": env.bin,
+                        "args": ["--db", &env.db, "serve"],
+                    })
+                ),
+                "mcp remove --scope user skillvolution".to_owned(),
+                format!(
+                    "mcp add-json --scope user skillvolution {}",
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": env.bin,
+                        "args": ["--db", &env.db, "serve"],
+                    })
+                ),
+            ],
+            "stdout={message_on_stdout}: {lines:?}"
+        );
+    }
+}
+
+#[test]
+fn global_hanging_claude_cli_times_out() {
     let env = Env::new();
     let log = env.home.path().join("claude.log");
-    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, true);
+    let bin_dir = write_fake_claude_script(
+        &env.home.path().join("bin"),
+        "echo \"$@\" >> {log}\nexec /bin/sleep 60\n",
+        &log,
+    );
 
+    let started = std::time::Instant::now();
     let output = env
         .command()
         .arg("--client")
         .arg("claude-code")
         .env("PATH", &bin_dir)
+        .env("SKILLVOLUTION_CLAUDE_TIMEOUT_SECS", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+}
+
+#[test]
+fn manual_registration_command_is_shell_quoted() {
+    let mut env = Env::new();
+    let dir = env.home.path().join("it's here");
+    fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("skillvolution");
+    fs::write(&bin, "test binary").unwrap();
+    env.bin = bin.clone();
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
         .output()
         .unwrap();
     assert_success(&output);
 
-    let lines: Vec<String> = fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(
-        lines,
-        vec![
-            format!(
-                "mcp add-json --scope user skillvolution {}",
-                serde_json::json!({
-                    "type": "stdio",
-                    "command": env.bin,
-                    "args": ["--db", &env.db, "serve"],
-                })
-            ),
-            "mcp remove --scope user skillvolution".to_owned(),
-            format!(
-                "mcp add-json --scope user skillvolution {}",
-                serde_json::json!({
-                    "type": "stdio",
-                    "command": env.bin,
-                    "args": ["--db", &env.db, "serve"],
-                })
-            ),
-        ],
-        "{lines:?}"
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json =
+        serde_json::json!({"type": "stdio", "command": bin, "args": ["--db", &env.db, "serve"]})
+            .to_string();
+    let quoted = format!("'{}'", json.replace('\'', r"'\''"));
+    assert!(
+        stdout.contains(&format!(
+            "claude mcp add-json --scope user skillvolution {quoted}"
+        )),
+        "{stdout}"
     );
 }
 
@@ -426,7 +496,8 @@ fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
     // never pretend the update succeeded or silently leave no registration at all.
     let env = Env::new();
     let log = env.home.path().join("claude.log");
-    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, false);
+    let bin_dir =
+        write_fake_claude_already_registered(&env.home.path().join("bin"), &log, false, false);
 
     let output = env
         .command()
@@ -890,4 +961,59 @@ fn agents_md_block_is_created_in_the_global_config_dir() {
     let text = fs::read_to_string(env.opencode_dir().join("AGENTS.md")).unwrap();
     assert!(text.starts_with("# Team notes\nKeep me.\n"));
     assert!(text.contains("<!-- skillvolution:start -->"));
+}
+
+#[test]
+fn global_claude_setup_warns_about_a_project_install_in_the_current_repo() {
+    let env = Env::new();
+    let repo = env.home.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    let nested = repo.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+
+    // A repo without our entries: no warning.
+    fs::write(
+        repo.join(".mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"x"}}}"#,
+    )
+    .unwrap();
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    // Hooks and a server left by an old project-level setup: one warning per file.
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/skillvolution hook stop"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".mcp.json"),
+        r#"{"mcpServers":{"skillvolution":{"command":"/old/skillvolution"}}}"#,
+    )
+    .unwrap();
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for file in [".claude/settings.local.json", ".mcp.json"] {
+        let path = repo.join(file);
+        assert!(
+            stderr.contains(&format!("warning: {}", path.display())),
+            "{stderr}"
+        );
+    }
 }

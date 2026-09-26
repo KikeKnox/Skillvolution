@@ -5,9 +5,10 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-/// Claude Code `permissions.allow` rules: `Task` covers every subagent
-/// dispatch, `mcp__skillvolution` every tool on the vault server.
-const CLAUDE_ALLOW: [&str; 2] = ["Task", "mcp__skillvolution"];
+/// Claude Code `permissions.allow` rules: `Agent` covers every subagent dispatch
+/// (`Task` is its name in older Claude Code versions), `mcp__skillvolution` every
+/// tool on the vault server.
+const CLAUDE_ALLOW: [&str; 3] = ["Agent", "Task", "mcp__skillvolution"];
 
 /// Devin `permissions.allow` rules: the subagent tools the evolution skill
 /// dispatches, and the vault MCP tools (`mcp__<server>__<tool>` naming).
@@ -93,7 +94,7 @@ mod tests {
         merge_claude(&mut config).unwrap();
         assert_eq!(
             config["permissions"]["allow"],
-            json!(["Bash(git status)", "Task", "mcp__skillvolution"])
+            json!(["Bash(git status)", "Task", "Agent", "mcp__skillvolution"])
         );
         assert_eq!(config["permissions"]["deny"], json!(["Bash(rm)"]));
     }
