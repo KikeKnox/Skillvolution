@@ -15,8 +15,76 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SCHEMA_VERSION: i64 = 2;
+/// The full current schema, run on new databases.
 const SCHEMA: &str = include_str!("schema.sql");
+/// Upgrade steps for existing databases: `MIGRATIONS[n]` moves a database from
+/// schema version `n + 1` to `n + 2`. Append a step (and update `SCHEMA`) to
+/// change the schema; never edit a shipped one.
+const MIGRATIONS: &[&str] = &[
+    // v2: Devin hook state.
+    "CREATE TABLE devin_hook_state (
+        session_id TEXT PRIMARY KEY,
+        worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
+        reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
+    );",
+    // v3: search entries addressed by rowid, one outcome per revision, project
+    // and day, legacy drafts retired, and hook state dated for pruning.
+    "ALTER TABLE skills ADD COLUMN fts_rowid INTEGER;
+    DELETE FROM skills_fts;
+    INSERT INTO skills_fts (rowid, id, description, tags, content)
+        SELECT s.rowid, c.id, c.description, c.tags, c.content
+        FROM current_skills c JOIN skills s ON s.id = c.id;
+    UPDATE skills SET fts_rowid = rowid WHERE id IN (SELECT id FROM current_skills);
+
+    DELETE FROM outcomes WHERE rowid NOT IN (
+        SELECT MAX(rowid) FROM outcomes
+        GROUP BY id, version, COALESCE(project, ''), substr(created_at, 1, 10)
+    );
+    CREATE UNIQUE INDEX outcomes_once_per_day
+        ON outcomes(id, version, COALESCE(project, ''), substr(created_at, 1, 10));
+
+    UPDATE revisions SET status = 'superseded',
+        reviewed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+        review_note = 'legacy draft retired by schema v3'
+    WHERE status = 'draft';
+
+    -- ADD COLUMN can't take a non-constant default, so rebuild the hook tables.
+    CREATE TABLE hook_state_v3 (
+        session_id TEXT PRIMARY KEY,
+        transcript_offset INTEGER NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    INSERT INTO hook_state_v3 (session_id, transcript_offset)
+        SELECT session_id, transcript_offset FROM hook_state;
+    DROP TABLE hook_state;
+    ALTER TABLE hook_state_v3 RENAME TO hook_state;
+    CREATE TABLE devin_hook_state_v3 (
+        session_id TEXT PRIMARY KEY,
+        worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
+        reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1)),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    INSERT INTO devin_hook_state_v3 (session_id, worked, reviewed)
+        SELECT session_id, worked, reviewed FROM devin_hook_state;
+    DROP TABLE devin_hook_state;
+    ALTER TABLE devin_hook_state_v3 RENAME TO devin_hook_state;
+    CREATE TRIGGER hook_state_touch AFTER UPDATE OF transcript_offset ON hook_state
+    BEGIN
+        UPDATE hook_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE session_id = NEW.session_id;
+    END;
+    CREATE TRIGGER devin_hook_state_touch AFTER UPDATE OF worked, reviewed ON devin_hook_state
+    BEGIN
+        UPDATE devin_hook_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE session_id = NEW.session_id;
+    END;",
+];
+const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
+/// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
+/// program's database is refused instead of migrated.
+const APPLICATION_ID: i64 = 0x534B_5631;
+/// Hook state for sessions idle this long is dropped on open.
+const HOOK_STATE_RETENTION_DAYS: i64 = 30;
 const MAX_TAGS: usize = 8;
 const MAX_TAG_BYTES: usize = 32;
 const CONTENT_SECTIONS: [&str; 4] = [
@@ -45,7 +113,36 @@ impl Vault {
             conn.pragma_update(None, "journal_mode", "WAL")?;
             migrate(&conn)
         })?;
-        Ok(Self { conn })
+        let vault = Self { conn };
+        vault.prune_hook_state(HOOK_STATE_RETENTION_DAYS)?;
+        Ok(vault)
+    }
+
+    /// Deletes hook state for sessions not written in `older_than_days`. Reads
+    /// first because it runs on every open and a DELETE takes the write lock
+    /// even when nothing matches.
+    pub fn prune_hook_state(&self, older_than_days: i64) -> Result<()> {
+        let age = format!("-{older_than_days} days");
+        let stale: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM hook_state
+                    WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1))
+                 OR EXISTS (SELECT 1 FROM devin_hook_state
+                    WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1))",
+            [&age],
+            |row| row.get(0),
+        )?;
+        if !stale {
+            return Ok(());
+        }
+        for table in ["hook_state", "devin_hook_state"] {
+            self.conn.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)"
+                ),
+                [&age],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn transcript_offset(&self, session_id: &str) -> Result<u64> {
@@ -153,37 +250,49 @@ fn is_busy(err: &anyhow::Error) -> bool {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    match version {
-        0 => {
-            let legacy: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'revisions'",
-                [],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                legacy == 0,
-                "database uses the pre-1 schema; move it aside and create a new one"
-            );
-            tx.execute_batch(SCHEMA)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        }
-        1 => {
-            tx.execute_batch(
-                "CREATE TABLE devin_hook_state (
-                    session_id TEXT PRIMARY KEY,
-                    worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
-                    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
-                )",
-            )?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        }
-        SCHEMA_VERSION => {}
-        other => bail!("unsupported database schema version {other}; upgrade skillvolution"),
+    // Checked outside a transaction first: an up-to-date vault, the common case,
+    // must open without the write lock or it would queue behind every writer.
+    if schema_stamp(conn)? == (SCHEMA_VERSION, APPLICATION_ID) {
+        return Ok(());
     }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    // Re-read under the lock: another process may have migrated meanwhile.
+    let (version, application_id) = schema_stamp(&tx)?;
+    ensure!(
+        (0..=SCHEMA_VERSION).contains(&version),
+        "unsupported database schema version {version}; upgrade skillvolution"
+    );
+    // Vaults from before the application id was stamped carry 0.
+    ensure!(
+        application_id == APPLICATION_ID || application_id == 0,
+        "not a skillvolution database (application_id {application_id:#x}); choose another path"
+    );
+    if version == 0 {
+        let count = |sql| tx.query_row(sql, [], |row| row.get::<_, i64>(0));
+        ensure!(
+            count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'revisions'")? == 0,
+            "database uses the pre-1 schema; move it aside and create a new one"
+        );
+        ensure!(
+            count("SELECT COUNT(*) FROM sqlite_master")? == 0,
+            "not a skillvolution database (it already holds other tables); choose another path"
+        );
+        tx.execute_batch(SCHEMA)?;
+    } else {
+        for migration in &MIGRATIONS[version as usize - 1..] {
+            tx.execute_batch(migration)?;
+        }
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.commit()?;
     Ok(())
+}
+
+/// The database's `(user_version, application_id)`.
+fn schema_stamp(conn: &Connection) -> Result<(i64, i64)> {
+    let read = |name| conn.pragma_query_value(None, name, |row| row.get(0));
+    Ok((read("user_version")?, read("application_id")?))
 }
 
 /// `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an absolute, nonempty path;
