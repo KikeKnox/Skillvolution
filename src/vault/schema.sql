@@ -1,7 +1,10 @@
 CREATE TABLE skills (
     id TEXT PRIMARY KEY,
     scope TEXT,
-    deprecated INTEGER NOT NULL DEFAULT 0 CHECK(deprecated IN (0, 1))
+    deprecated INTEGER NOT NULL DEFAULT 0 CHECK(deprecated IN (0, 1)),
+    -- rowid of this skill's skills_fts entry, so republishing replaces it by
+    -- rowid instead of scanning the whole index for the id.
+    fts_rowid INTEGER
 );
 
 CREATE TABLE revisions (
@@ -12,7 +15,7 @@ CREATE TABLE revisions (
     content TEXT NOT NULL,
     evidence TEXT NOT NULL,
     expected_version INTEGER NOT NULL CHECK(expected_version >= 0),
-    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'rejected', 'superseded')),
+    status TEXT NOT NULL DEFAULT 'published' CHECK(status IN ('draft', 'published', 'rejected', 'superseded')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     reviewed_at TEXT,
     review_note TEXT,
@@ -31,9 +34,15 @@ CREATE TABLE outcomes (
 
 CREATE INDEX outcomes_by_revision ON outcomes(id, version, result);
 
+-- One report per revision, project and UTC day, so a chatty session can't
+-- inflate a skill's score. COALESCE because NULLs never collide in an index.
+CREATE UNIQUE INDEX outcomes_once_per_day
+    ON outcomes(id, version, COALESCE(project, ''), substr(created_at, 1, 10));
+
 CREATE TABLE hook_state (
     session_id TEXT PRIMARY KEY,
-    transcript_offset INTEGER NOT NULL
+    transcript_offset INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 -- Devin hook payloads carry no transcript path, so worked/reviewed flags are
@@ -41,8 +50,23 @@ CREATE TABLE hook_state (
 CREATE TABLE devin_hook_state (
     session_id TEXT PRIMARY KEY,
     worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
-    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
+    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1)),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- updated_at dates the last write so abandoned sessions can be pruned; the
+-- triggers keep it current without every upsert having to remember it.
+CREATE TRIGGER hook_state_touch AFTER UPDATE OF transcript_offset ON hook_state
+BEGIN
+    UPDATE hook_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE session_id = NEW.session_id;
+END;
+
+CREATE TRIGGER devin_hook_state_touch AFTER UPDATE OF worked, reviewed ON devin_hook_state
+BEGIN
+    UPDATE devin_hook_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE session_id = NEW.session_id;
+END;
 
 CREATE VIRTUAL TABLE skills_fts USING fts5(
     id, description, tags, content,

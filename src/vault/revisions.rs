@@ -164,6 +164,7 @@ impl Vault {
         validate_no_secrets("description", description)?;
         validate_no_secrets("content", content)?;
         validate_no_secrets("evidence", evidence)?;
+        validate_no_secrets("verdict_reason", verdict_reason)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -235,7 +236,11 @@ impl Vault {
                 expected_version
             ],
         )?;
-        tx.execute("DELETE FROM skills_fts WHERE id = ?1", [id])?;
+        // Replaced by rowid: a DELETE matching the id column scans the whole index.
+        tx.execute(
+            "DELETE FROM skills_fts WHERE rowid = (SELECT fts_rowid FROM skills WHERE id = ?1)",
+            [id],
+        )?;
         tx.execute(
             "INSERT INTO skills_fts (id, description, tags, content) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -244,6 +249,10 @@ impl Vault {
                 revision.tags.join(" "),
                 revision.content
             ],
+        )?;
+        tx.execute(
+            "UPDATE skills SET fts_rowid = ?2 WHERE id = ?1",
+            params![id, tx.last_insert_rowid()],
         )?;
         tx.commit()?;
         Ok(revision)
@@ -281,6 +290,19 @@ impl Vault {
 
     pub fn inspect(&self, id: &str, version: i64) -> Result<Revision> {
         load(&self.conn, id, version)
+    }
+
+    /// The highest version of `id` in any status, so `show` can default to the
+    /// newest revision even when it isn't published.
+    pub fn latest_version(&self, id: &str) -> Result<i64> {
+        validate_id(id)?;
+        self.conn
+            .query_row(
+                "SELECT MAX(version) FROM revisions WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .with_context(|| format!("unknown skill: {id}"))
     }
 
     pub fn diff(&self, id: &str, version: i64) -> Result<String> {

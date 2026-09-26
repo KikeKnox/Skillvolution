@@ -1,4 +1,4 @@
-use super::{Vault, validate_id, validate_text};
+use super::{Vault, validate_id, validate_no_secrets, validate_text};
 use anyhow::{Result, ensure};
 use rusqlite::params;
 
@@ -28,6 +28,10 @@ impl Vault {
     /// Records an outcome in one statement: the INSERT only fires when the
     /// revision is published and visible to `project`, so `changed == 1` is
     /// both the write and the visibility check.
+    ///
+    /// A revision keeps at most one report per project and UTC day; a repeat
+    /// report that day replaces the earlier one's result and note (last report
+    /// wins) instead of failing, so retries and changed minds are harmless.
     pub fn record_outcome(
         &self,
         id: &str,
@@ -44,6 +48,7 @@ impl Vault {
             RESULTS.join(", ")
         );
         validate_text("note", note, 2_048)?;
+        validate_no_secrets("note", note)?;
         let changed = self.conn.execute(
             "INSERT INTO outcomes (id, version, result, note, project)
              SELECT ?1, ?2, ?3, ?4, ?5
@@ -51,7 +56,9 @@ impl Vault {
                  SELECT 1 FROM revisions r JOIN skills s ON s.id = r.id
                  WHERE r.id = ?1 AND r.version = ?2 AND r.status = 'published'
                    AND (s.scope IS NULL OR s.scope = ?5)
-             )",
+             )
+             ON CONFLICT DO UPDATE SET
+                 result = excluded.result, note = excluded.note, created_at = excluded.created_at",
             params![id, version, result, note, project],
         )?;
         ensure!(
@@ -83,6 +90,12 @@ impl Vault {
 
     pub fn outcomes(&self, id: &str) -> Result<Vec<OutcomeRecord>> {
         validate_id(id)?;
+        let known: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM skills WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        ensure!(known, "unknown skill: {id}");
         let mut statement = self.conn.prepare(
             "SELECT id, version, result, note, project, created_at FROM outcomes
              WHERE id = ?1 ORDER BY rowid DESC",
