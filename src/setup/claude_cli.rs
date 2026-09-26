@@ -45,15 +45,17 @@ pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// Whether `path` is a regular, executable file. `doctor` reuses this to check a
+/// configured binary path, not just `find_on_path`'s own search.
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
@@ -98,6 +100,14 @@ fn run(claude: &Path, args: &[&str]) -> Result<Output> {
     child
         .wait_with_output()
         .with_context(|| format!("run `{command}`"))
+}
+
+/// Whether `claude mcp get skillvolution` reports a registration. `doctor` uses
+/// this to warn when the global setup's user-scope registration is missing.
+pub(crate) fn mcp_registered(claude: &Path) -> Result<bool> {
+    Ok(run(claude, &["mcp", "get", "skillvolution"])?
+        .status
+        .success())
 }
 
 fn add_json(claude: &Path, json: &str) -> Result<AddOutcome> {

@@ -6,6 +6,7 @@ mod devin;
 mod fs_safe;
 mod global;
 mod hooks;
+mod inspect;
 mod opencode;
 mod permissions;
 mod plugin;
@@ -13,6 +14,9 @@ mod prompt;
 mod remove;
 
 pub(crate) use client::{ClientKind, Clients, Scope};
+pub(crate) use inspect::{
+    claude_mcp_registered, double_install_warning, missing_configured_bin, skill_marker_version,
+};
 
 use crate::vault::Vault;
 use anyhow::{Context, Result, ensure};
