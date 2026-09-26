@@ -17,11 +17,41 @@ pub fn choose_on_terminal(detected: Clients) -> Clients {
     let Some(mut tty) = Tty::open() else {
         return detected;
     };
-    let _ = writeln!(tty.writer, "Detected AI clients:");
+    choose(detected, &mut tty.reader, &mut tty.writer)
+}
+
+/// Asks on `output` whether to configure each detected client, reading the answers
+/// from `input`, and returns the confirmed ones.
+fn choose(detected: Clients, input: &mut dyn BufRead, output: &mut dyn Write) -> Clients {
+    let _ = writeln!(output, "Detected AI clients:");
     detected
         .iter()
-        .filter(|kind| tty.ask(&format!("  Configure {}? [Y/n] ", kind.display_name())))
+        .filter(|kind| {
+            let question = format!("  Configure {}? [Y/n] ", kind.display_name());
+            ask(&question, input, output)
+        })
         .collect()
+}
+
+/// A yes/no question defaulting to yes: `y`/`yes`, blank input, EOF, or a read
+/// error count as yes (matching the non-interactive behavior), `n`/`no` as no. Any
+/// other answer asks once more, then counts as yes, so a stray keystroke can neither
+/// loop forever nor silently skip a client.
+fn ask(question: &str, input: &mut dyn BufRead, output: &mut dyn Write) -> bool {
+    for _ in 0..2 {
+        let _ = write!(output, "{question}");
+        let _ = output.flush();
+        let mut answer = String::new();
+        if input.read_line(&mut answer).unwrap_or(0) == 0 {
+            return true;
+        }
+        match answer.trim().to_lowercase().as_str() {
+            "" | "y" | "yes" => return true,
+            "n" | "no" => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 struct Tty {
@@ -60,16 +90,44 @@ impl Tty {
         }
         None
     }
+}
 
-    /// A yes/no question defaulting to yes: blank input, EOF, or a read error all
-    /// count as yes, matching the previous non-interactive behavior.
-    fn ask(&mut self, question: &str) -> bool {
-        let _ = write!(self.writer, "{question}");
-        let _ = self.writer.flush();
-        let mut answer = String::new();
-        if self.reader.read_line(&mut answer).is_err() {
-            return true;
-        }
-        !matches!(answer.trim().to_lowercase().as_str(), "n" | "no")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::ClientKind::{self, *};
+
+    /// Runs `choose` over all three clients with `answers` as the typed input.
+    fn choose_with(answers: &str) -> (Vec<ClientKind>, String) {
+        let mut output = Vec::new();
+        let chosen = choose(Clients::all(), &mut answers.as_bytes(), &mut output);
+        (chosen.iter().collect(), String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn n_and_no_decline_and_a_blank_line_accepts() {
+        assert_eq!(choose_with("n\nNO\n\n").0, [Devin]);
+        assert_eq!(choose_with("y\n no \nYes\n").0, [ClaudeCode, Devin]);
+    }
+
+    #[test]
+    fn end_of_input_accepts_every_remaining_client() {
+        assert_eq!(choose_with("").0, [ClaudeCode, OpenCode, Devin]);
+        assert_eq!(choose_with("n\n").0, [OpenCode, Devin]);
+    }
+
+    #[test]
+    fn an_invalid_answer_asks_again_once() {
+        let (chosen, output) = choose_with("maybe\nn\nn\nn\n");
+        assert_eq!(chosen, []);
+        assert_eq!(output.matches("Configure Claude Code?").count(), 2);
+        assert_eq!(output.matches("Configure OpenCode?").count(), 1);
+    }
+
+    #[test]
+    fn a_second_invalid_answer_counts_as_yes() {
+        let (chosen, output) = choose_with("maybe\nsure\nn\nn\n");
+        assert_eq!(chosen, [ClaudeCode]);
+        assert_eq!(output.matches("Configure Claude Code?").count(), 2);
     }
 }
