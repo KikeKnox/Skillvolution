@@ -87,9 +87,9 @@ enum Command {
 }
 
 /// The client emitting a hook payload: payloads and blocking conventions differ
-/// (`claude-code` scans a transcript and blocks via stderr + exit 2; `devin`
-/// tracks per-session flags and blocks via a `{"decision":"block"}` JSON on
-/// stdout).
+/// (`claude-code` scans a transcript and makes Claude continue via
+/// `hookSpecificOutput.additionalContext` JSON on stdout; `devin` tracks
+/// per-session flags and blocks via a `{"decision":"block"}` JSON on stdout).
 #[derive(Clone, Copy, Default, clap::ValueEnum)]
 enum HookClient {
     #[default]
@@ -166,6 +166,70 @@ fn db_path(db: &Option<PathBuf>) -> Result<PathBuf> {
 fn open(db: &Option<PathBuf>) -> Result<Vault> {
     let path = db_path(db)?;
     Vault::open(&path).with_context(|| format!("open {}", path.display()))
+}
+
+/// The hook payload the client wrote to stdin.
+fn read_stdin() -> Result<String> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .context("read hook input from stdin")?;
+    Ok(input)
+}
+
+fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
+    match event {
+        HookEvent::SessionStart { project, client } => {
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            let output = match client {
+                HookClient::ClaudeCode => hook::session_start(&open(db)?, project.as_deref())?,
+                HookClient::Devin => hook::devin_session_start(&open(db)?, project.as_deref())?,
+            };
+            print!("{output}");
+        }
+        HookEvent::ToolUse => hook::devin_tool_use(&open(db)?, &read_stdin()?)?,
+        HookEvent::Stop { client } => {
+            let input = read_stdin()?;
+            match client {
+                HookClient::ClaudeCode => {
+                    if let Some(reason) = hook::stop(&open(db)?, &input)? {
+                        // additionalContext on stdout (exit 0) makes Claude continue the
+                        // same turn, like decision:block, and the continued stop arrives
+                        // with stop_hook_active=true; unlike decision:block, it shows no
+                        // "Stop hook error" notification.
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": "Stop",
+                                    "additionalContext": reason
+                                }
+                            })
+                        );
+                    }
+                }
+                HookClient::Devin => {
+                    if let Some(reason) = hook::devin_stop(&open(db)?, &input)? {
+                        println!(
+                            "{}",
+                            serde_json::json!({"decision": "block", "reason": reason})
+                        );
+                    }
+                }
+            }
+        }
+        HookEvent::SessionEnd => hook::devin_session_end(&open(db)?, &read_stdin()?)?,
+        HookEvent::Approve => {
+            if let Some(reason) = hook::devin_approve(&read_stdin()?)? {
+                println!(
+                    "{}",
+                    serde_json::json!({"decision": "approve", "reason": reason})
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -275,65 +339,11 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Hook(HookEvent::SessionStart { project, client }) => {
-            validate_project(&project)?;
-            let project = resolve_project(project)?;
-            let output = match client {
-                HookClient::ClaudeCode => hook::session_start(&open(&cli.db)?, project.as_deref())?,
-                HookClient::Devin => {
-                    hook::devin_session_start(&open(&cli.db)?, project.as_deref())?
-                }
-            };
-            print!("{output}");
-        }
-        Command::Hook(HookEvent::ToolUse) => {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-            hook::devin_tool_use(&open(&cli.db)?, &input)?;
-        }
-        Command::Hook(HookEvent::Stop { client }) => {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-            match client {
-                HookClient::ClaudeCode => {
-                    if let Some(reason) = hook::stop(&open(&cli.db)?, &input)? {
-                        // additionalContext (stdout, exit 0) keeps the same stop_hook_active
-                        // loop protection as decision:block, but the transcript labels it
-                        // "Stop hook feedback" instead of a hook error notification.
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": "Stop",
-                                    "additionalContext": reason
-                                }
-                            })
-                        );
-                    }
-                }
-                HookClient::Devin => {
-                    if let Some(reason) = hook::devin_stop(&open(&cli.db)?, &input)? {
-                        println!(
-                            "{}",
-                            serde_json::json!({"decision": "block", "reason": reason})
-                        );
-                    }
-                }
-            }
-        }
-        Command::Hook(HookEvent::SessionEnd) => {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-            hook::devin_session_end(&open(&cli.db)?, &input)?;
-        }
-        Command::Hook(HookEvent::Approve) => {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-            if let Some(reason) = hook::devin_approve(&input)? {
-                println!(
-                    "{}",
-                    serde_json::json!({"decision": "approve", "reason": reason})
-                );
+        // Hooks fail open: a hook error must never block or break the client's
+        // session, so it is reported on stderr and the process still exits 0.
+        Command::Hook(event) => {
+            if let Err(error) = run_hook(event, &cli.db) {
+                eprintln!("skillvolution hook: {error:#}");
             }
         }
     }

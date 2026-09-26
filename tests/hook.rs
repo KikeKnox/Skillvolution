@@ -9,21 +9,19 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
-use support::Draft;
+use support::{Draft, git_repo};
 
-/// Creates `parent/name` as a git repository root (just enough for
-/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
-/// returns its path. `name` should already be a valid project key so the
-/// detected key matches it exactly.
-fn git_repo(parent: &Path, name: &str) -> std::path::PathBuf {
-    let repo = parent.join(name);
-    fs::create_dir_all(repo.join(".git")).unwrap();
-    repo
-}
-
+/// A tool_use line whose id is the tool name, so `tool_result` can answer it.
 fn assistant_tool_use(name: &str) -> String {
     json!({"type":"assistant","message":{"role":"assistant","content":[
-        {"type":"tool_use","id":"t1","name":name,"input":{}}
+        {"type":"tool_use","id":name,"name":name,"input":{}}
+    ]}})
+    .to_string()
+}
+
+fn tool_result(tool_use_id: &str, is_error: bool) -> String {
+    json!({"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":tool_use_id,"is_error":is_error,"content":""}
     ]}})
     .to_string()
 }
@@ -106,6 +104,43 @@ fn work_plus_review_tool_does_not_block() {
         );
         let input = stop_input(session, &transcript, false);
         assert!(hook::stop(&vault, &input).unwrap().is_none());
+    }
+}
+
+#[test]
+fn work_after_a_review_in_the_same_span_still_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            assistant_tool_use("Edit"),
+            assistant_tool_use("mcp__skillvolution__report_skill_outcome"),
+            assistant_tool_use("Edit"),
+        ],
+    );
+    let input = stop_input("s1", &transcript, false);
+    assert!(hook::stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
+fn failed_publish_does_not_count_as_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let publish = "mcp__skillvolution__publish_skill";
+    for (session, is_error, blocks) in [("s1", true, true), ("s2", false, false)] {
+        let transcript = dir.path().join(format!("{session}.jsonl"));
+        write_transcript(
+            &transcript,
+            &[
+                assistant_tool_use("Edit"),
+                assistant_tool_use(publish),
+                tool_result(publish, is_error),
+            ],
+        );
+        let input = stop_input(session, &transcript, false);
+        assert_eq!(hook::stop(&vault, &input).unwrap().is_some(), blocks);
     }
 }
 
@@ -279,6 +314,43 @@ fn devin_new_work_after_a_block_blocks_again() {
 }
 
 #[test]
+fn devin_work_after_a_reviewed_span_blocks_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let input = devin_stop_input("s1", false);
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
+    hook::devin_tool_use(
+        &vault,
+        &devin_tool("s1", "mcp__skillvolution__publish_skill"),
+    )
+    .unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_none());
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
+fn devin_work_after_a_review_prompted_by_a_block_blocks_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let input = devin_stop_input("s1", false);
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+    hook::devin_tool_use(
+        &vault,
+        &devin_tool("s1", "mcp__skillvolution__report_skill_outcome"),
+    )
+    .unwrap();
+    assert!(
+        hook::devin_stop(&vault, &devin_stop_input("s1", true))
+            .unwrap()
+            .is_none()
+    );
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
+    assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
 fn devin_unrelated_tools_and_sessions_leave_flags_alone() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
@@ -342,12 +414,13 @@ fn devin_session_start_wraps_the_catalog_in_hook_specific_output() {
 
 // --- CLI ------------------------------------------------------------------
 
-fn run_hook_stop(db: &std::path::Path, input: &str) -> std::process::Output {
+/// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
+fn run_hook(db: &Path, args: &[&str], input: &str) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
         .arg("--db")
         .arg(db)
         .arg("hook")
-        .arg("stop")
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -373,7 +446,7 @@ fn cli_hook_stop_feeds_additional_context_when_blocking_and_prints_nothing_other
 
     // additionalContext (stdout, exit 0) still blocks the stop, but the transcript
     // shows it as feedback rather than a hook-error notification.
-    let blocked = run_hook_stop(&db, &input);
+    let blocked = run_hook(&db, &["stop"], &input);
     assert!(blocked.status.success());
     assert!(blocked.stderr.is_empty());
     let decision: Value = serde_json::from_slice(&blocked.stdout).unwrap();
@@ -386,10 +459,36 @@ fn cli_hook_stop_feeds_additional_context_when_blocking_and_prints_nothing_other
         "{decision}"
     );
 
-    let clean = run_hook_stop(&db, &input);
+    let clean = run_hook(&db, &["stop"], &input);
     assert!(clean.status.success());
     assert!(clean.stdout.is_empty());
     assert!(clean.stderr.is_empty());
+}
+
+/// Asserts a hook failed open: exit 0, nothing on stdout, the error on stderr.
+fn assert_failed_open(output: &std::process::Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.starts_with("skillvolution hook: "), "{stderr}");
+}
+
+#[test]
+fn cli_hook_stop_with_malformed_stdin_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    assert_failed_open(&run_hook(&db, &["stop"], "not json"));
+    assert_failed_open(&run_hook(&db, &["stop", "--client", "devin"], "{"));
+}
+
+#[test]
+fn cli_hook_session_start_with_an_unopenable_db_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    // The database's parent directory is a regular file, so it cannot be created.
+    let blocker = dir.path().join("blocker");
+    fs::write(&blocker, "").unwrap();
+    let db = blocker.join("skills.db");
+    assert_failed_open(&run_hook(&db, &["session-start"], ""));
 }
 
 /// Runs `hook session-start`, isolated from this test binary's own cwd and
@@ -546,33 +645,12 @@ fn session_start_explicit_project_overrides_detection() {
 
 // --- CLI: Devin hook events ---------------------------------------------------
 
-/// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
-fn run_hook(db: &Path, args: &[&str], input: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
-        .arg("--db")
-        .arg(db)
-        .arg("hook")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
-}
-
 #[test]
 fn cli_devin_stop_prints_a_block_decision_once_per_unreviewed_span() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let vault = Vault::open(&db).unwrap();
-    vault.set_devin_hook_state("s1", true, false).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
     drop(vault);
 
     let blocked = run_hook(
