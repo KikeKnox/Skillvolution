@@ -17,16 +17,14 @@ jobs:
           node-version: "20"
       - name: Validate OpenCode plugin
         run: |
-          set -e
-          # Create a temp mjs file from the plugin, replacing placeholders
-          temp_file=$(mktemp --suffix=.mjs)
-          trap "rm -f '$temp_file'" EXIT
+          # Placeholders are replaced by JSON literals, as src/setup/plugin.rs does.
+          rendered="$RUNNER_TEMP/skillvolution.mjs"
           sed \
-            -e 's|__SKILLVOLUTION_BIN__|/usr/bin/skillvolution|g' \
-            -e 's|__SKILLVOLUTION_DB__|/tmp/skillvolution.db|g' \
-            assets/opencode/skillvolution.js > "$temp_file"
-          # Syntax-check the rendered file
-          node --check "$temp_file"
+            -e 's|__SKILLVOLUTION_BIN__|"/usr/bin/skillvolution"|g' \
+            -e 's|__SKILLVOLUTION_DB__|"/tmp/skillvolution.db"|g' \
+            -e 's|__SKILLVOLUTION_PROJECT_KEY__|null|g' \
+            assets/opencode/skillvolution.js > "$rendered"
+          node --check "$rendered"
 
   msrv:
     runs-on: ubuntu-22.04
