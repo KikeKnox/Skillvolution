@@ -7,6 +7,7 @@ use std::{io::Read, path::PathBuf};
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Vault database path; defaults to SKILLVOLUTION_DB, else the platform data directory.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
     #[command(subcommand)]
@@ -18,7 +19,8 @@ enum Command {
     /// Start the MCP server on stdio.
     Serve {
         /// Project key used for project-scoped skills and outcome records.
-        /// Detected automatically from the working directory's git root when omitted.
+        /// Detected automatically from the working directory's git root when omitted,
+        /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
     },
@@ -34,22 +36,33 @@ enum Command {
         json: bool,
     },
     /// Hide a skill from search without deleting its history.
-    Deprecate { id: String },
+    Deprecate {
+        /// Skill id.
+        id: String,
+    },
     /// Make a deprecated skill searchable again.
-    Undeprecate { id: String },
+    Undeprecate {
+        /// Skill id.
+        id: String,
+    },
     /// Summarize skill outcomes, or list the outcome log of one skill.
     Outcomes {
+        /// Skill id; omit to summarize all skills.
         id: Option<String>,
         /// Only skills whose current version has failures.
         #[arg(long, conflicts_with = "id")]
         failing: bool,
+        /// Print the outcome log as JSON instead of the readable summary.
         #[arg(long)]
         json: bool,
     },
-    /// Claude Code hook entry points.
+    /// Hook entry points for Claude Code, Devin CLI, Codex CLI, Gemini CLI, and Cursor.
     #[command(subcommand)]
     Hook(HookEvent),
-    /// Configure a project to use the Skillvolution MCP.
+    /// Set up the Skillvolution MCP server for a project or globally, detect clients,
+    /// configure them, or remove Skillvolution from them. Global setup is the default and
+    /// is shared by every project. Use --project for project-specific setup, --remove to
+    /// undo, or --dry-run to preview.
     Setup(setup::SetupArgs),
     /// Permanently delete a skill, or one of its revisions, with its outcomes.
     Purge {
@@ -148,20 +161,27 @@ enum HookEvent {
     /// Print the skill catalog as session context.
     SessionStart {
         /// Project key for project-scoped skills.
-        /// Detected automatically from the working directory's git root when omitted.
+        /// Detected automatically from the working directory's git root when omitted,
+        /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
+        /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
+        /// Defaults to claude-code.
         #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
         client: HookClient,
     },
     /// Record work/review tool calls for a session (PostToolUse of the flag-tracked
     /// clients: Devin, Codex, Gemini CLI, Cursor).
     ToolUse {
+        /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
+        /// Defaults to devin.
         #[arg(long, value_enum, default_value_t = HookClient::Devin)]
         client: HookClient,
     },
     /// Ask for an evolution review after unreviewed work.
     Stop {
+        /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
+        /// Defaults to claude-code.
         #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
         client: HookClient,
     },

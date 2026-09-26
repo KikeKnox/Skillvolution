@@ -1,4 +1,4 @@
-//! Filesystem and JSON helpers shared by the Claude Code and OpenCode installers.
+//! Filesystem and JSON helpers shared by all client setups.
 //! Every write goes through `write`, which backs up the previous content first (unless the
 //! file is entirely ours) and replaces the file atomically.
 
