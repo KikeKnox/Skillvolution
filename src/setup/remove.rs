@@ -189,8 +189,8 @@ fn print_diff(edit: &Edit) {
     let diff = similar::TextDiff::from_lines(&old, &new)
         .unified_diff()
         .header(
-            &format!("a/{}", path.display()),
-            &format!("b/{}", path.display()),
+            &format!("a/{}", path.display().to_string().trim_start_matches('/')),
+            &format!("b/{}", path.display().to_string().trim_start_matches('/')),
         )
         .to_string();
     print!("{diff}");
