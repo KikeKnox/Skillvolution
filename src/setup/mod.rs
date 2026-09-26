@@ -43,10 +43,12 @@ pub struct SetupArgs {
     /// project then shares.
     #[arg(long)]
     project: Option<PathBuf>,
-    /// Which client(s) to configure: a comma-separated list of `claude-code`,
-    /// `opencode`, `devin`, `all`, or `both` (claude-code + opencode, kept for
-    /// backwards compatibility). Defaults to `all` for `--project`; for global
-    /// setup, omitting it detects installed clients and asks which to configure.
+    /// Which client(s) to configure: a comma-separated list of `claude-code`, `opencode`,
+    /// `devin`, `codex`, `gemini`, `cursor`, `all` (all clients), or `both` (claude-code +
+    /// opencode, for backwards compatibility). For `--project`: omit to configure all
+    /// clients, or specify some. For global setup: omit to detect installed clients and
+    /// ask interactively, or specify some. For `--remove`: omit to remove from all
+    /// configured clients, or specify some.
     #[arg(
         long,
         value_delimiter = ',',

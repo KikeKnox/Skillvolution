@@ -1,7 +1,7 @@
-//! Hook command building and merging shared by the Claude Code and Devin setups, project
-//! and global. Our hook entries are recognized by their command text, so a rerun (even
-//! with a changed `--bin`/`--db`) replaces the old entry instead of duplicating it, and
-//! any foreign hook is left untouched.
+//! Hook command building and merging shared by all client setups, project and global.
+//! Our hook entries are recognized by their command text, so a rerun (even with a changed
+//! `--bin`/`--db`) replaces the old entry instead of duplicating it, and any foreign hook
+//! is left untouched.
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
