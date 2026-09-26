@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // POSIX single-quoting, used for every client's hook command. On Windows, Claude Code
 // runs hook commands through Git Bash, so this quoting is still correct there; Devin's
@@ -109,6 +109,22 @@ fn owned_command(command: &str) -> bool {
     words
         .windows(2)
         .any(|pair| pair[0] == "hook" && HOOK_EVENTS.contains(&pair[1].as_str()))
+}
+
+/// The Skillvolution binary path read back from the first owned hook command
+/// found in `config["hooks"]`, if any. `doctor` uses this to check that the
+/// binary a client's hooks point at still exists.
+pub(crate) fn owned_bin(config: &Value) -> Option<PathBuf> {
+    let hooks = config.get("hooks")?.as_object()?;
+    let command = hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+        .find(|command| owned_command(command))?;
+    shell_words(command).into_iter().next().map(PathBuf::from)
 }
 
 /// Whether `config["hooks"]` holds a Skillvolution-owned command under any event.

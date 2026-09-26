@@ -83,6 +83,18 @@ const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
 /// program's database is refused instead of migrated.
 const APPLICATION_ID: i64 = 0x534B_5631;
+
+/// The schema version this build expects, for `doctor` to compare against a
+/// database's `PRAGMA user_version` without opening (and so migrating) it.
+pub(crate) fn schema_version() -> i64 {
+    SCHEMA_VERSION
+}
+
+/// The `PRAGMA application_id` a Skillvolution vault carries, for `doctor` to
+/// tell a foreign database apart from an unmigrated one (which carries 0).
+pub(crate) fn application_id() -> i64 {
+    APPLICATION_ID
+}
 /// Hook state for sessions idle this long is dropped on open.
 const HOOK_STATE_RETENTION_DAYS: i64 = 30;
 const MAX_TAGS: usize = 8;
