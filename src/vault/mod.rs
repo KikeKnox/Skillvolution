@@ -261,7 +261,7 @@ fn validate_sections(content: &str) -> Result<()> {
 /// Credential shapes with a fixed, high-signal prefix: (prefix, minimum body
 /// length, label). Case-sensitive on purpose: real credentials have fixed case,
 /// so `GHP_` or `Akia` in prose never matches.
-const SECRET_SHAPES: [(&str, usize, &str); 10] = [
+const SECRET_SHAPES: [(&str, usize, &str); 22] = [
     ("AKIA", 16, "an AWS access key id"),
     ("ASIA", 16, "an AWS temporary access key id"),
     ("ghp_", 30, "a GitHub token"),
@@ -272,6 +272,18 @@ const SECRET_SHAPES: [(&str, usize, &str); 10] = [
     ("github_pat_", 30, "a GitHub token"),
     ("sk-", 20, "an OpenAI API key"),
     ("AIza", 35, "a Google API key"),
+    ("xoxb-", 24, "a Slack bot token"),
+    ("xoxp-", 24, "a Slack user token"),
+    ("xoxa-", 24, "a Slack workspace app token"),
+    ("xoxr-", 24, "a Slack refresh token"),
+    ("xapp-", 24, "a Slack app-level token"),
+    ("sk_live_", 24, "a Stripe secret key"),
+    ("rk_live_", 24, "a Stripe restricted key"),
+    ("glpat-", 20, "a GitLab personal access token"),
+    ("npm_", 30, "an npm token"),
+    ("hf_", 30, "a Hugging Face token"),
+    ("pypi-", 30, "a PyPI token"),
+    ("ya29.", 24, "a Google OAuth access token"),
 ];
 const BEARER_MINIMUM: usize = 32;
 
@@ -301,6 +313,68 @@ fn has_credential(token: &str, prefix: &str, minimum: usize) -> bool {
     })
 }
 
+/// Placeholder-shaped stand-ins for a credential: an environment variable
+/// reference (`$PASS`, `${PASS}`), an angle-bracketed name (`<password>`), a
+/// redaction marker (`***`), the literal word `password`, or empty.
+fn is_placeholder_value(value: &str) -> bool {
+    value.is_empty()
+        || value.starts_with('$')
+        || (value.starts_with('<') && value.ends_with('>'))
+        || value.chars().all(|c| c == '*')
+        || value.eq_ignore_ascii_case("password")
+}
+
+/// A `scheme://user:password@host` URL whose password is a real-looking value
+/// rather than one of the placeholder forms `is_placeholder_value` accepts.
+fn url_credential(token: &str) -> bool {
+    let Some((_, after_scheme)) = token.split_once("://") else {
+        return false;
+    };
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let Some((userinfo, _host)) = authority.rsplit_once('@') else {
+        return false;
+    };
+    let Some((_user, password)) = userinfo.split_once(':') else {
+        return false;
+    };
+    !is_placeholder_value(password)
+}
+
+/// A Slack incoming-webhook URL (`hooks.slack.com/services/<team>/<bot>/<secret>`).
+/// The URL itself is a usable credential, so unlike the prefix shapes above
+/// there is no placeholder carve-out: any three nonempty segments count.
+fn is_slack_webhook(token: &str) -> bool {
+    let Some((_, rest)) = token.split_once("hooks.slack.com/services/") else {
+        return false;
+    };
+    let mut segments = rest.split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(team), Some(bot), Some(secret))
+            if team.starts_with('T') && bot.starts_with('B') && !secret.is_empty()
+    )
+}
+
+/// Whether `tokens[at]` is the value half of a `Bearer <token>` pair, allowing
+/// for a leading/trailing quote or trailing colon on the `Bearer` marker (as in
+/// `'Bearer <tok>'` or `Authorization: Bearer <tok>`) and around the token
+/// itself.
+fn bearer_label(tokens: &[&str], at: usize) -> Option<&'static str> {
+    const QUOTES: [char; 2] = ['\'', '"'];
+    if at == 0 {
+        return None;
+    }
+    let marker = tokens[at - 1].trim_matches(|c| QUOTES.contains(&c) || c == ':');
+    if !marker.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let candidate = tokens[at].trim_matches(|c| QUOTES.contains(&c));
+    credential_body(candidate, BEARER_MINIMUM).then_some("a bearer token")
+}
+
 /// A complete three-segment JWT; truncated teaching examples
 /// (`eyJhbGciOiJIUzI1NiJ9.<payload>.<sig>`) don't match.
 fn is_jwt(token: &str) -> bool {
@@ -319,7 +393,9 @@ fn is_jwt(token: &str) -> bool {
 fn validate_no_secrets(name: &str, text: &str) -> Result<()> {
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
-        if line.trim_start().starts_with("-----BEGIN") && line.contains("PRIVATE KEY") {
+        // `contains`, not a line-start check: a key can be embedded mid-line,
+        // e.g. as an escaped `\n`-joined value inside a JSON string.
+        if line.contains("-----BEGIN") && line.contains("PRIVATE KEY") {
             bail!(
                 "{name} must not contain credentials: a private key block appears on line {number}; \
                  describe the key instead of pasting it, then publish again"
@@ -332,14 +408,9 @@ fn validate_no_secrets(name: &str, text: &str) -> Result<()> {
                 .find(|(prefix, minimum, _)| has_credential(token, prefix, *minimum))
                 .map(|(_, _, label)| *label)
                 .or_else(|| is_jwt(token).then_some("a JSON Web Token"))
-                .or_else(|| {
-                    let after_bearer = at > 0
-                        && tokens[at - 1]
-                            .trim_end_matches(':')
-                            .eq_ignore_ascii_case("bearer");
-                    (after_bearer && credential_body(token, BEARER_MINIMUM))
-                        .then_some("a bearer token")
-                });
+                .or_else(|| bearer_label(&tokens, at))
+                .or_else(|| url_credential(token).then_some("a URL with an embedded password"))
+                .or_else(|| is_slack_webhook(token).then_some("a Slack webhook URL"));
             if let Some(label) = label {
                 bail!(
                     "{name} must not contain credentials: {label} appears on line {number}; \
@@ -397,6 +468,18 @@ mod tests {
             ("github_pat_", "github_pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
             ("sk-", "sk-..."),
             ("AIza", "AIza..."),
+            ("xoxb-", "xoxb-your-token"),
+            ("xoxp-", "xoxp-your-token"),
+            ("xoxa-", "xoxa-your-token"),
+            ("xoxr-", "xoxr-your-token"),
+            ("xapp-", "xapp-your-token"),
+            ("sk_live_", "sk_live_xxx"),
+            ("rk_live_", "rk_live_xxx"),
+            ("glpat-", "glpat-xxx"),
+            ("npm_", "npm_xxx"),
+            ("hf_", "hf_xxx"),
+            ("pypi-", "pypi-xxx"),
+            ("ya29.", "ya29.xxx"),
         ];
         for (prefix, placeholder) in placeholders {
             let (_, minimum, label) = SECRET_SHAPES
@@ -446,5 +529,71 @@ SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
             .to_string();
         assert!(error.contains("bearer token"), "{error}");
         assert!(validate_no_secrets("content", "Authorization: Bearer $TOKEN").is_ok());
+    }
+
+    #[test]
+    fn quoted_bearer_token_is_detected() {
+        let single = format!("'Bearer {REAL_BODY}'");
+        let error = validate_no_secrets("content", &single)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bearer token"), "{error}");
+
+        let double = format!("\"Bearer {REAL_BODY}\"");
+        let error = validate_no_secrets("content", &double)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bearer token"), "{error}");
+    }
+
+    #[test]
+    fn private_key_embedded_mid_line_is_detected() {
+        // A JSON string carrying a key as an escaped `\n`-joined value, not on
+        // a line by itself.
+        let text = format!(
+            r#"{{"key": "-----BEGIN RSA PRIVATE KEY-----\n{REAL_BODY}\n-----END RSA PRIVATE KEY-----"}}"#
+        );
+        let error = validate_no_secrets("content", &text)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("private key"), "{error}");
+    }
+
+    #[test]
+    fn url_with_a_real_password_is_detected() {
+        let real = format!("postgres://admin:{REAL_BODY}@db.example.com:5432/app");
+        let error = validate_no_secrets("content", &real)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("URL with an embedded password"), "{error}");
+        assert!(!error.contains(REAL_BODY), "{error}");
+    }
+
+    #[test]
+    fn url_credential_placeholder_forms_are_not_flagged() {
+        for safe in [
+            "postgres://user:<password>@host/db",
+            "https://$USER:$TOKEN@host/path",
+            "https://user:${PASS}@host/path",
+            "https://user:***@host/path",
+            "https://user:password@host/path",
+            "https://user@host/path",
+        ] {
+            assert!(validate_no_secrets("content", safe).is_ok(), "{safe}");
+        }
+    }
+
+    #[test]
+    fn slack_webhook_url_is_detected() {
+        // Split so no contiguous webhook URL appears in the source for secret
+        // scanners (e.g. GitHub push protection) to flag.
+        let webhook = concat!(
+            "https://hooks.slack.com/services/T0123456789/",
+            "B0123456789/abcdefghijklmnopqrstuvwx"
+        );
+        let error = validate_no_secrets("content", webhook)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Slack webhook"), "{error}");
     }
 }
