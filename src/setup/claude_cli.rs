@@ -2,10 +2,12 @@
 //! `claude` CLI. We never edit `~/.claude.json` directly: Claude Code rewrites that file
 //! on its own, so a direct edit would race it and get lost.
 
+use super::hooks;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 
 fn mcp_json(bin: &Path, db: &Path) -> String {
@@ -21,8 +23,8 @@ fn mcp_json(bin: &Path, db: &Path) -> String {
 /// PATH so they can register the server themselves later.
 pub fn add_json_command(bin: &Path, db: &Path) -> String {
     format!(
-        "claude mcp add-json --scope user skillvolution '{}'",
-        mcp_json(bin, db)
+        "claude mcp add-json --scope user skillvolution {}",
+        hooks::shell_quote(&mcp_json(bin, db))
     )
 }
 
@@ -63,16 +65,52 @@ enum AddOutcome {
     Failed(String),
 }
 
+/// How long a `claude mcp` call may take before it's killed: the CLI can hang (e.g.
+/// waiting on a login or network prompt), and setup must not hang with it.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Runs `claude` with `args`, capturing its output, and kills it once the timeout
+/// passes. `SKILLVOLUTION_CLAUDE_TIMEOUT_SECS` overrides the timeout (used by tests).
+/// Polling `try_wait` leaves the output in the pipes until exit, which is fine for the
+/// few lines `claude mcp` prints.
+fn run(claude: &Path, args: &[&str]) -> Result<Output> {
+    let timeout_secs = std::env::var("SKILLVOLUTION_CLAUDE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let command = format!("claude {}", args.join(" "));
+    let mut child = Command::new(claude)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run `{command}`"))?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("`{command}` timed out after {timeout_secs}s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
+        .wait_with_output()
+        .with_context(|| format!("run `{command}`"))
+}
+
 fn add_json(claude: &Path, json: &str) -> Result<AddOutcome> {
-    let output = Command::new(claude)
-        .args(["mcp", "add-json", "--scope", "user", "skillvolution", json])
-        .output()
-        .context("run `claude mcp add-json`")?;
+    let output = run(
+        claude,
+        &["mcp", "add-json", "--scope", "user", "skillvolution", json],
+    )?;
     if output.status.success() {
         return Ok(AddOutcome::Added);
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if stderr.contains("already exists") {
+    if stdout.contains("already exists") || stderr.contains("already exists") {
         Ok(AddOutcome::AlreadyExists)
     } else {
         Ok(AddOutcome::Failed(stderr))
@@ -95,10 +133,10 @@ pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
         AddOutcome::Failed(stderr) => bail!("claude mcp add-json failed: {stderr}"),
     }
 
-    let remove = Command::new(claude)
-        .args(["mcp", "remove", "--scope", "user", "skillvolution"])
-        .output()
-        .context("run `claude mcp remove --scope user skillvolution`")?;
+    let remove = run(
+        claude,
+        &["mcp", "remove", "--scope", "user", "skillvolution"],
+    )?;
     ensure!(
         remove.status.success(),
         "claude mcp remove failed: {}",

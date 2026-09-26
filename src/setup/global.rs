@@ -44,6 +44,9 @@ pub fn run_detected(bin: &Path, db: &Path) -> Result<()> {
 }
 
 fn configure(clients: Clients, bin: &Path, db: &Path) -> Result<()> {
+    if clients.claude_code {
+        global_claude::warn_about_project_install();
+    }
     let mut changes = Vec::new();
     if clients.opencode {
         changes.extend(global_opencode::changes(bin, db)?);

@@ -351,7 +351,7 @@ fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
     let settings = read_json(p.join(".claude/settings.local.json"));
     assert_eq!(
         settings["permissions"]["allow"],
-        json!(["Bash(git status)", "Task", "mcp__skillvolution"])
+        json!(["Bash(git status)", "Agent", "Task", "mcp__skillvolution"])
     );
     assert_eq!(settings["permissions"]["deny"], json!(["Bash(rm)"]));
 
@@ -376,7 +376,7 @@ fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
     let settings2 = read_json(temp2.path().join(".claude/settings.local.json"));
     assert_eq!(
         settings2["permissions"]["allow"],
-        json!(["Task", "mcp__skillvolution"])
+        json!(["Agent", "Task", "mcp__skillvolution"])
     );
 }
 
@@ -813,4 +813,140 @@ fn unowned_opencode_plugin_is_refused() {
     assert!(result.is_err());
     assert_eq!(fs::read_to_string(&plugin_path).unwrap(), original);
     assert!(!temp.path().join("opencode.json").exists());
+}
+
+/// Makes `dir` read-only; `false` when that doesn't stop writes (e.g. running as root),
+/// so a permission test can bail out instead of failing for the wrong reason.
+#[cfg(unix)]
+fn make_read_only(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join("probe");
+    if fs::write(&probe, "").is_ok() {
+        fs::remove_file(&probe).unwrap();
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+#[test]
+fn unopenable_database_fails_before_any_client_file_is_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let bin = p.join("skillvolution");
+    fs::write(&bin, "test binary").unwrap();
+    let locked = p.join("locked");
+    fs::create_dir(&locked).unwrap();
+    if !make_read_only(&locked) {
+        return;
+    }
+    let argv = vec![
+        "setup".to_owned(),
+        "--project".to_owned(),
+        p.to_string_lossy().into_owned(),
+        "--bin".to_owned(),
+        bin.to_string_lossy().into_owned(),
+        "--db".to_owned(),
+        locked.join("vault.sqlite3").to_string_lossy().into_owned(),
+    ];
+
+    assert!(setup::run(Cli::parse_from(argv).setup).is_err());
+
+    for file in [
+        "opencode.json",
+        ".mcp.json",
+        "AGENTS.md",
+        ".claude",
+        ".devin",
+    ] {
+        assert!(!p.join(file).exists(), "{file} written");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_write_rolls_back_the_files_written_before_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let original = "{\"model\":\"existing\"}";
+    fs::write(p.join("opencode.json"), original).unwrap();
+    // Devin's files come last, so every other client's files are already written when
+    // creating `.devin/skills` fails.
+    fs::create_dir(p.join(".devin")).unwrap();
+    if !make_read_only(&p.join(".devin")) {
+        return;
+    }
+
+    let err = install(p, "all").unwrap_err();
+
+    assert!(format!("{err:#}").contains("rolled back"), "{err:#}");
+    assert_eq!(
+        fs::read_to_string(p.join("opencode.json")).unwrap(),
+        original
+    );
+    for file in [
+        "AGENTS.md",
+        ".mcp.json",
+        ".claude/settings.local.json",
+        ".claude/skills/evolution/SKILL.md",
+        ".opencode/skills/evolution/SKILL.md",
+        ".opencode/plugins/skillvolution.js",
+    ] {
+        assert!(!p.join(file).exists(), "{file} not rolled back");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_bin_is_recorded_as_given_not_resolved() {
+    // Package managers (Homebrew, Nix, mise) expose a stable symlink into a versioned
+    // store path; recording the resolved target would break on the next upgrade.
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let real = p.join("store/1.0/skillvolution");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::write(&real, "test binary").unwrap();
+    fs::create_dir(p.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&real, p.join("bin/skillvolution")).unwrap();
+
+    install_full(p, "claude-code", "bin/skillvolution", None).unwrap();
+
+    let cc = read_json(p.join(".mcp.json"));
+    assert_eq!(
+        cc["mcpServers"]["skillvolution"]["command"],
+        p.join("bin/skillvolution").to_str().unwrap()
+    );
+}
+
+#[test]
+fn rerun_keeps_user_keys_and_disabled_state_of_the_server_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    fs::write(
+        p.join("opencode.json"),
+        r#"{"mcp":{"skillvolution":{"enabled":false,"environment":{"X":"1"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        p.join(".mcp.json"),
+        r#"{"mcpServers":{"skillvolution":{"command":"/old/skillvolution","env":{"Y":"2"},"timeout":5}}}"#,
+    )
+    .unwrap();
+
+    install(p, "both").unwrap();
+
+    let oc = read_json(p.join("opencode.json"));
+    let server = &oc["mcp"]["skillvolution"];
+    assert_eq!(server["enabled"], false);
+    assert_eq!(server["environment"], json!({"X": "1"}));
+    assert_eq!(server["type"], "local");
+    assert!(server["command"].is_array());
+
+    let cc = read_json(p.join(".mcp.json"));
+    let server = &cc["mcpServers"]["skillvolution"];
+    assert_eq!(server["env"], json!({"Y": "2"}));
+    assert_eq!(server["timeout"], 5);
+    assert_ne!(server["command"], "/old/skillvolution");
+    assert_eq!(server["args"][2], "serve");
 }

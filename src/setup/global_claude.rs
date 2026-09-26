@@ -60,6 +60,35 @@ fn merge_hooks(config: &mut serde_json::Value, bin: &Path, db: &Path) -> Result<
     )
 }
 
+/// Warns (on stderr) when the current directory is inside a git repo whose Claude Code
+/// project config still holds Skillvolution entries from a project-level setup (the
+/// only kind 0.1.x had): with the global setup too, its hooks and MCP server would run
+/// twice in that repo.
+pub fn warn_about_project_install() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(repo) = cwd.ancestors().find(|dir| dir.join(".git").exists()) else {
+        return;
+    };
+    let settings = repo.join(".claude/settings.local.json");
+    let mcp = repo.join(".mcp.json");
+    let found = [
+        fs_safe::load_json(&settings).is_ok_and(|config| hooks::has_owned(&config)),
+        fs_safe::load_json(&mcp)
+            .is_ok_and(|config| config["mcpServers"].get("skillvolution").is_some()),
+    ];
+    for (path, found) in [settings, mcp].iter().zip(found) {
+        if found {
+            eprintln!(
+                "warning: {} already configures Skillvolution for this repo (project-level setup); \
+                 with the global setup too, it would run twice here. Remove its skillvolution entries.",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Registers the MCP server at user scope via the `claude` CLI, run only after every
 /// file write above has already succeeded. Returns a one-line summary: registered, or a
 /// note with the command to run manually when `claude` isn't on `PATH`.

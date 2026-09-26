@@ -148,6 +148,9 @@ pub fn run(args: SetupArgs) -> Result<()> {
     // Client configs embed these paths as JSON strings, which must be valid UTF-8.
     hooks::require_utf8(&bin, "--bin")?;
     hooks::require_utf8(&db, "--db")?;
+    // Before any client config is written, so an unusable --db leaves no config
+    // pointing at it.
+    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
 
     match args.project {
         Some(project) => {
@@ -166,17 +169,19 @@ pub fn run(args: SetupArgs) -> Result<()> {
             }
         }
     }
-
-    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     Ok(())
 }
 
+/// Makes `bin` absolute without resolving symlinks: package managers (Homebrew, Nix,
+/// mise) expose a stable symlink into a versioned store path, and recording the
+/// resolved target would break every config on the next upgrade.
 fn resolve_bin(bin: Option<PathBuf>) -> Result<PathBuf> {
     let bin = match bin {
         Some(bin) => bin,
         None => std::env::current_exe().context("determine current executable")?,
     };
-    let bin = fs::canonicalize(&bin).context("binary must exist")?;
+    let bin = std::path::absolute(&bin).context("resolve binary path")?;
+    ensure!(bin.exists(), "binary must exist: {}", bin.display());
     ensure!(bin.is_file(), "binary must be a regular file");
     Ok(bin)
 }
@@ -225,28 +230,58 @@ fn run_project(
 }
 
 /// Validates every write target before touching any of them, so a bad target further
-/// down the list leaves everything already-checked untouched.
+/// down the list leaves everything already-checked untouched. If a write still fails,
+/// the files written before it are put back as they were (see `roll_back`).
 fn write_all(changes: Vec<(PathBuf, String)>) -> Result<()> {
     for (path, _) in &changes {
         fs_safe::check_target(path)?;
-        if path.exists() {
-            fs_safe::backup_path(path)?;
-        }
+        fs_safe::check_backups(path)?;
         for parent in path.ancestors().skip(1) {
             if parent.exists() {
                 ensure!(parent.is_dir(), "not a directory: {}", parent.display());
             }
         }
     }
+    // Each written path with its previous content (`None`: it didn't exist).
+    let mut written: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
     for (path, content) in changes {
-        fs_safe::write(&path, &content).with_context(|| {
-            format!(
-                "setup failed at {}; earlier changes may exist; inspect .skillvolution.bak backups",
-                path.display()
-            )
-        })?;
+        let result = fs_safe::read_optional_bytes(&path)
+            .and_then(|old| fs_safe::write(&path, &content).map(|()| old));
+        match result {
+            Ok(old) => written.push((path, old)),
+            Err(e) => {
+                let context = match roll_back(written) {
+                    Ok(()) => format!(
+                        "setup failed at {}; earlier changes were rolled back",
+                        path.display()
+                    ),
+                    Err(rollback) => format!(
+                        "setup failed at {}; rolling back earlier changes also failed ({rollback:#}); \
+                         inspect .skillvolution.bak backups",
+                        path.display()
+                    ),
+                };
+                return Err(e.context(context));
+            }
+        }
     }
     Ok(())
+}
+
+/// Undoes `written` newest first: a created file is deleted, a changed one gets its
+/// previous content back. Keeps going past a failure and reports the first one.
+fn roll_back(written: Vec<(PathBuf, Option<Vec<u8>>)>) -> Result<()> {
+    let mut first_error = None;
+    for (path, old) in written.into_iter().rev() {
+        let result = match old {
+            None => fs::remove_file(&path).with_context(|| format!("remove {}", path.display())),
+            Some(old) => fs_safe::restore(&path, &old),
+        };
+        if let Err(e) = result {
+            first_error.get_or_insert(e);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Resolves `path` to an absolute path: canonicalizes it (also resolving symlinks) when

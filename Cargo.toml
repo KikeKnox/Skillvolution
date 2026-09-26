@@ -13,8 +13,6 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 similar = "3.2.0"
-
-[dev-dependencies]
 tempfile = "3"
 
 # The profile that 'dist' will build with
