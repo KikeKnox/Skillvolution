@@ -91,6 +91,10 @@ fn read_json(path: impl AsRef<Path>) -> Value {
 /// `fail_add_json`, every `mcp add-json` call prints an unrelated error to stderr and
 /// exits 1 (not "already exists"), so setup's fresh-add attempt fails outright without
 /// ever calling `mcp remove`.
+///
+/// A `#!/bin/sh` script made executable with `chmod`; unix-only, like every test that
+/// calls it.
+#[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
     let failure = if fail_add_json {
         "if [ \"$1 $2\" = \"mcp add-json\" ]; then echo 'fake add-json boom' >&2; exit 1; fi\n"
@@ -112,7 +116,8 @@ fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
 /// stdout when `message_on_stdout` (some `claude` versions print it there), else stderr.
 /// Counts calls itself (in a sibling file, via shell builtins only) rather than relying
 /// on `grep`/`wc`, since the test process runs this script with `PATH` pointed only at
-/// its own directory.
+/// its own directory. Unix-only, like every test that calls it (see `write_fake_claude`).
+#[cfg(unix)]
 fn write_fake_claude_already_registered(
     dir: &Path,
     log: &Path,
@@ -150,19 +155,20 @@ fn write_fake_claude_already_registered(
     )
 }
 
+/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`.
+#[cfg(unix)]
 fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     let body = body_template.replace("{log}", &log.display().to_string());
     fs::write(&claude, format!("#!/bin/sh\n{body}")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_owned()
 }
 
+#[cfg(unix)]
 #[test]
 fn global_both_clients_write_expected_files_and_register_mcp() {
     let env = Env::new();
@@ -266,6 +272,7 @@ fn global_claude_code_without_claude_cli_still_writes_files_and_prints_note() {
     assert!(stdout.contains(env.bin.to_str().unwrap()), "{stdout}");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_detect_only_claude_present_configures_claude_and_skips_opencode() {
     // No `--client`: setup must detect that only Claude Code is present (a fake `claude`
@@ -354,6 +361,7 @@ fn global_explicit_client_both_configures_both_even_when_neither_detected() {
     assert!(!stdout.contains("Skipped"), "{stdout}");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     let env = Env::new();
@@ -376,6 +384,7 @@ fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     assert!(env.claude_dir().join("settings.json").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn global_mcp_update_of_existing_registration_removes_then_readds() {
     // The first add-json attempt reports the name already exists (as the real `claude`
@@ -433,6 +442,7 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn global_hanging_claude_cli_times_out() {
     let env = Env::new();
@@ -489,6 +499,7 @@ fn manual_registration_command_is_shell_quoted() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
     // The first add-json fails as "already exists", remove succeeds, but the follow-up
@@ -647,6 +658,7 @@ fn global_settings_json_preserves_foreign_hooks_and_other_keys() {
     assert_eq!(session_groups[0]["hooks"][0]["command"], "echo foreign");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_rerun_is_idempotent_without_extra_backups() {
     let env = Env::new();
@@ -920,6 +932,7 @@ fn global_detect_devin_on_path_configures_devin() {
     assert!(env.devin_dir().join("config.json").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn global_detect_all_three_present_configures_all_noninteractively() {
     // No `--client`, all three detected, and no terminal (the test's pipes): every

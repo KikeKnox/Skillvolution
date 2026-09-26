@@ -7,6 +7,9 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 
+// POSIX single-quoting, used for every client's hook command. On Windows, Claude Code
+// runs hook commands through Git Bash, so this quoting is still correct there; Devin's
+// Windows behavior is unverified (see TRACK J report), so it keeps the same quoting.
 pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
