@@ -35,7 +35,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
             "command": bin,
             "args": common::server_args(db, Some(key)),
         });
-        fs_safe::merge_server(&mut config, "mcpServers", entry)?;
+        fs_safe::merge_server(&mut config, "mcpServers", entry, scope)?;
         changes.push((path, common::json_text(&config)?));
 
         let claude_md = project.join("CLAUDE.md");

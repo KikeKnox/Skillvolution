@@ -109,6 +109,29 @@ fn purge_and_vacuum_erase_the_purged_content_from_the_database_file() {
     }
 }
 
+#[test]
+fn purge_succeeds_uncompacted_while_another_connection_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("busy-skill").propose(&mut vault);
+    assert!(vault.purge("busy-skill", None).unwrap().compacted);
+    Draft::new("busy-skill").propose(&mut vault);
+
+    // An open read transaction elsewhere (an MCP server mid-query, say) keeps
+    // the WAL from being truncated.
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+        .unwrap();
+
+    let report = vault.purge("busy-skill", None).unwrap();
+    assert!(report.skill_removed);
+    assert!(!report.compacted);
+    assert!(vault.get("busy-skill", None, None).is_err());
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -320,6 +343,54 @@ fn import_rejects_a_skill_that_exists_with_a_different_scope() {
 }
 
 #[test]
+fn import_rejects_revisions_or_outcomes_filed_under_another_skill() {
+    let (_dir, mut vault) = open();
+    Draft::new("victim").scope("project-a").propose(&mut vault);
+    let revision = serde_json::json!({
+        "id": "victim", "version": 2,
+        "description": "Use when working with victim",
+        "tags": [],
+        "content": support::sectioned("smuggled body"),
+        "evidence": "Observed / Tried / Result",
+        "expected_version": 1,
+        "status": "published",
+        "created_at": "2024-01-01T00:00:00Z",
+        "reviewed_at": "2024-01-01T00:00:00Z",
+        "review_note": "keep global: reason"
+    });
+    let outcome = serde_json::json!({
+        "id": "victim", "version": 1, "result": "failed", "note": "smuggled",
+        "project": null, "created_at": "2024-01-01T00:00:00Z"
+    });
+
+    for (revisions, outcomes) in [(vec![revision], vec![]), (vec![], vec![outcome])] {
+        let document = serde_json::json!({
+            "format": "skillvolution-export",
+            "version": 1,
+            "exported_at": "2024-01-01T00:00:00Z",
+            "skills": [{
+                "id": "outer",
+                "scope": null,
+                "deprecated": false,
+                "revisions": revisions,
+                "outcomes": outcomes
+            }]
+        });
+        let error = vault
+            .import_json(&document.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("victim") && error.contains("outer"),
+            "{error}"
+        );
+        assert!(vault.inspect("victim", 2).is_err());
+        assert!(vault.outcomes("victim").unwrap().is_empty());
+        assert!(vault.inspect("outer", 1).is_err());
+    }
+}
+
+#[test]
 fn import_rejects_an_unsupported_document_version() {
     let (_dir, mut vault) = open();
     let document = serde_json::json!({
@@ -395,6 +466,25 @@ fn cli_purge_deletes_a_revision_and_reports_it() {
     let vault = Vault::open(&db).unwrap();
     assert!(vault.inspect("cli-purge", 1).is_err());
     assert!(vault.inspect("cli-purge", 2).is_ok());
+}
+
+#[test]
+fn cli_purge_warns_when_other_connections_keep_it_from_compacting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("cli-busy").propose(&mut vault);
+    drop(vault);
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+        .unwrap();
+
+    let purged = run(&db, &["purge", "cli-busy"]);
+    assert_success(&purged);
+    let stderr = String::from_utf8_lossy(&purged.stderr);
+    assert!(stderr.contains("could not be compacted"), "{stderr}");
 }
 
 #[test]

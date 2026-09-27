@@ -214,6 +214,12 @@ pub fn serve(vault: Vault, project: Option<String>) -> Result<()> {
             Some(Value::Object(_)) | Some(Value::Array(_))
         );
         if !jsonrpc_valid || !id_shape_valid {
+            // JSON-RPC forbids replying to a notification (an object with no
+            // `id` member), even with an error.
+            if request.as_object().is_some_and(|o| !o.contains_key("id")) {
+                eprintln!("skillvolution: ignoring invalid notification: {text}");
+                continue;
+            }
             write_message(
                 &mut output,
                 &error_message(

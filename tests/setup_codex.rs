@@ -214,11 +214,14 @@ fn project_install_preserves_foreign_toml_and_json_content() {
         doc["mcp_servers"]["other"]["command"].as_str().unwrap(),
         "other-cmd"
     );
-    let entry = &doc["mcp_servers"]["skillvolution"];
+    // A project entry is replaced whole: a cloned repo's pre-seeded `env` must not
+    // ride along with our server.
+    let entry = doc["mcp_servers"]["skillvolution"].as_table().unwrap();
     assert_eq!(entry["command"].as_str().unwrap(), bin.to_str().unwrap());
-    assert!(!entry["enabled"].as_bool().unwrap());
-    assert_eq!(entry["env"]["FOO"].as_str().unwrap(), "bar");
-    assert_eq!(entry["startup_timeout_sec"].as_integer().unwrap(), 30);
+    assert_eq!(
+        entry.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        ["command", "args"]
+    );
     // An entry that already existed keeps whatever decor it had (none here), so a
     // rerun over a hand-written entry does not retroactively inject the trust note.
     assert!(!toml_text.contains("Skillvolution: Codex only loads"));

@@ -20,6 +20,10 @@ pub struct PurgeReport {
     pub outcomes: usize,
     /// True when the skill itself (no revisions left) was removed.
     pub skill_removed: bool,
+    /// False when `VACUUM` or the WAL checkpoint could not finish (other
+    /// connections still open), so freed content may linger on disk until a
+    /// later purge compacts the file.
+    pub compacted: bool,
 }
 
 /// What `import_json` merged into the vault.
@@ -104,7 +108,8 @@ impl Vault {
     /// SQLite overwrites the freed pages instead of merely unlinking them,
     /// then `VACUUM` (and a WAL checkpoint) after commit rewrites the file so
     /// the purged content does not linger in either the main database file or
-    /// the `-wal` file.
+    /// the `-wal` file. That compaction is best effort, reported in
+    /// `compacted`: the deletion is already committed by then.
     pub fn purge(&mut self, id: &str, version: Option<i64>) -> Result<PurgeReport> {
         validate_id(id)?;
         self.conn.pragma_update(None, "secure_delete", "ON")?;
@@ -119,7 +124,7 @@ impl Vault {
             )?,
             "unknown skill: {id}"
         );
-        let report = match version {
+        let mut report = match version {
             None => {
                 let outcomes = tx.execute("DELETE FROM outcomes WHERE id = ?1", [id])?;
                 let revisions = tx.execute("DELETE FROM revisions WHERE id = ?1", [id])?;
@@ -129,6 +134,7 @@ impl Vault {
                     revisions,
                     outcomes,
                     skill_removed: true,
+                    compacted: false,
                 }
             }
             Some(version) => {
@@ -165,14 +171,24 @@ impl Vault {
                     revisions,
                     outcomes,
                     skill_removed,
+                    compacted: false,
                 }
             }
         };
         tx.commit()?;
-        self.conn.execute("VACUUM", [])?;
-        self.conn
-            .pragma(None, "wal_checkpoint", "TRUNCATE", |_row| Ok(()))?;
+        report.compacted = self.compact().unwrap_or(false);
         Ok(report)
+    }
+
+    /// Rewrites the database file and truncates the WAL. Returns whether the
+    /// checkpoint completed; other connections' open read transactions make
+    /// it report busy (and can make `VACUUM` fail outright).
+    fn compact(&self) -> Result<bool> {
+        self.conn.execute("VACUUM", [])?;
+        let busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        Ok(busy == 0)
     }
 
     /// Serializes every skill, revision, and outcome as a versioned JSON
@@ -253,7 +269,8 @@ impl Vault {
     ///
     /// A skill absent locally is created with its exported scope; a skill
     /// present locally must share that scope, or its whole import is
-    /// refused. `deprecated` becomes the OR of the local and imported values.
+    /// refused, as is a skill listing a revision or outcome of another id.
+    /// `deprecated` becomes the OR of the local and imported values.
     /// A revision that doesn't exist yet is validated exactly as `propose`
     /// validates a new one (sections, secrets) and inserted; one that exists
     /// with identical description/tags/content/evidence is skipped; one that
@@ -281,6 +298,20 @@ impl Vault {
         };
         for skill in &document.skills {
             validate_id(&skill.id)?;
+            // A row filed under another id would bypass that skill's scope
+            // check and leave its search row stale.
+            for (kind, id) in skill
+                .revisions
+                .iter()
+                .map(|r| ("revision", &r.id))
+                .chain(skill.outcomes.iter().map(|o| ("outcome", &o.id)))
+            {
+                ensure!(
+                    *id == skill.id,
+                    "{kind} for skill {id} is listed under skill {}; aborting import",
+                    skill.id
+                );
+            }
             let existing_scope: Option<Option<String>> = tx
                 .query_row(
                     "SELECT scope FROM skills WHERE id = ?1",

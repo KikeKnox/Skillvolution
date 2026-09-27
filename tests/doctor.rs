@@ -312,3 +312,109 @@ fn json_output_parses_with_healthy_and_checks() {
             .any(|c| c["status"] == "ok" && c["name"] == "Claude Code")
     );
 }
+
+/// Publishes one valid skill into `db` directly through the library.
+fn publish(db: &Path, id: &str) {
+    let mut vault = skillvolution::vault::Vault::open(db).unwrap();
+    vault
+        .propose(&skillvolution::vault::Proposal {
+            id,
+            description: "a test skill",
+            tags: &[],
+            content: "## When to use\nx\n## Procedure\nx\n## Pitfalls\nx\n## Verification\nx",
+            evidence: "evidence",
+            expected_version: 0,
+            scope: None,
+            verdict: "keep global",
+            verdict_reason: "because",
+            replaces_proven: false,
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_deprecated_skill_keeps_the_search_index_healthy() {
+    let env = Env::new();
+    publish(&env.db, "old-skill");
+    skillvolution::vault::Vault::open(&env.db)
+        .unwrap()
+        .set_deprecated("old-skill", true)
+        .unwrap();
+
+    let output = env.doctor().output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] vault: search index: 1 skill(s) indexed, no orphans"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_relative_skillvolution_db_matches_what_setup_wrote() {
+    let env = Env::new();
+    let output = env
+        .cli()
+        .env("SKILLVOLUTION_DB", "vault.sqlite3")
+        .args(["setup", "--client", "opencode"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let output = env
+        .cli()
+        .env("SKILLVOLUTION_DB", "vault.sqlite3")
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] OpenCode: configured, up to date"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_malformed_client_config_fails_that_client_and_checks_the_others() {
+    let env = Env::new();
+    assert_success(&env.setup().args(["--client", "opencode"]).output().unwrap());
+    let gemini_dir = env.home.path().join(".gemini");
+    fs::create_dir_all(&gemini_dir).unwrap();
+    fs::write(gemini_dir.join("settings.json"), "not json").unwrap();
+
+    let output = env.doctor().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[fail] Gemini CLI: "), "{stdout}");
+    assert!(
+        stdout.contains("[ok] OpenCode: configured, up to date"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("[ok] Cursor: not installed"), "{stdout}");
+}
+
+#[test]
+fn a_relocated_default_vault_warns_that_the_cli_still_uses_the_default() {
+    let env = Env::new();
+    let default_db = env.home.path().join(".local/share/skillvolution/skills.db");
+    fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+    fs::write(
+        default_db.with_file_name("skills.db.relocated.bak"),
+        "old vault",
+    )
+    .unwrap();
+
+    let output = env
+        .cli()
+        .env_remove("SKILLVOLUTION_DB")
+        .env_remove("XDG_DATA_HOME")
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[warn] vault: relocated"), "{stdout}");
+    assert!(stdout.contains("SKILLVOLUTION_DB"), "{stdout}");
+    assert!(!default_db.exists());
+}

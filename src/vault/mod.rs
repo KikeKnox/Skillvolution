@@ -313,9 +313,10 @@ fn schema_stamp(conn: &Connection) -> Result<(i64, i64)> {
 /// reach here without one). It is left as-is, so a relative value resolves against the
 /// current directory like `--db` does. Otherwise, on Windows,
 /// `%LOCALAPPDATA%\skillvolution\skills.db` (falling back to the logic below if
-/// `LOCALAPPDATA` is unset). Elsewhere, `$XDG_DATA_HOME/skillvolution/skills.db` when
-/// `XDG_DATA_HOME` is an absolute, nonempty path; otherwise
-/// `$HOME/.local/share/skillvolution/skills.db` (`$USERPROFILE` if `$HOME` is unset).
+/// `LOCALAPPDATA` is unset, or when only the path below already holds a vault).
+/// Elsewhere, `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an
+/// absolute, nonempty path; otherwise `$HOME/.local/share/skillvolution/skills.db`
+/// (`$USERPROFILE` if `$HOME` is unset).
 pub fn default_database() -> Result<PathBuf> {
     if let Some(db) = std::env::var_os("SKILLVOLUTION_DB").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(db));
@@ -325,21 +326,33 @@ pub fn default_database() -> Result<PathBuf> {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
+    let xdg_database = || -> Result<PathBuf> {
+        let base = nonempty_env("XDG_DATA_HOME")
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                nonempty_env("HOME")
+                    .or_else(|| nonempty_env("USERPROFILE"))
+                    .map(|home| home.join(".local/share"))
+            })
+            .ok_or_else(|| anyhow::anyhow!("set --db, XDG_DATA_HOME, or HOME"))?;
+        Ok(base.join("skillvolution/skills.db"))
+    };
 
     #[cfg(windows)]
     if let Some(local_app_data) = nonempty_env("LOCALAPPDATA") {
-        return Ok(local_app_data.join("skillvolution/skills.db"));
+        let db = local_app_data.join("skillvolution/skills.db");
+        // Earlier releases kept the Windows vault at the XDG-style path; keep using a
+        // vault found there instead of silently starting an empty one.
+        if !db.exists()
+            && let Ok(legacy) = xdg_database()
+            && legacy.exists()
+        {
+            return Ok(legacy);
+        }
+        return Ok(db);
     }
 
-    let base = nonempty_env("XDG_DATA_HOME")
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            nonempty_env("HOME")
-                .or_else(|| nonempty_env("USERPROFILE"))
-                .map(|home| home.join(".local/share"))
-        })
-        .ok_or_else(|| anyhow::anyhow!("set --db, XDG_DATA_HOME, or HOME"))?;
-    Ok(base.join("skillvolution/skills.db"))
+    xdg_database()
 }
 
 pub fn validate_id(id: &str) -> Result<()> {

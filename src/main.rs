@@ -314,6 +314,13 @@ fn main() -> Result<()> {
                     ""
                 }
             );
+            if !report.compacted {
+                eprintln!(
+                    "warning: the data was deleted, but the vault file could not be compacted \
+                     while other connections are open, so purged content may linger on disk; \
+                     close running AI client sessions and run another purge later to compact it."
+                );
+            }
         }
         Command::Export { output } => {
             let json = open(&cli.db)?.export_json()?;

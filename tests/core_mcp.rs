@@ -353,6 +353,27 @@ fn a_response_shaped_message_without_method_is_ignored_silently() {
 }
 
 #[test]
+fn a_malformed_notification_gets_no_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    // No "jsonrpc" member, but also no id: a notification, which JSON-RPC
+    // forbids answering even with an error.
+    writeln!(
+        server.stdin,
+        "{}",
+        json!({"method": "notifications/initialized"})
+    )
+    .unwrap();
+    server.stdin.flush().unwrap();
+
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["id"], 1);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
 fn a_request_with_an_id_but_no_method_gets_invalid_request() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");

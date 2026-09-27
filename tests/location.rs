@@ -311,3 +311,57 @@ fn relocate_with_a_missing_source_fails() {
     );
     assert!(!to.exists());
 }
+
+#[test]
+fn relocate_with_a_malformed_client_config_fails_before_copying() {
+    let env = Env::new();
+    let from = env.home_real.join("vault.sqlite3");
+    let to = env.home_real.join("moved/vault.sqlite3");
+    publish(&from, "kept-skill");
+    let gemini_dir = env.home.path().join(".gemini");
+    fs::create_dir_all(&gemini_dir).unwrap();
+    fs::write(gemini_dir.join("settings.json"), "not json").unwrap();
+
+    let output = env
+        .command()
+        .arg("--db")
+        .arg(&from)
+        .arg("relocate")
+        .arg(&to)
+        .output()
+        .unwrap();
+    assert_failure(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Gemini CLI"), "{stderr}");
+    assert!(!to.exists());
+    assert!(!to.parent().unwrap().exists());
+    assert!(from.is_file());
+}
+
+#[test]
+fn relocating_the_default_vault_tells_how_to_point_the_cli_at_the_new_one() {
+    let env = Env::new();
+    let from = env.home_real.join(".local/share/skillvolution/skills.db");
+    let to = env.home_real.join("moved/vault.sqlite3");
+    publish(&from, "kept-skill");
+
+    let output = env
+        .command()
+        .env_remove("SKILLVOLUTION_DB")
+        .env_remove("XDG_DATA_HOME")
+        .arg("relocate")
+        .arg(&to)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("close running AI client sessions"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("SKILLVOLUTION_DB={}", to.display())),
+        "{stdout}"
+    );
+    assert!(!from.exists());
+}

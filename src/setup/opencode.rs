@@ -36,7 +36,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     let mut command = vec![json!(bin)];
     command.extend(common::server_args(db, scope.key()));
     let entry = json!({"type": "local", "command": command, "enabled": true});
-    fs_safe::merge_server(&mut config, "mcp", entry)?;
+    fs_safe::merge_server(&mut config, "mcp", entry, scope)?;
     if let Scope::Project { .. } = scope {
         remove_legacy_instruction(&mut config)?;
     }

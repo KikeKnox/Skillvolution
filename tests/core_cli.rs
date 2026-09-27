@@ -201,6 +201,30 @@ fn default_database_prefers_local_app_data_on_windows() {
 }
 
 #[test]
+#[cfg(windows)]
+fn default_database_keeps_using_a_legacy_home_vault_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_app_data = dir.path().join("Local");
+    let legacy = dir.path().join(".local/share/skillvolution/skills.db");
+    skillvolution::vault::Vault::open(&legacy).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("outcomes")
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("USERPROFILE", dir.path())
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("SKILLVOLUTION_DB")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!local_app_data.join("skillvolution/skills.db").exists());
+}
+
+#[test]
 fn setup_without_project_defaults_bin_and_xdg_database_globally() {
     // `setup` without `--project` now configures the user's global config instead of
     // defaulting the project to the current directory.
