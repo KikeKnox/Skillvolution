@@ -320,6 +320,38 @@ fn import_refuses_a_revision_with_a_secret_shaped_value() {
 }
 
 #[test]
+fn import_keeps_legacy_revisions_published_before_the_heading_rule() {
+    let (_dir, mut vault) = open();
+    let document = serde_json::json!({
+        "format": "skillvolution-export",
+        "version": 1,
+        "exported_at": "2024-01-01T00:00:00Z",
+        "skills": [{
+            "id": "legacy-skill",
+            "scope": null,
+            "deprecated": false,
+            "revisions": [{
+                "id": "legacy-skill", "version": 1,
+                "description": "Use when importing a legacy skill",
+                "tags": [],
+                "content": "Old-style body without the four required headings.",
+                "evidence": "Observed / Tried / Result",
+                "expected_version": 0,
+                "status": "published",
+                "created_at": "2024-01-01T00:00:00Z",
+                "reviewed_at": "2024-01-01T00:00:00Z",
+                "review_note": "keep global: reason"
+            }],
+            "outcomes": []
+        }]
+    });
+
+    vault.import_json(&document.to_string()).unwrap();
+    assert_eq!(vault.get("legacy-skill", None, None).unwrap().version, 1);
+    assert_eq!(vault.search("legacy", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
 fn import_rejects_a_skill_that_exists_with_a_different_scope() {
     let (_dir, mut vault) = open();
     Draft::new("skill-k").scope("project-a").propose(&mut vault);

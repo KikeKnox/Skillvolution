@@ -2,7 +2,7 @@
 //! online backups.
 
 use super::{
-    Vault, join_tags, revisions, split_tags, validate_id, validate_no_secrets, validate_sections,
+    Vault, join_tags, revisions, split_tags, validate_id, validate_no_secrets,
     validate_single_line, validate_tags, validate_text,
 };
 use anyhow::{Context, Result, ensure};
@@ -354,7 +354,8 @@ impl Vault {
                         validate_single_line("description", &revision.description, 280)?;
                         validate_tags(&revision.tags)?;
                         validate_text("content", &revision.content, 65_536)?;
-                        validate_sections(&revision.content)?;
+                        // No validate_sections: revisions published before the heading
+                        // rule existed are legitimate history and must round-trip.
                         validate_text("evidence", &revision.evidence, 16_384)?;
                         validate_no_secrets("description", &revision.description)?;
                         validate_no_secrets("content", &revision.content)?;
