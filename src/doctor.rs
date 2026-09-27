@@ -65,6 +65,9 @@ impl Check {
 /// `json`). Returns whether everything is healthy (no failing check; warnings
 /// are fine).
 pub fn run(db: &Path, json: bool) -> Result<bool> {
+    // Resolved exactly as setup resolves it, so the paths setup wrote into
+    // client configs compare equal to what doctor recomputes.
+    let db = &setup::absolutize(db)?;
     let mut checks = vault_checks(db)?;
     let (client_checks, globally_configured) = client_checks(db)?;
     checks.extend(client_checks);
@@ -103,10 +106,23 @@ fn open_readonly(db: &Path) -> Result<Connection> {
 
 fn vault_checks(db: &Path) -> Result<Vec<Check>> {
     if !db.is_file() {
-        return Ok(vec![Check::warn(
+        let mut checks = vec![Check::warn(
             "vault: database",
             "will be created on first use",
-        )]);
+        )];
+        let backup = crate::relocate::backup_path(db);
+        if backup.exists() {
+            checks.push(Check::warn(
+                "vault: relocated",
+                format!(
+                    "{} was relocated (old copy at {}); set SKILLVOLUTION_DB to the new path \
+                     in your shell profile, or pass --db, so CLI commands use the relocated vault",
+                    db.display(),
+                    backup.display()
+                ),
+            ));
+        }
+        return Ok(checks);
     }
     let conn = open_readonly(db)?;
     let mut checks = Vec::new();
@@ -223,74 +239,86 @@ fn stats_check(conn: &Connection) -> Result<Check> {
 /// One check per `ClientKind`, plus the list of clients found configured
 /// (up to date or differing, as opposed to not installed or installed but
 /// never configured) — what the legacy-install check below scopes itself to.
+/// A client whose config can't even be read or parsed gets a failing check of
+/// its own instead of aborting the whole report.
 fn client_checks(db: &Path) -> Result<(Vec<Check>, Vec<ClientKind>)> {
     let bin = std::path::absolute(std::env::current_exe().context("determine current executable")?)
         .context("resolve current executable path")?;
     let mut checks = Vec::new();
     let mut globally_configured = Vec::new();
-    let current_skill_version = setup::skill_marker_version(setup::SKILL);
-
     for kind in ClientKind::ALL {
-        let display = kind.display_name();
-        if !kind.detect() {
-            checks.push(Check::ok(display, "not installed"));
-            continue;
-        }
-        let mut changes = kind.changes(Scope::Global, &bin, db)?;
-        if let Some(configured_bin) = setup::configured_bin(kind, &changes)
-            && configured_bin != bin
-        {
-            changes = kind.changes(Scope::Global, &configured_bin, db)?;
-        }
-        let (configured, mismatched) = diff_changes(&changes)?;
-        if mismatched.is_empty() {
-            checks.push(Check::ok(display, "configured, up to date"));
-            globally_configured.push(kind);
-        } else if !configured {
-            checks.push(Check::ok(display, "installed but not configured"));
-        } else {
-            checks.push(Check::warn(
-                display,
-                format!(
-                    "differs from what `skillvolution setup --client {}` would write: {}",
-                    kind.token(),
-                    mismatched.join(", ")
-                ),
-            ));
-            globally_configured.push(kind);
-        }
-
-        if let Some(installed) = installed_skill_version(&changes)?
-            && let Some(current) = current_skill_version
-            && installed < current
-        {
-            checks.push(Check::warn(
-                format!("{display} skill"),
-                format!("rerun setup to update the evolution skill (installed v{installed}, current v{current})"),
-            ));
-        }
-
-        if let Some(missing) = setup::missing_configured_bin(kind, &changes) {
-            checks.push(Check::fail(
-                format!("{display} binary"),
-                format!(
-                    "configured binary {} does not exist; rerun setup",
-                    missing.display()
-                ),
-            ));
-        }
-
-        if kind == ClientKind::ClaudeCode
-            && let Some(registered) = setup::claude_mcp_registered()?
-            && !registered
-        {
-            checks.push(Check::warn(
-                "Claude Code MCP registration",
-                "`claude mcp get skillvolution` reports no registration; rerun setup",
-            ));
+        match client_check(kind, &bin, db) {
+            Ok((client_checks, configured)) => {
+                checks.extend(client_checks);
+                if configured {
+                    globally_configured.push(kind);
+                }
+            }
+            Err(error) => checks.push(Check::fail(kind.display_name(), format!("{error:#}"))),
         }
     }
     Ok((checks, globally_configured))
+}
+
+/// The checks for one client, and whether it is configured (see `client_checks`).
+fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, bool)> {
+    let display = kind.display_name();
+    if !kind.detect() {
+        return Ok((vec![Check::ok(display, "not installed")], false));
+    }
+    let mut checks = Vec::new();
+    let mut changes = kind.changes(Scope::Global, bin, db)?;
+    if let Some(configured_bin) = setup::configured_bin(kind, &changes)
+        && configured_bin != bin
+    {
+        changes = kind.changes(Scope::Global, &configured_bin, db)?;
+    }
+    let (configured, mismatched) = diff_changes(&changes)?;
+    if mismatched.is_empty() {
+        checks.push(Check::ok(display, "configured, up to date"));
+    } else if !configured {
+        checks.push(Check::ok(display, "installed but not configured"));
+    } else {
+        checks.push(Check::warn(
+            display,
+            format!(
+                "differs from what `skillvolution setup --client {}` would write: {}",
+                kind.token(),
+                mismatched.join(", ")
+            ),
+        ));
+    }
+
+    if let Some(installed) = installed_skill_version(&changes)?
+        && let Some(current) = setup::skill_marker_version(setup::SKILL)
+        && installed < current
+    {
+        checks.push(Check::warn(
+            format!("{display} skill"),
+            format!("rerun setup to update the evolution skill (installed v{installed}, current v{current})"),
+        ));
+    }
+
+    if let Some(missing) = setup::missing_configured_bin(kind, &changes) {
+        checks.push(Check::fail(
+            format!("{display} binary"),
+            format!(
+                "configured binary {} does not exist; rerun setup",
+                missing.display()
+            ),
+        ));
+    }
+
+    if kind == ClientKind::ClaudeCode
+        && let Some(registered) = setup::claude_mcp_registered()?
+        && !registered
+    {
+        checks.push(Check::warn(
+            "Claude Code MCP registration",
+            "`claude mcp get skillvolution` reports no registration; rerun setup",
+        ));
+    }
+    Ok((checks, configured || mismatched.is_empty()))
 }
 
 /// Compares every `changes()` path against the file on disk. Returns whether

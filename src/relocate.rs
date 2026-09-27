@@ -130,10 +130,15 @@ fn retire(from: &Path) -> Result<PathBuf> {
                 .with_context(|| format!("remove {}", sidecar.display()))?;
         }
     }
-    let backup = with_suffix(from, ".relocated.bak");
+    let backup = backup_path(from);
     std::fs::rename(from, &backup)
         .with_context(|| format!("rename {} to {}", from.display(), backup.display()))?;
     Ok(backup)
+}
+
+/// Where `relocate` keeps the old vault at `db` once it has moved it.
+pub(crate) fn backup_path(db: &Path) -> PathBuf {
+    with_suffix(db, ".relocated.bak")
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
