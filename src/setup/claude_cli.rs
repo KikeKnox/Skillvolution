@@ -42,13 +42,34 @@ pub fn resolve() -> Option<PathBuf> {
 
 /// Finds `name` on `PATH`, the same way a shell would: the first executable regular file
 /// named `name` in a `PATH` entry. Shared with `detect`, which uses it to look for other
-/// clients' CLIs (e.g. `opencode`).
+/// clients' CLIs (e.g. `opencode`). On Windows each `PATHEXT` extension is tried first,
+/// since npm-installed CLIs are `name.cmd` shims and native ones `name.exe`.
 pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let names = executable_names(name);
     std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(name);
-        is_executable(&candidate).then_some(candidate)
+        names
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| is_executable(candidate))
     })
+}
+
+/// The file names `name` can have as an executable: itself on Unix; on Windows, `name`
+/// plus each `PATHEXT` extension (default `.COM;.EXE;.BAT;.CMD`), then `name` itself.
+fn executable_names(name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        names.extend(
+            pathext
+                .split(';')
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!("{name}{}", ext.to_ascii_lowercase())),
+        );
+    }
+    names.push(name.to_owned());
+    names
 }
 
 /// Whether `path` is a regular, executable file. `doctor` reuses this to check a
@@ -191,4 +212,24 @@ pub fn unregister(claude: &Path) -> Result<()> {
         "claude mcp remove failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(test)]
+mod executable_name_tests {
+    use super::executable_names;
+
+    #[test]
+    fn the_bare_name_is_always_a_candidate() {
+        assert_eq!(executable_names("claude").last().unwrap(), "claude");
+        #[cfg(not(windows))]
+        assert_eq!(executable_names("claude"), ["claude"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tries_pathext_shims_before_the_bare_name() {
+        let names = executable_names("claude");
+        assert!(names.contains(&"claude.cmd".to_owned()), "{names:?}");
+        assert!(names.contains(&"claude.exe".to_owned()), "{names:?}");
+    }
 }
