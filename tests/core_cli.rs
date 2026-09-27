@@ -234,7 +234,11 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
     let workspace = tempfile::tempdir().unwrap();
 
     let bin = env!("CARGO_BIN_EXE_skillvolution");
-    let canonical_bin = fs::canonicalize(bin).unwrap();
+    // Absolutized the same way `setup` resolves its own `--bin` default
+    // (`resolve_bin`, via `std::path::absolute`): plain `fs::canonicalize` also
+    // resolves symlinks and, on Windows, returns the verbatim `\\?\` form, neither
+    // of which the app's own command string carries.
+    let canonical_bin = std::path::absolute(bin).unwrap();
 
     let output = Command::new(bin)
         .arg("setup")
@@ -262,8 +266,10 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
         .unwrap();
     // --bin defaulted to this test's own binary, canonicalized.
     assert!(command.contains(canonical_bin.to_str().unwrap()));
-    // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db.
-    let db_path = xdg_base.join("skillvolution/skills.db");
+    // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db. Two joins, not one
+    // string with an embedded `/`: Windows keeps that `/` literally, while the app's
+    // own path rebuilds the value component-by-component and gets `\`.
+    let db_path = xdg_base.join("skillvolution").join("skills.db");
     assert!(command.contains(db_path.to_str().unwrap()));
     assert!(db_path.is_file(), "setup must initialize the database");
 }

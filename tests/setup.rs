@@ -643,9 +643,13 @@ fn installs_devin_project_files() {
 
     let mcp = read_json(p.join(".devin/mcp_config.json"));
     let server = &mcp["mcpServers"]["skillvolution"];
+    // Path equality, not string equality: `DEFAULT_BIN` embeds a literal `/`
+    // that Windows keeps as-is when joined, while the app rebuilds the same
+    // path component-by-component and gets `\` — the paths are the same, the
+    // separator spelling isn't.
     assert_eq!(
-        server["command"].as_str().unwrap(),
-        p.join(DEFAULT_BIN).to_str().unwrap()
+        Path::new(server["command"].as_str().unwrap()),
+        p.join(DEFAULT_BIN)
     );
     let args = server["args"].as_array().unwrap();
     assert_eq!(args[0], "--db");

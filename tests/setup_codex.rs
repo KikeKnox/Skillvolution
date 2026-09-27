@@ -98,7 +98,11 @@ fn project_install_writes_expected_config_toml_and_hooks_json() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    // Two joins, not one string with an embedded `/`: `Path::join` treats a
+    // literal `/` inside the argument as a normal character on Windows, so a
+    // single-string join would keep that `/` while every value the app writes
+    // gets rebuilt component-by-component and comes out with `\`.
+    let db = p.join("data").join("vault.sqlite3");
 
     install_project(p, &bin, &db).unwrap();
 
@@ -156,7 +160,7 @@ fn project_rerun_is_idempotent_without_extra_backups() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     install_project(p, &bin, &db).unwrap();
     let toml_before = fs::read(p.join(".codex/config.toml")).unwrap();
@@ -188,7 +192,7 @@ fn project_install_preserves_foreign_toml_and_json_content() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
     fs::create_dir_all(p.join(".codex")).unwrap();
 
     let toml_seed = "# my own notes\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-cmd\"\n\n\
@@ -240,7 +244,7 @@ fn project_remove_restores_foreign_content_and_deletes_owned_files() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     fs::create_dir_all(p.join(".codex")).unwrap();
     let toml_seed = "[mcp_servers.other]\ncommand = \"other-cmd\"\n";
@@ -269,7 +273,7 @@ fn project_remove_restores_foreign_content_and_deletes_owned_files() {
 fn project_remove_when_nothing_installed_creates_no_files() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     remove_project(p, &db, false).unwrap();
 
@@ -283,7 +287,7 @@ fn project_dry_run_install_and_remove_write_nothing() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     dry_run_install_project(p, &bin, &db).unwrap();
     assert!(!db.exists(), "dry-run must never create the vault database");
