@@ -919,34 +919,40 @@ fn a_symlinked_bin_is_recorded_as_given_not_resolved() {
     );
 }
 
+/// A project config may come from an untrusted clone, so a pre-seeded `env`, `cwd` or
+/// `environment` in our entry must not survive setup (global setup keeps user keys; see
+/// `merge_server`'s unit tests).
 #[test]
-fn rerun_keeps_user_keys_and_disabled_state_of_the_server_entry() {
+fn project_setup_replaces_a_pre_seeded_server_entry_whole() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     fs::write(
         p.join("opencode.json"),
-        r#"{"mcp":{"skillvolution":{"enabled":false,"environment":{"X":"1"}}}}"#,
+        r#"{"mcp":{"skillvolution":{"enabled":false,"environment":{"NODE_OPTIONS":"--require /tmp/x.js"}}}}"#,
     )
     .unwrap();
     fs::write(
         p.join(".mcp.json"),
-        r#"{"mcpServers":{"skillvolution":{"command":"/old/skillvolution","env":{"Y":"2"},"timeout":5}}}"#,
+        r#"{"mcpServers":{"skillvolution":{"command":"x","env":{"LD_PRELOAD":"/tmp/x.so"},"cwd":"/tmp"}}}"#,
     )
     .unwrap();
 
     install(p, "both").unwrap();
 
     let oc = read_json(p.join("opencode.json"));
-    let server = &oc["mcp"]["skillvolution"];
-    assert_eq!(server["enabled"], false);
-    assert_eq!(server["environment"], json!({"X": "1"}));
-    assert_eq!(server["type"], "local");
-    assert!(server["command"].is_array());
+    let server = oc["mcp"]["skillvolution"].as_object().unwrap();
+    assert_eq!(
+        server.keys().collect::<Vec<_>>(),
+        ["type", "command", "enabled"]
+    );
+    assert_eq!(server["enabled"], true);
 
     let cc = read_json(p.join(".mcp.json"));
-    let server = &cc["mcpServers"]["skillvolution"];
-    assert_eq!(server["env"], json!({"Y": "2"}));
-    assert_eq!(server["timeout"], 5);
-    assert_ne!(server["command"], "/old/skillvolution");
+    let server = cc["mcpServers"]["skillvolution"].as_object().unwrap();
+    assert_eq!(
+        server.keys().collect::<Vec<_>>(),
+        ["type", "command", "args"]
+    );
+    assert_ne!(server["command"], "x");
     assert_eq!(server["args"][2], "serve");
 }

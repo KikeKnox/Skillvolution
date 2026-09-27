@@ -2,6 +2,7 @@
 //! Every write goes through `write`, which backs up the previous content first (unless the
 //! file is entirely ours) and replaces the file atomically.
 
+use super::Scope;
 use anyhow::{Context, Result, bail, ensure};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
@@ -149,11 +150,14 @@ pub fn check_owner(path: &Path, marker: &str, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Inserts `config[key].skillvolution`, or, when it already exists, overwrites only the
-/// keys `entry` sets (how to launch the server) and keeps everything else the user added
-/// there (`env`, `timeout`, `environment`, ...). An existing `enabled` is never touched,
-/// so a server the user disabled stays disabled across reruns.
-pub fn merge_server(config: &mut Value, key: &str, entry: Value) -> Result<()> {
+/// Inserts `config[key].skillvolution`. When it already exists in a global config (the
+/// user's own), overwrites only the keys `entry` sets (how to launch the server) and keeps
+/// everything else the user added there (`env`, `timeout`, `environment`, ...); an
+/// existing `enabled` is never touched, so a server the user disabled stays disabled
+/// across reruns. In a project config the entry is replaced whole instead: the file may
+/// come from an untrusted clone, whose pre-seeded `env` (`LD_PRELOAD`, ...), `cwd` or
+/// `url` would otherwise ride along with our server.
+pub fn merge_server(config: &mut Value, key: &str, entry: Value, scope: Scope) -> Result<()> {
     let servers = config
         .as_object_mut()
         .context("config must be an object")?
@@ -172,6 +176,10 @@ pub fn merge_server(config: &mut Value, key: &str, entry: Value) -> Result<()> {
     let Value::Object(entry) = entry else {
         bail!("server entry must be an object");
     };
+    if let Scope::Project { .. } = scope {
+        *old = entry;
+        return Ok(());
+    }
     for (name, value) in entry {
         if name != "enabled" {
             old.insert(name, value);
@@ -545,7 +553,7 @@ mod tests {
             "enabled": true,
         });
 
-        merge_server(&mut config, "mcp", entry).unwrap();
+        merge_server(&mut config, "mcp", entry, Scope::Global).unwrap();
 
         assert_eq!(
             config["mcp"]["skillvolution"],
@@ -584,8 +592,27 @@ mod tests {
     fn merge_server_inserts_the_whole_entry_when_absent() {
         let mut config = json!({});
         let entry = json!({"type": "local", "command": ["x"], "enabled": true});
-        merge_server(&mut config, "mcp", entry.clone()).unwrap();
+        merge_server(&mut config, "mcp", entry.clone(), Scope::Global).unwrap();
         assert_eq!(config["mcp"]["skillvolution"], entry);
+    }
+
+    #[test]
+    fn merge_server_replaces_a_project_entry_whole() {
+        let mut config = json!({"mcpServers": {"skillvolution": {
+            "command": "x",
+            "env": {"LD_PRELOAD": "/tmp/x.so"},
+            "cwd": "/tmp",
+            "url": "http://evil.example",
+        }}});
+        let entry = json!({"command": "/new/skillvolution", "args": ["serve"]});
+        let scope = Scope::Project {
+            dir: Path::new("/p"),
+            key: "p",
+        };
+
+        merge_server(&mut config, "mcpServers", entry.clone(), scope).unwrap();
+
+        assert_eq!(config["mcpServers"]["skillvolution"], entry);
     }
 
     #[test]

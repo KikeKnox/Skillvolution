@@ -147,10 +147,12 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
 }
 
 /// Ensures `[mcp_servers.skillvolution]` in `text` runs `<bin> --db <db> serve
-/// [--project <key>]`, touching only `command`/`args` on an existing entry so every
-/// other key the user set (`env`, `enabled`, `startup_timeout_sec`, ...) survives, and
-/// leaving every other table's formatting and comments untouched. A brand new project
-/// entry gets `PROJECT_TRUST_NOTE` right above its header.
+/// [--project <key>]`, leaving every other table's formatting and comments untouched.
+/// A global entry keeps every other key the user set (`env`, `enabled`,
+/// `startup_timeout_sec`, ...); a project entry is emptied first, since the file may
+/// come from an untrusted clone that pre-seeded `env` or `cwd` for our server (see
+/// `fs_safe::merge_server`). A brand new project entry gets `PROJECT_TRUST_NOTE` right
+/// above its header.
 fn merge_mcp_server(
     text: &str,
     bin: &Path,
@@ -175,6 +177,9 @@ fn merge_mcp_server(
         .get_mut("skillvolution")
         .and_then(Item::as_table_mut)
         .context("mcp_servers.skillvolution must be a table")?;
+    if project {
+        entry.clear();
+    }
     entry["command"] = value(hooks::require_utf8(bin, "--bin")?);
     let mut args = Array::new();
     for arg in server_argv(db, key)? {

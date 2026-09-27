@@ -47,7 +47,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
         "command": bin,
         "args": common::server_args(db, scope.key()),
     });
-    fs_safe::merge_server(&mut mcp, "mcpServers", entry)?;
+    fs_safe::merge_server(&mut mcp, "mcpServers", entry, scope)?;
     changes.push((mcp_path, common::json_text(&mcp)?));
 
     let hooks_path = dir.join("hooks.json");

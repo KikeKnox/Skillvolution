@@ -51,7 +51,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
     let entry = json!({"command": bin, "args": common::server_args(db, scope.key())});
-    fs_safe::merge_server(&mut settings, "mcpServers", entry)?;
+    fs_safe::merge_server(&mut settings, "mcpServers", entry, scope)?;
     default_trust(&mut settings);
     merge_hooks(&mut settings, bin, db, scope.key())?;
     changes.push((settings_path, common::json_text(&settings)?));
@@ -96,7 +96,8 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
 /// just our server's tools (search_skills/get_skill/report_skill_outcome/publish_skill),
 /// without touching any other server or granting the broader `trust` any server can set.
 /// Only sets it when absent, like `merge_opencode`'s permission grants, so a user who
-/// explicitly turned it off (`trust: false`) keeps that choice across reruns.
+/// explicitly turned it off (`trust: false`) keeps that choice across global reruns (a
+/// project entry is always recreated by `merge_server`, so it always gets `true`).
 fn default_trust(settings: &mut Value) {
     if let Some(server) = settings["mcpServers"]["skillvolution"].as_object_mut() {
         server.entry("trust").or_insert(json!(true));
