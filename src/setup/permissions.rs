@@ -23,6 +23,13 @@ const OPENCODE_MCP_TOOLS: [&str; 4] = [
     "skillvolution_publish_skill",
 ];
 
+/// Cursor `permissions.allow` rule: every vault MCP tool, via Cursor's
+/// `Mcp(server:tool)` glob syntax (both sides accept `*`).
+/// https://cursor.com/docs/cli/reference/permissions
+/// The CLI's permission docs show no declarative grant for subagent (`Task`)
+/// dispatch, so none is added here; see the Cursor setup module doc comment.
+const CURSOR_ALLOW: [&str; 1] = ["Mcp(skillvolution:*)"];
+
 /// Claude Code: appends the missing entries of `CLAUDE_ALLOW` to
 /// `permissions.allow`, preserving rules already present.
 pub fn merge_claude(config: &mut Value) -> Result<()> {
@@ -33,6 +40,12 @@ pub fn merge_claude(config: &mut Value) -> Result<()> {
 /// preserving rules already present.
 pub fn merge_devin(config: &mut Value) -> Result<()> {
     allow_rules(config, &DEVIN_ALLOW)
+}
+
+/// Cursor: appends the missing entries of `CURSOR_ALLOW` to `permissions.allow`,
+/// preserving rules already present.
+pub fn merge_cursor(config: &mut Value) -> Result<()> {
+    allow_rules(config, &CURSOR_ALLOW)
 }
 
 /// Appends `rules` to `permissions.allow`, preserving rules already present. A
@@ -111,6 +124,13 @@ fn remove_allow_rules(
         root.remove("permissions");
     }
     Ok((removed, remaining))
+}
+
+/// Cursor removal: drops `Mcp(skillvolution:*)` from `permissions.allow`. There is no
+/// generic grant to keep (see `CURSOR_ALLOW`), so nothing is ever reported as kept.
+pub fn remove_cursor(config: &mut Value) -> Result<bool> {
+    let (removed, _kept) = remove_allow_rules(config, &CURSOR_ALLOW, &[])?;
+    Ok(removed)
 }
 
 /// OpenCode removal: drops the vault MCP tool grants from `permission`, dropping the
@@ -200,6 +220,29 @@ mod tests {
             ])
         );
         assert_eq!(config["permissions"]["deny"], json!(["exec(sudo *)"]));
+    }
+
+    #[test]
+    fn cursor_merge_adds_the_mcp_rule_and_is_idempotent() {
+        let mut config = json!({"permissions": {"allow": ["Shell(git)"], "deny": ["Shell(rm)"]}});
+        merge_cursor(&mut config).unwrap();
+        merge_cursor(&mut config).unwrap();
+        assert_eq!(
+            config["permissions"]["allow"],
+            json!(["Shell(git)", "Mcp(skillvolution:*)"])
+        );
+        assert_eq!(config["permissions"]["deny"], json!(["Shell(rm)"]));
+    }
+
+    #[test]
+    fn cursor_removal_drops_the_mcp_rule_and_reports_nothing_kept() {
+        let mut config = json!({"permissions": {"allow": ["Shell(git)", "Mcp(skillvolution:*)"]}});
+        assert!(remove_cursor(&mut config).unwrap());
+        assert_eq!(config["permissions"]["allow"], json!(["Shell(git)"]));
+
+        let mut config = json!({"permissions": {"allow": ["Mcp(skillvolution:*)"]}});
+        assert!(remove_cursor(&mut config).unwrap());
+        assert_eq!(config, json!({}));
     }
 
     #[test]

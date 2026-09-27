@@ -105,6 +105,8 @@ fn summary(kind: ClientKind) -> &'static str {
         }
         ClientKind::Codex => "Configured Codex CLI (global).",
         ClientKind::Gemini => "Configured Gemini CLI (global).",
-        ClientKind::Cursor => "Configured Cursor (global).",
+        ClientKind::Cursor => {
+            "Configured Cursor (global): skill, mcp.json, hooks.json, cli-config.json permissions."
+        }
     }
 }

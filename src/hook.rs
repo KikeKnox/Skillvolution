@@ -18,7 +18,10 @@ pub const DEVIN_WORK_TOOLS: &[&str] = &["write", "edit", "apply_patch", "noteboo
 // PostToolUse-style hook payloads report them in `tool_name`.
 pub const CODEX_WORK_TOOLS: &[&str] = &["apply_patch"];
 pub const GEMINI_WORK_TOOLS: &[&str] = &["write_file", "replace"];
-pub const CURSOR_WORK_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit"];
+// Cursor's documented native tools are Shell, Read, Write, Grep, Delete, and Task; file
+// edits (not just whole-file writes) go through the same "Write" tool, with no separate
+// "Edit"/"MultiEdit" name. https://cursor.com/docs/hooks
+pub const CURSOR_WORK_TOOLS: &[&str] = &["Write"];
 
 pub const STOP_REASON: &str = "Skillvolution review: you edited files since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, \
