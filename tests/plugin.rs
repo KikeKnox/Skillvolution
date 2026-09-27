@@ -89,6 +89,8 @@ fn global_mode_plugin_leaves_project_key_null_for_runtime_detection() {
         .arg("--client")
         .arg("opencode")
         .env("HOME", home.path())
+        // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+        .env("APPDATA", home.path().join("AppData"))
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env_remove("CLAUDE_CONFIG_DIR")
         .env("PATH", empty_path.path())

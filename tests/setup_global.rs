@@ -584,6 +584,8 @@ fn non_utf8_db_path_fails_cleanly_before_any_write() {
         .arg("--bin")
         .arg(&bin)
         .env("HOME", home.path())
+        // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+        .env("APPDATA", home.path().join("AppData"))
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env("PATH", empty_path.path())
@@ -629,6 +631,8 @@ fn non_utf8_db_path_is_an_error_not_a_panic_in_every_mode() {
             .arg("--bin")
             .arg(&bin)
             .env("HOME", home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", home.path().join("AppData"))
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", empty_path.path())
@@ -1040,6 +1044,16 @@ fn global_claude_setup_warns_about_a_project_install_in_the_current_repo() {
         .unwrap();
     assert_success(&output);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The warning is built from the process's current directory, which the OS reports
+    // with symlinks resolved (e.g. macOS's /var -> /private/var).
+    let repo = fs::canonicalize(&repo).unwrap();
+    // Windows canonical paths carry a verbatim `\\?\` prefix that current_dir() lacks.
+    let repo = std::path::PathBuf::from(
+        repo.to_str()
+            .unwrap()
+            .strip_prefix(r"\\?\")
+            .unwrap_or(repo.to_str().unwrap()),
+    );
     for file in [".claude/settings.local.json", ".mcp.json"] {
         let path = repo.join(file);
         assert!(

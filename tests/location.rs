@@ -165,6 +165,8 @@ impl Env {
     fn command(&self) -> Command {
         let mut cmd = bin();
         cmd.env("HOME", self.home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", self.home.path().join("AppData"))
             .env("XDG_CONFIG_HOME", &self.xdg_config)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", &self.bin_dir)

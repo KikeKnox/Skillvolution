@@ -319,6 +319,8 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
             .arg("setup")
             .args(args)
             .env("HOME", home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", home.path().join("AppData"))
             .env("XDG_CONFIG_HOME", home.path().join("xdg-config"))
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", &bin_dir)

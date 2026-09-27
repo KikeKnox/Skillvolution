@@ -332,6 +332,8 @@ impl GlobalEnv {
             .arg("--bin")
             .arg(&self.bin)
             .env("HOME", self.home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", self.home.path().join("AppData"))
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", self.empty_path.path())

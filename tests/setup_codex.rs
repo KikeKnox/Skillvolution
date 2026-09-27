@@ -350,6 +350,8 @@ impl Env {
     fn cli(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         cmd.env("HOME", self.home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", self.home.path().join("AppData"))
             .env("XDG_CONFIG_HOME", self.home.path().join("xdg-config"))
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
