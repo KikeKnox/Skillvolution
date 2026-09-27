@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 similar = "3.2.0"
 tempfile = "3"
+toml_edit = "0.22"
 
 # The profile that 'dist' will build with
 [profile.dist]

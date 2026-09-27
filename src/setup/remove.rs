@@ -212,7 +212,8 @@ fn summary_line(kind: ClientKind, scope: Scope) -> String {
             "skill, mcp.json entry, hooks.json, cli-config.json/cli.json permissions, rule file"
                 .to_owned()
         }
-        ClientKind::Codex | ClientKind::Gemini => "its files".to_owned(),
+        ClientKind::Codex => "skill, config.toml MCP entry, hooks.json, AGENTS.md".to_owned(),
+        ClientKind::Gemini => "its files".to_owned(),
     };
     if kind == ClientKind::ClaudeCode {
         what.push_str(match scope {
