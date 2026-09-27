@@ -13,6 +13,10 @@ use std::{
 struct Env {
     home: tempfile::TempDir,
     xdg_config: PathBuf,
+    // Devin's global config dir on Windows (`%APPDATA%\devin`); unused on Unix, where
+    // Devin reads `$HOME/.config/devin` instead. Sandboxed here too so a global Devin
+    // install doesn't touch (or get confused by) the real user profile.
+    appdata: PathBuf,
     empty_path: tempfile::TempDir,
     // Kept alive only so `bin`/`db`, which point inside it, stay valid for the test.
     _workspace: tempfile::TempDir,
@@ -24,6 +28,7 @@ impl Env {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
         let xdg_config = home.path().join("xdg-config");
+        let appdata = home.path().join("AppData/Roaming");
         let empty_path = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // Named exactly `skillvolution`: hook ownership (see `owned_command`) matches on
@@ -35,6 +40,7 @@ impl Env {
         Self {
             home,
             xdg_config,
+            appdata,
             empty_path,
             _workspace: workspace,
             bin,
@@ -42,9 +48,9 @@ impl Env {
         }
     }
 
-    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/PATH pinned to this
-    /// sandbox and no `claude` on PATH. Callers add `--client` and override PATH to add
-    /// a fake `claude` when needed.
+    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/APPDATA/PATH pinned to
+    /// this sandbox and no `claude` on PATH. Callers add `--client` and override PATH to
+    /// add a fake `claude` when needed.
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         cmd.arg("--db")
@@ -54,6 +60,7 @@ impl Env {
             .arg(&self.bin)
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", &self.xdg_config)
+            .env("APPDATA", &self.appdata)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", self.empty_path.path())
             // Outside any git repo, so the project-install warning never fires by accident.
@@ -69,8 +76,13 @@ impl Env {
         self.xdg_config.join("opencode")
     }
 
+    /// Devin's global config dir: `%APPDATA%\devin` on Windows, `$HOME/.config/devin`
+    /// elsewhere (see `src/setup/devin.rs::global_dir`, which this mirrors).
     fn devin_dir(&self) -> PathBuf {
-        self.home.path().join(".config/devin")
+        #[cfg(windows)]
+        return self.appdata.join("devin");
+        #[cfg(not(windows))]
+        return self.home.path().join(".config/devin");
     }
 }
 
@@ -269,7 +281,11 @@ fn global_claude_code_without_claude_cli_still_writes_files_and_prints_note() {
         stdout.contains("claude mcp add-json --scope user skillvolution"),
         "{stdout}"
     );
-    assert!(stdout.contains(env.bin.to_str().unwrap()), "{stdout}");
+    // The printed command embeds `bin` as a JSON string, so on Windows its
+    // backslashes come out doubled (`\\`) there; escape the same way before
+    // searching for it.
+    let bin_in_json = env.bin.to_str().unwrap().replace('\\', "\\\\");
+    assert!(stdout.contains(&bin_in_json), "{stdout}");
 }
 
 #[cfg(unix)]
