@@ -154,9 +154,10 @@ fn vault_checks(db: &Path) -> Result<Vec<Check>> {
     Ok(checks)
 }
 
-/// Every non-deprecated skill with a published revision, by id.
-const INDEXABLE_SKILLS: &str = "SELECT s.id FROM skills s WHERE s.deprecated = 0 \
-    AND EXISTS (SELECT 1 FROM revisions r WHERE r.id = s.id AND r.status = 'published')";
+/// Every skill with a published revision, by id. Deprecated skills included:
+/// deprecating keeps the search row and `search` hides it at query time.
+const INDEXABLE_SKILLS: &str = "SELECT s.id FROM skills s \
+    WHERE EXISTS (SELECT 1 FROM revisions r WHERE r.id = s.id AND r.status = 'published')";
 
 /// Checks that `skills_fts` has exactly one row per indexable skill, addressed
 /// by that skill's `fts_rowid`, and no orphan rows left over from a purge or a

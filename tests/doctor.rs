@@ -312,3 +312,40 @@ fn json_output_parses_with_healthy_and_checks() {
             .any(|c| c["status"] == "ok" && c["name"] == "Claude Code")
     );
 }
+
+/// Publishes one valid skill into `db` directly through the library.
+fn publish(db: &Path, id: &str) {
+    let mut vault = skillvolution::vault::Vault::open(db).unwrap();
+    vault
+        .propose(&skillvolution::vault::Proposal {
+            id,
+            description: "a test skill",
+            tags: &[],
+            content: "## When to use\nx\n## Procedure\nx\n## Pitfalls\nx\n## Verification\nx",
+            evidence: "evidence",
+            expected_version: 0,
+            scope: None,
+            verdict: "keep global",
+            verdict_reason: "because",
+            replaces_proven: false,
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_deprecated_skill_keeps_the_search_index_healthy() {
+    let env = Env::new();
+    publish(&env.db, "old-skill");
+    skillvolution::vault::Vault::open(&env.db)
+        .unwrap()
+        .set_deprecated("old-skill", true)
+        .unwrap();
+
+    let output = env.doctor().output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] vault: search index: 1 skill(s) indexed, no orphans"),
+        "{stdout}"
+    );
+}
