@@ -87,8 +87,8 @@ entry (`claude mcp remove` globally), and keeps every user-owned key.
 ## OpenCode
 
 **Global** (`$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode`;
-`opencode.jsonc` is used when it already exists and parses as strict JSON —
-with comments or trailing commas it errors and asks you to merge manually;
+`opencode.jsonc` is used when it already exists and parses as JSON (trailing
+commas allowed) — with comments it errors and asks you to merge manually;
 both files existing is an error):
 
 - `opencode.json` (or `.jsonc`):

@@ -731,6 +731,28 @@ fn opencode_jsonc_without_comments_is_updated_in_place_globally() {
 }
 
 #[test]
+fn opencode_jsonc_with_trailing_commas_is_updated_in_place_globally() {
+    let env = Env::new();
+    fs::create_dir_all(env.opencode_dir()).unwrap();
+    let original = "{\n  \"model\": \"existing\",\n  \"tools\": [\"a\", \"b\",],\n}\n";
+    fs::write(env.opencode_dir().join("opencode.jsonc"), original).unwrap();
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("opencode")
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    assert!(!env.opencode_dir().join("opencode.json").exists());
+    let config = read_json(env.opencode_dir().join("opencode.jsonc"));
+    assert_eq!(config["model"], "existing");
+    assert_eq!(config["tools"], serde_json::json!(["a", "b"]));
+    assert_eq!(config["mcp"]["skillvolution"]["type"], "local");
+}
+
+#[test]
 fn opencode_jsonc_with_comments_is_refused_before_any_write_globally() {
     let env = Env::new();
     fs::create_dir_all(env.opencode_dir()).unwrap();

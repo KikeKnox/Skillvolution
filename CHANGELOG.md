@@ -7,8 +7,15 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+## [v0.3.1]
+
+_2026-09-27_
+
 ### Fixed
 
+- A global OpenCode `opencode.jsonc` with trailing commas no longer makes
+  `setup` (and `doctor`) fail: trailing commas in a `.jsonc` config are now
+  accepted. Comments are still refused, since rewriting the file would drop them.
 - The evolution skill (v9) gives the evaluator subagent the server's field
   limits (one-line reason and description within 280 bytes, tag format,
   `expected_version` 0 for new ids), so its verbatim output no longer gets

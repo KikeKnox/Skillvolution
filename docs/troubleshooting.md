@@ -144,10 +144,9 @@ A pre-1 database is refused outright (`move it aside and create a new one`).
 
 Project setup only writes strict `opencode.json` — a project-level `opencode.jsonc` is
 refused with `merge it into strict opencode.json manually first`. Global setup does use
-an existing `opencode.jsonc`, but still parses it as strict JSON: comments or trailing
-commas in it fail with `… could not be parsed as strict JSON; add the
-mcp.skillvolution entry manually, or remove the comments/trailing commas and rerun
-setup`. Both `opencode.json` and `opencode.jsonc` existing at once is refused in global
+an existing `opencode.jsonc`; trailing commas in it are accepted, but comments fail
+with `… could not be parsed as strict JSON; add the mcp.skillvolution entry manually,
+or remove the comments and rerun setup`. Both `opencode.json` and `opencode.jsonc` existing at once is refused in global
 mode too.
 
 ## `claude` CLI wasn't on `PATH` during setup

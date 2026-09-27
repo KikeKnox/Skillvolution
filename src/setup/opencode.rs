@@ -82,7 +82,7 @@ fn load_config(path: &Path) -> Result<Value> {
         if is_jsonc {
             format!(
                 "{} could not be parsed as strict JSON; add the mcp.skillvolution entry manually, \
-                 or remove the comments/trailing commas and rerun setup",
+                 or remove the comments and rerun setup",
                 path.display()
             )
         } else {

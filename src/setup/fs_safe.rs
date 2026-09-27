@@ -32,14 +32,21 @@ pub fn read_optional(path: &Path) -> Result<Option<String>> {
 }
 
 /// Loads a JSON config object. A missing, empty, or whitespace-only file is `{}`, and a
-/// leading UTF-8 BOM (which some Windows editors add) is ignored.
+/// leading UTF-8 BOM (which some Windows editors add) is ignored. A `.jsonc` file may
+/// also carry trailing commas; they are dropped (comments are still refused, since
+/// rewriting the file would lose them).
 pub fn load_json(path: &Path) -> Result<Value> {
     let text = read_optional(path)?.unwrap_or_default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
-    let config = parse_strict_object(text).with_context(|| {
+    let text = if path.extension().and_then(|ext| ext.to_str()) == Some("jsonc") {
+        strip_trailing_commas(text)
+    } else {
+        text.to_owned()
+    };
+    let config = parse_strict_object(&text).with_context(|| {
         format!(
             "{} must be a strict JSON object with unique keys (no comments, trailing commas, or duplicate keys)",
             path.display()
@@ -51,6 +58,29 @@ pub fn load_json(path: &Path) -> Result<Value> {
         path.display()
     );
     Ok(config)
+}
+
+/// Removes every comma (outside string literals) whose next non-whitespace character
+/// closes an object or array, as JSONC allows.
+fn strip_trailing_commas(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, c) in text.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == ',' && matches!(text[i + 1..].trim_start().chars().next(), Some('}' | ']')) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Parses `text` as JSON, rejecting a duplicate key in any object at any depth instead
@@ -425,6 +455,15 @@ mod tests {
         // The malformed input must be refused outright, not silently truncated to the
         // first object with the rest dropped.
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn strip_trailing_commas_keeps_commas_inside_strings() {
+        let text = "{\"a\": [1, 2,\n ],\n \"b\": \",}\\\",]\",\n}";
+        assert_eq!(
+            strip_trailing_commas(text),
+            "{\"a\": [1, 2\n ],\n \"b\": \",}\\\",]\"\n}"
+        );
     }
 
     #[cfg(unix)]
