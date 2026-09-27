@@ -320,6 +320,54 @@ fn import_rejects_a_skill_that_exists_with_a_different_scope() {
 }
 
 #[test]
+fn import_rejects_revisions_or_outcomes_filed_under_another_skill() {
+    let (_dir, mut vault) = open();
+    Draft::new("victim").scope("project-a").propose(&mut vault);
+    let revision = serde_json::json!({
+        "id": "victim", "version": 2,
+        "description": "Use when working with victim",
+        "tags": [],
+        "content": support::sectioned("smuggled body"),
+        "evidence": "Observed / Tried / Result",
+        "expected_version": 1,
+        "status": "published",
+        "created_at": "2024-01-01T00:00:00Z",
+        "reviewed_at": "2024-01-01T00:00:00Z",
+        "review_note": "keep global: reason"
+    });
+    let outcome = serde_json::json!({
+        "id": "victim", "version": 1, "result": "failed", "note": "smuggled",
+        "project": null, "created_at": "2024-01-01T00:00:00Z"
+    });
+
+    for (revisions, outcomes) in [(vec![revision], vec![]), (vec![], vec![outcome])] {
+        let document = serde_json::json!({
+            "format": "skillvolution-export",
+            "version": 1,
+            "exported_at": "2024-01-01T00:00:00Z",
+            "skills": [{
+                "id": "outer",
+                "scope": null,
+                "deprecated": false,
+                "revisions": revisions,
+                "outcomes": outcomes
+            }]
+        });
+        let error = vault
+            .import_json(&document.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("victim") && error.contains("outer"),
+            "{error}"
+        );
+        assert!(vault.inspect("victim", 2).is_err());
+        assert!(vault.outcomes("victim").unwrap().is_empty());
+        assert!(vault.inspect("outer", 1).is_err());
+    }
+}
+
+#[test]
 fn import_rejects_an_unsupported_document_version() {
     let (_dir, mut vault) = open();
     let document = serde_json::json!({

@@ -253,7 +253,8 @@ impl Vault {
     ///
     /// A skill absent locally is created with its exported scope; a skill
     /// present locally must share that scope, or its whole import is
-    /// refused. `deprecated` becomes the OR of the local and imported values.
+    /// refused, as is a skill listing a revision or outcome of another id.
+    /// `deprecated` becomes the OR of the local and imported values.
     /// A revision that doesn't exist yet is validated exactly as `propose`
     /// validates a new one (sections, secrets) and inserted; one that exists
     /// with identical description/tags/content/evidence is skipped; one that
@@ -281,6 +282,20 @@ impl Vault {
         };
         for skill in &document.skills {
             validate_id(&skill.id)?;
+            // A row filed under another id would bypass that skill's scope
+            // check and leave its search row stale.
+            for (kind, id) in skill
+                .revisions
+                .iter()
+                .map(|r| ("revision", &r.id))
+                .chain(skill.outcomes.iter().map(|o| ("outcome", &o.id)))
+            {
+                ensure!(
+                    *id == skill.id,
+                    "{kind} for skill {id} is listed under skill {}; aborting import",
+                    skill.id
+                );
+            }
             let existing_scope: Option<Option<String>> = tx
                 .query_row(
                     "SELECT scope FROM skills WHERE id = ?1",
