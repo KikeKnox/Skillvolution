@@ -2,7 +2,7 @@
 name: evolution
 description: Use at the start of any non-trivial task to find proven procedures in the shared Skillvolution vault, and after finishing work to report whether skills helped and publish verified, reusable lessons.
 ---
-<!-- skillvolution-managed:evolution:v8 -->
+<!-- skillvolution-managed:evolution:v9 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
@@ -74,9 +74,13 @@ observed result, not a guess), non-obvious, reusable beyond the original task,
 and costly to miss. Be skeptical: most candidates should be discarded.
 
 Reply with exactly one verdict line — `keep global`, `keep project`, or
-`discard` — then a one-line reason. For a keep verdict, also give the final
-fields to publish (id, description, tags, content, expected_version), fixing
-weak wording. `global` means the lesson transfers to unrelated codebases;
+`discard` — then a one-line reason of at most 250 characters. For a keep
+verdict, also give the final fields to publish (id, description, tags,
+content, expected_version), fixing weak wording. The server enforces these
+limits: description one line of at most 280 bytes (non-ASCII characters such
+as an em dash count 2-4 bytes), at most 8 tags of lowercase letters, digits,
+and single hyphens (no underscores), expected_version 0 for a new id.
+`global` means the lesson transfers to unrelated codebases;
 `project` means it depends on this repository's layout, tooling, or
 conventions. Do not call any tools.
 ```

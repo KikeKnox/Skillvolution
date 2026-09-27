@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
+## [Unreleased]
+
+### Fixed
+
+- The evolution skill (v9) gives the evaluator subagent the server's field
+  limits (one-line reason and description within 280 bytes, tag format,
+  `expected_version` 0 for new ids), so its verbatim output no longer gets
+  rejected by `publish_skill`.
+
 ## [v0.3.0]
 
 _2026-09-27_
