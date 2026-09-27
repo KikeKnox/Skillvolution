@@ -1,9 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here.
-Format follows [Keep a Changelog](https://keepachangelog.com).
+Format follows [Keep a Changelog](https://keepachangelog.com), except that
+each version heading is `## [vX.Y.Z]` with the date on the next line: the
+release tooling uses the heading as the GitHub release title.
 
-## [0.3.0] - 2026-09-27
+## [v0.3.0]
+
+_2026-09-27_
 
 ### Added
 
@@ -83,14 +87,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
 - The evolution skill (v8) now spells out every server-enforced publish
   rule so agents stop hitting avoidable rejections.
 
-## [0.2.1] - 2026-09-22
+## [v0.2.1]
+
+_2026-09-22_
 
 ### Fixed
 
 - Stop-hook feedback is delivered as `additionalContext` instead of
   stderr + exit 2, so Claude Code continues the same turn.
 
-## [0.2.0] - 2026-09-22
+## [v0.2.0]
+
+_2026-09-22_
 
 ### Added
 
@@ -103,7 +111,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
 
 - `CLAUDE.md` is untracked and covered by `.gitignore`.
 
-## [0.1.2] - 2026-09-21
+## [v0.1.2]
+
+_2026-09-21_
 
 ### Added
 
@@ -111,7 +121,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
 - The evolution skill now has the agent dispatch a fresh evaluator subagent
   automatically instead of asking first.
 
-## [0.1.1] - 2026-09-15
+## [v0.1.1]
+
+_2026-09-15_
 
 ### Changed
 
@@ -124,7 +136,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
 
 - Assorted bugs found in pre-release review.
 
-## [0.1.0] - 2026-09-15
+## [v0.1.0]
+
+_2026-09-15_
 
 Initial release: SQLite vault with FTS5 search and outcome tracking, MCP
 server over stdio, Claude Code and OpenCode setup, client hooks, the

@@ -93,6 +93,11 @@ binary.
 1. Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` picks
    up the new version, and commit both.
 2. Update `CHANGELOG.md` (move `Unreleased` changes under the new version).
+   Head each version `## [vX.Y.Z]` with the date on its own line below
+   (`_YYYY-MM-DD_`): `dist` uses that heading verbatim as the GitHub release
+   title, so anything else on it (such as `- <date>`) ends up in the title.
+   Check with `dist manifest --tag vX.Y.Z --output-format=json`
+   (`announcement_title`).
 3. Tag `vX.Y.Z` and push the tag.
 4. `cargo dist` (`dist-workspace.toml`) builds the release binaries for
    Linux (glibc + musl, x86_64/aarch64), macOS (x86_64/aarch64), and Windows
