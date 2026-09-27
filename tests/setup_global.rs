@@ -1044,21 +1044,22 @@ fn global_claude_setup_warns_about_a_project_install_in_the_current_repo() {
         .unwrap();
     assert_success(&output);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // The warning is built from the process's current directory, which the OS reports
-    // with symlinks resolved (e.g. macOS's /var -> /private/var).
-    let repo = fs::canonicalize(&repo).unwrap();
+    // The warning is built from the process's current directory. macOS reports it with
+    // symlinks resolved (/var -> /private/var); Windows reports it as it was set, which
+    // on CI runners is the 8.3 short form (RUNNER~1) that canonicalize() would expand.
+    let canonical = fs::canonicalize(&repo).unwrap();
     // Windows canonical paths carry a verbatim `\\?\` prefix that current_dir() lacks.
-    let repo = std::path::PathBuf::from(
-        repo.to_str()
+    let canonical = std::path::PathBuf::from(
+        canonical
+            .to_str()
             .unwrap()
             .strip_prefix(r"\\?\")
-            .unwrap_or(repo.to_str().unwrap()),
+            .unwrap_or(canonical.to_str().unwrap()),
     );
     for file in [".claude/settings.local.json", ".mcp.json"] {
-        let path = repo.join(file);
-        assert!(
-            stderr.contains(&format!("warning: {}", path.display())),
-            "{stderr}"
-        );
+        let reported = |root: &std::path::Path| {
+            stderr.contains(&format!("warning: {}", root.join(file).display()))
+        };
+        assert!(reported(&repo) || reported(&canonical), "{stderr}");
     }
 }
