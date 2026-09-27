@@ -352,10 +352,14 @@ fn roll_back(written: Vec<(PathBuf, Option<Vec<u8>>)>) -> Result<()> {
 /// Resolves `path` to an absolute path: canonicalizes it (also resolving symlinks) when
 /// it exists, otherwise absolutizes it against the current directory and lexically
 /// collapses `.`/`..` components. Unlike a plain existence check, this lets a `--db` path
-/// that doesn't exist yet still contain `..`.
+/// that doesn't exist yet still contain `..`. Either way the result is a plain path, never
+/// Windows' verbatim `\\?\C:\...` form, so the same vault is spelled the same in every
+/// config whether or not it existed when setup ran.
 pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
     if path.exists() {
-        return fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()));
+        let canonical =
+            fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))?;
+        return Ok(strip_verbatim(canonical));
     }
     let mut normalized = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
@@ -368,6 +372,43 @@ pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+/// Drops the verbatim prefix `fs::canonicalize` adds on Windows (`\\?\C:\x` becomes
+/// `C:\x`, `\\?\UNC\server\share` becomes `\\server\share`); a no-op elsewhere.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(text) = path.to_str() {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolutize_never_returns_a_verbatim_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("skills.db");
+        fs::write(&db, "").unwrap();
+        let resolved = absolutize(&db).unwrap();
+        assert!(
+            !resolved.to_str().unwrap().starts_with(r"\\?\"),
+            "{resolved:?}"
+        );
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\server\share\x.db")),
+            PathBuf::from(r"\\server\share\x.db")
+        );
+    }
 }
 
 fn resolve_project_key(explicit: Option<&str>, project: &Path) -> Result<String> {
