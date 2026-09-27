@@ -34,7 +34,7 @@ fn is_config_file(kind: ClientKind, path: &Path) -> bool {
         // Codex's MCP entry lives in `config.toml` (TOML, not JSON, so `load_json`
         // below can't read it); `hooks.json` alone carries a recognizable bin path.
         ClientKind::Codex => name == "hooks.json",
-        ClientKind::Gemini => false,
+        ClientKind::Gemini => name == "settings.json",
     }
 }
 
@@ -110,7 +110,7 @@ fn project_config_paths(repo: &Path, kind: ClientKind) -> Vec<PathBuf> {
         // `.codex/config.toml` also has a project entry, but it's TOML (see
         // `is_config_file`) so `config_has_owned` below can't detect it either way.
         ClientKind::Codex => vec![repo.join(".codex/hooks.json")],
-        ClientKind::Gemini => Vec::new(),
+        ClientKind::Gemini => vec![repo.join(".gemini/settings.json")],
     }
 }
 
