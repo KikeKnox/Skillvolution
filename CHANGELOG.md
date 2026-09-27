@@ -27,9 +27,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
   filesystem.
 - macOS and Windows release targets and a PowerShell installer
   (`install.ps1`).
+- Windows legacy vault path fallback: if `%LOCALAPPDATA%\skillvolution\skills.db`
+  doesn't exist but a legacy `%USERPROFILE%\.local\share\skillvolution\skills.db`
+  vault does, the legacy vault keeps being used.
 
 ### Changed
 
+- Project-scope MCP entry replaced whole (discarding any pre-existing `env`,
+  `cwd`, or `url` on that entry), a security hardening against pre-seeded keys
+  in untrusted repos; global entries continue to merge and preserve user keys.
+- `relocate` validates every global client config it would repoint first (a
+  config that can't be read aborts with nothing written), keeps `-wal`/`-shm`
+  sidecars renamed alongside the backup, prints a hint when the CLI's default
+  vault was relocated, and correctly matches Windows canonical paths.
+- `purge` warns when it cannot compact while another connection (an AI client's
+  MCP server) holds the vault open, so purged content may linger until a later
+  purge compacts it.
+- `import` rejects revisions and outcomes whose id differs from the skill they
+  are listed under, preventing incorrect vault state.
+- MCP `tools/call` no longer answers invalid notifications (missing `name`
+  parameter).
 - Vault schema v3 with an ordered migration chain: FTS entries addressed by
   `rowid`, one outcome per skill/version/project/UTC day (last report wins),
   legacy drafts retired, and hook-state pruning.
@@ -53,6 +70,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com).
 
 ### Fixed
 
+- `doctor` per-client failures are now isolated: a client whose config can't be
+  read or parsed gets its own `[fail]` check and the report continues. Adds a
+  `vault: relocated` warning when the vault file is missing but a
+  `<path>.relocated.bak` backup exists. Deprecated skills with a published
+  revision no longer count as search-index orphans.
 - Hook review spans: a failed review tool call no longer counts as a
   review, and each transcript span is judged once.
 - Doubled slashes in dry-run diff headers for absolute paths.

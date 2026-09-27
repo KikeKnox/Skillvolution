@@ -172,7 +172,10 @@ Two kinds, both beside the file they protect:
   skill, the OpenCode plugin, the Cursor rule) get none. On Unix a backup keeps the
   original file's mode.
 - `PATH.relocated.bak` — the whole old vault after `relocate` moves it (the old path
-  renamed aside so a stale config can't silently reopen it).
+  renamed aside so a stale config can't silently reopen it). Any `-wal` and `-shm`
+  sidecars are renamed to `.relocated.bak-wal` and `.relocated.bak-shm` so they're found
+  if the backup is opened later; `doctor` reports this with a `vault: relocated` warning
+  and suggests setting `SKILLVOLUTION_DB` to point at the new vault.
 
 For your own snapshots use `skillvolution backup PATH` (a `VACUUM INTO` copy safe on a
 live vault) or `skillvolution export` (a portable JSON document you can `import`

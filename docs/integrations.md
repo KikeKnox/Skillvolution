@@ -23,6 +23,8 @@ only.
 All snippets below come from real `setup --dry-run` output with paths
 shortened to `BIN`/`DB`.
 
+> **Security note:** Every project-scope MCP server entry is written whole, discarding any pre-existing `env`, `cwd`, or `url` on that entry; global entries are merged and keep those keys. This prevents malicious pre-seeded MCP configurations in untrusted repositories.
+
 ## Where the vault lives
 
 `--db` wins, then `SKILLVOLUTION_DB`, then:
