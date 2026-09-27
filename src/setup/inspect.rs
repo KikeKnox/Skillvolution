@@ -25,7 +25,13 @@ fn is_config_file(kind: ClientKind, path: &Path) -> bool {
         ClientKind::ClaudeCode => name == "settings.json" || name == "settings.local.json",
         ClientKind::OpenCode => name == "opencode.json" || name == "opencode.jsonc",
         ClientKind::Devin => name == "config.json" || name == "mcp_config.json",
-        ClientKind::Codex | ClientKind::Gemini | ClientKind::Cursor => false,
+        // mcp.json carries the bin path in mcpServers.skillvolution.command (the
+        // generic check in `configured_bins` below already reads that); hooks.json
+        // uses Cursor's own flat per-event shape (see `cursor::merge_hooks`), which
+        // `hooks::owned_bin` doesn't parse, so listing it here finds no bin path but
+        // is otherwise harmless.
+        ClientKind::Cursor => name == "mcp.json" || name == "hooks.json",
+        ClientKind::Codex | ClientKind::Gemini => false,
     }
 }
 
@@ -94,7 +100,11 @@ fn project_config_paths(repo: &Path, kind: ClientKind) -> Vec<PathBuf> {
             repo.join(".devin/config.json"),
             repo.join(".devin/mcp_config.json"),
         ],
-        ClientKind::Codex | ClientKind::Gemini | ClientKind::Cursor => Vec::new(),
+        ClientKind::Cursor => vec![
+            repo.join(".cursor/mcp.json"),
+            repo.join(".cursor/hooks.json"),
+        ],
+        ClientKind::Codex | ClientKind::Gemini => Vec::new(),
     }
 }
 

@@ -97,7 +97,7 @@ const HOOK_EVENTS: [&str; 5] = [
 /// the old entry instead of duplicating it; independent of the command text
 /// otherwise, so a foreign command that merely contains the substring " hook stop"
 /// (e.g. another tool's own `hook stop`, or a `hook stopwatch`) is left alone.
-fn owned_command(command: &str) -> bool {
+pub(super) fn owned_command(command: &str) -> bool {
     let words = shell_words(command);
     let Some(first) = words.first() else {
         return false;
