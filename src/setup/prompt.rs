@@ -202,12 +202,16 @@ mod tests {
         assert_eq!(choose_db_with("", None).0, Path::new("/default/vault.db"));
     }
 
+    // Unix-style absolute paths; Windows resolves them against the current drive.
+    #[cfg(unix)]
     #[test]
     fn a_custom_absolute_path_is_kept() {
         let path = choose_db_with("/somewhere/else/vault.db\n", None).0;
         assert_eq!(path, Path::new("/somewhere/else/vault.db"));
     }
 
+    // Unix-style absolute paths; Windows resolves them against the current drive.
+    #[cfg(unix)]
     #[test]
     fn a_tilde_prefixed_path_expands_against_home() {
         let path = choose_db_with("~/x.db\n", Some(Path::new("/home/user"))).0;
