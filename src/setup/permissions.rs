@@ -5,9 +5,10 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-/// Claude Code `permissions.allow` rules: `Task` covers every subagent
-/// dispatch, `mcp__skillvolution` every tool on the vault server.
-const CLAUDE_ALLOW: [&str; 2] = ["Task", "mcp__skillvolution"];
+/// Claude Code `permissions.allow` rules: `Agent` covers every subagent dispatch
+/// (`Task` is its name in older Claude Code versions), `mcp__skillvolution` every
+/// tool on the vault server.
+const CLAUDE_ALLOW: [&str; 3] = ["Agent", "Task", "mcp__skillvolution"];
 
 /// Devin `permissions.allow` rules: the subagent tools the evolution skill
 /// dispatches, and the vault MCP tools (`mcp__<server>__<tool>` naming).
@@ -22,6 +23,13 @@ const OPENCODE_MCP_TOOLS: [&str; 4] = [
     "skillvolution_publish_skill",
 ];
 
+/// Cursor `permissions.allow` rule: every vault MCP tool, via Cursor's
+/// `Mcp(server:tool)` glob syntax (both sides accept `*`).
+/// https://cursor.com/docs/cli/reference/permissions
+/// The CLI's permission docs show no declarative grant for subagent (`Task`)
+/// dispatch, so none is added here; see the Cursor setup module doc comment.
+const CURSOR_ALLOW: [&str; 1] = ["Mcp(skillvolution:*)"];
+
 /// Claude Code: appends the missing entries of `CLAUDE_ALLOW` to
 /// `permissions.allow`, preserving rules already present.
 pub fn merge_claude(config: &mut Value) -> Result<()> {
@@ -32,6 +40,12 @@ pub fn merge_claude(config: &mut Value) -> Result<()> {
 /// preserving rules already present.
 pub fn merge_devin(config: &mut Value) -> Result<()> {
     allow_rules(config, &DEVIN_ALLOW)
+}
+
+/// Cursor: appends the missing entries of `CURSOR_ALLOW` to `permissions.allow`,
+/// preserving rules already present.
+pub fn merge_cursor(config: &mut Value) -> Result<()> {
+    allow_rules(config, &CURSOR_ALLOW)
 }
 
 /// Appends `rules` to `permissions.allow`, preserving rules already present. A
@@ -55,6 +69,87 @@ fn allow_rules(config: &mut Value, rules: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Claude Code removal: drops `mcp__skillvolution` from `permissions.allow`, keeping
+/// `Agent`/`Task` (the user may have granted them independently of Skillvolution).
+/// Returns whether anything was removed, and which of those two remain present so the
+/// caller can note them for the user to remove manually.
+pub fn remove_claude(config: &mut Value) -> Result<(bool, Vec<&'static str>)> {
+    remove_allow_rules(config, &["mcp__skillvolution"], &["Agent", "Task"])
+}
+
+/// Devin removal: drops `mcp__skillvolution__*` from `permissions.allow`, keeping
+/// `run_subagent`/`read_subagent`. Returns whether anything was removed, and which of
+/// those two remain present.
+pub fn remove_devin(config: &mut Value) -> Result<(bool, Vec<&'static str>)> {
+    remove_allow_rules(
+        config,
+        &["mcp__skillvolution__*"],
+        &["run_subagent", "read_subagent"],
+    )
+}
+
+/// Removes `ours` from `permissions.allow`, dropping `allow` if that empties it and
+/// `permissions` if that in turn empties it. Returns whether anything was removed, and
+/// which of `generic` are still present in `allow` (a malformed or absent
+/// `permissions`/`allow` is left untouched: there is nothing of ours to remove from it
+/// either way).
+fn remove_allow_rules(
+    config: &mut Value,
+    ours: &[&str],
+    generic: &[&'static str],
+) -> Result<(bool, Vec<&'static str>)> {
+    let Some(root) = config.as_object_mut() else {
+        return Ok((false, Vec::new()));
+    };
+    let Some(permissions) = root.get_mut("permissions").and_then(Value::as_object_mut) else {
+        return Ok((false, Vec::new()));
+    };
+    let Some(allow) = permissions.get_mut("allow").and_then(Value::as_array_mut) else {
+        return Ok((false, Vec::new()));
+    };
+    let before = allow.len();
+    allow.retain(|entry| !entry.as_str().is_some_and(|rule| ours.contains(&rule)));
+    let removed = allow.len() != before;
+    let remaining: Vec<&'static str> = generic
+        .iter()
+        .filter(|rule| allow.iter().any(|entry| entry.as_str() == Some(**rule)))
+        .copied()
+        .collect();
+    if allow.is_empty() {
+        permissions.remove("allow");
+    }
+    if permissions.is_empty() {
+        root.remove("permissions");
+    }
+    Ok((removed, remaining))
+}
+
+/// Cursor removal: drops `Mcp(skillvolution:*)` from `permissions.allow`. There is no
+/// generic grant to keep (see `CURSOR_ALLOW`), so nothing is ever reported as kept.
+pub fn remove_cursor(config: &mut Value) -> Result<bool> {
+    let (removed, _kept) = remove_allow_rules(config, &CURSOR_ALLOW, &[])?;
+    Ok(removed)
+}
+
+/// OpenCode removal: drops the vault MCP tool grants from `permission`, dropping the
+/// container if that empties it. Returns whether anything was removed.
+pub fn remove_opencode(config: &mut Value) -> Result<bool> {
+    let Some(root) = config.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(permission) = root.get_mut("permission").and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    let mut removed = false;
+    for tool in OPENCODE_MCP_TOOLS {
+        removed |= permission.remove(tool).is_some();
+    }
+    if permission.is_empty() {
+        root.remove("permission");
+    }
+    Ok(removed)
 }
 
 /// OpenCode: sets `permission.task` and each vault MCP tool to `"allow"`, but
@@ -93,7 +188,7 @@ mod tests {
         merge_claude(&mut config).unwrap();
         assert_eq!(
             config["permissions"]["allow"],
-            json!(["Bash(git status)", "Task", "mcp__skillvolution"])
+            json!(["Bash(git status)", "Task", "Agent", "mcp__skillvolution"])
         );
         assert_eq!(config["permissions"]["deny"], json!(["Bash(rm)"]));
     }
@@ -128,6 +223,29 @@ mod tests {
     }
 
     #[test]
+    fn cursor_merge_adds_the_mcp_rule_and_is_idempotent() {
+        let mut config = json!({"permissions": {"allow": ["Shell(git)"], "deny": ["Shell(rm)"]}});
+        merge_cursor(&mut config).unwrap();
+        merge_cursor(&mut config).unwrap();
+        assert_eq!(
+            config["permissions"]["allow"],
+            json!(["Shell(git)", "Mcp(skillvolution:*)"])
+        );
+        assert_eq!(config["permissions"]["deny"], json!(["Shell(rm)"]));
+    }
+
+    #[test]
+    fn cursor_removal_drops_the_mcp_rule_and_reports_nothing_kept() {
+        let mut config = json!({"permissions": {"allow": ["Shell(git)", "Mcp(skillvolution:*)"]}});
+        assert!(remove_cursor(&mut config).unwrap());
+        assert_eq!(config["permissions"]["allow"], json!(["Shell(git)"]));
+
+        let mut config = json!({"permissions": {"allow": ["Mcp(skillvolution:*)"]}});
+        assert!(remove_cursor(&mut config).unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
     fn opencode_merge_sets_missing_keys_and_respects_explicit_choices() {
         let mut config = json!({"permission": {"task": "ask", "edit": "deny"}});
         merge_opencode(&mut config).unwrap();
@@ -143,5 +261,75 @@ mod tests {
         let mut config = json!({"permission": "ask"});
         assert!(merge_opencode(&mut config).is_err());
         assert_eq!(config, json!({"permission": "ask"}));
+    }
+
+    #[test]
+    fn claude_removal_drops_only_the_mcp_rule_and_reports_kept_generic_grants() {
+        let mut config = json!({"permissions": {"allow": ["Bash(git status)", "Task", "Agent", "mcp__skillvolution"], "deny": ["Bash(rm)"]}});
+        let (removed, kept) = remove_claude(&mut config).unwrap();
+        assert!(removed);
+        assert_eq!(kept, ["Agent", "Task"]);
+        assert_eq!(
+            config["permissions"]["allow"],
+            json!(["Bash(git status)", "Task", "Agent"])
+        );
+        assert_eq!(config["permissions"]["deny"], json!(["Bash(rm)"]));
+    }
+
+    #[test]
+    fn claude_removal_drops_emptied_allow_and_permissions() {
+        let mut config = json!({"permissions": {"allow": ["mcp__skillvolution"]}});
+        let (removed, kept) = remove_claude(&mut config).unwrap();
+        assert!(removed);
+        assert!(kept.is_empty());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn claude_removal_is_a_no_op_without_our_rule() {
+        let mut config = json!({"permissions": {"allow": ["Task"]}});
+        let before = config.clone();
+        let (removed, kept) = remove_claude(&mut config).unwrap();
+        assert!(!removed);
+        assert_eq!(kept, ["Task"]);
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn devin_removal_drops_only_the_mcp_rule_and_reports_kept_generic_grants() {
+        let mut config = json!({"permissions": {"allow": ["exec", "run_subagent", "read_subagent", "mcp__skillvolution__*"]}});
+        let (removed, kept) = remove_devin(&mut config).unwrap();
+        assert!(removed);
+        assert_eq!(kept, ["run_subagent", "read_subagent"]);
+        assert_eq!(
+            config["permissions"]["allow"],
+            json!(["exec", "run_subagent", "read_subagent"])
+        );
+    }
+
+    #[test]
+    fn opencode_removal_drops_our_tools_and_container_when_emptied() {
+        let mut config = json!({"permission": {"task": "allow"}});
+        for tool in OPENCODE_MCP_TOOLS {
+            config["permission"][tool] = json!("allow");
+        }
+        assert!(remove_opencode(&mut config).unwrap());
+        assert_eq!(config, json!({"permission": {"task": "allow"}}));
+
+        let mut config = json!({});
+        for tool in OPENCODE_MCP_TOOLS {
+            config["permission"] = json!({});
+            config["permission"][tool] = json!("allow");
+        }
+        assert!(remove_opencode(&mut config).unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn opencode_removal_is_a_no_op_without_our_tools() {
+        let mut config = json!({"permission": {"task": "ask", "edit": "deny"}});
+        let before = config.clone();
+        assert!(!remove_opencode(&mut config).unwrap());
+        assert_eq!(config, before);
     }
 }

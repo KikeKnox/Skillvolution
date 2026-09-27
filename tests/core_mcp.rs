@@ -9,17 +9,7 @@ use std::{
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
 };
-use support::Draft;
-
-/// Creates `parent/name` as a git repository root (just enough for
-/// `skillvolution::project::detect` to recognize it: a `.git` directory) and
-/// returns its path. `name` should already be a valid project key so the
-/// detected key matches it exactly.
-fn git_repo(parent: &Path, name: &str) -> std::path::PathBuf {
-    let repo = parent.join(name);
-    fs::create_dir_all(repo.join(".git")).unwrap();
-    repo
-}
+use support::{Draft, git_repo};
 
 /// A long-lived `skillvolution serve` subprocess, driven one JSON-RPC line at a time
 /// so a test can interleave requests with out-of-process CLI writes.
@@ -363,6 +353,27 @@ fn a_response_shaped_message_without_method_is_ignored_silently() {
 }
 
 #[test]
+fn a_malformed_notification_gets_no_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    // No "jsonrpc" member, but also no id: a notification, which JSON-RPC
+    // forbids answering even with an error.
+    writeln!(
+        server.stdin,
+        "{}",
+        json!({"method": "notifications/initialized"})
+    )
+    .unwrap();
+    server.stdin.flush().unwrap();
+
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["id"], 1);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
 fn a_request_with_an_id_but_no_method_gets_invalid_request() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
@@ -488,4 +499,188 @@ fn explicit_project_overrides_detection() {
     let visible = server.call(2, "search_skills", json!({}));
     assert_eq!(text_of(&visible)["total"], 1);
     assert_eq!(text_of(&visible)["skills"][0]["id"], "override-skill");
+}
+
+// --- protocol hardening -----------------------------------------------------
+
+#[test]
+fn notification_without_id_gets_no_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    writeln!(
+        server.stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "ping"})
+    )
+    .unwrap();
+    server.stdin.flush().unwrap();
+
+    // The next line of output must be the reply to the following real
+    // request, proving the notification above got none of its own.
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn ping_replies_with_an_empty_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}));
+    assert_eq!(response["result"], json!({}));
+}
+
+#[test]
+fn unknown_method_gets_method_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!({"jsonrpc": "2.0", "id": 1, "method": "bogus/method"}));
+    assert_eq!(response["error"]["code"], -32601);
+}
+
+#[test]
+fn unknown_tool_name_gets_invalid_params_not_a_tool_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let response = server.call(2, "no_such_tool", json!({}));
+    assert_eq!(response["error"]["code"], -32602);
+    assert!(response.get("result").is_none());
+}
+
+#[test]
+fn missing_tool_name_gets_invalid_params() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let response = server.request(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"arguments": {}}
+    }));
+    assert_eq!(response["error"]["code"], -32602);
+}
+
+#[test]
+fn oversized_line_gets_invalid_request_and_the_server_keeps_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+
+    // One line well past the 4 MiB cap, with no newline until the very end.
+    let huge = "a".repeat(5 * 1024 * 1024);
+    server.stdin.write_all(huge.as_bytes()).unwrap();
+    server.stdin.write_all(b"\n").unwrap();
+    server.stdin.flush().unwrap();
+    let mut line = String::new();
+    server.stdout.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], Value::Null);
+
+    // The oversized line's tail was drained, not left to desync framing: the
+    // next request gets its own clean reply.
+    let init = server.initialize("2025-06-18");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn missing_jsonrpc_field_gets_invalid_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!({"id": 1, "method": "ping"}));
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], Value::Null);
+}
+
+#[test]
+fn object_shaped_id_gets_invalid_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.request(json!({
+        "jsonrpc": "2.0", "id": {"not": "a valid id"}, "method": "ping"
+    }));
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], Value::Null);
+}
+
+#[test]
+fn tools_list_schemas_include_length_limits_patterns_and_annotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let response = server.request(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let by_name = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    const ID_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
+
+    let search = by_name("search_skills");
+    assert_eq!(
+        search["inputSchema"]["properties"]["query"]["maxLength"],
+        512
+    );
+    assert_eq!(search["annotations"]["readOnlyHint"], true);
+
+    let get = by_name("get_skill");
+    assert_eq!(get["inputSchema"]["properties"]["id"]["maxLength"], 64);
+    assert_eq!(
+        get["inputSchema"]["properties"]["id"]["pattern"],
+        ID_PATTERN
+    );
+    assert_eq!(get["annotations"]["readOnlyHint"], true);
+
+    let outcome = by_name("report_skill_outcome");
+    assert_eq!(outcome["inputSchema"]["properties"]["id"]["maxLength"], 64);
+    assert_eq!(
+        outcome["inputSchema"]["properties"]["note"]["maxLength"],
+        2048
+    );
+    assert_eq!(outcome["annotations"]["readOnlyHint"], false);
+    assert_eq!(outcome["annotations"]["destructiveHint"], false);
+    assert_eq!(outcome["annotations"]["idempotentHint"], true);
+
+    let publish = by_name("publish_skill");
+    let props = &publish["inputSchema"]["properties"];
+    assert_eq!(props["id"]["maxLength"], 64);
+    assert_eq!(props["id"]["pattern"], ID_PATTERN);
+    assert_eq!(props["description"]["maxLength"], 280);
+    assert_eq!(props["content"]["maxLength"], 65536);
+    assert_eq!(props["evidence"]["maxLength"], 16384);
+    assert_eq!(props["verdict_reason"]["maxLength"], 280);
+    assert_eq!(props["tags"]["maxItems"], 8);
+    assert_eq!(props["tags"]["items"]["maxLength"], 32);
+    assert_eq!(props["tags"]["items"]["pattern"], ID_PATTERN);
+    assert_eq!(publish["annotations"]["readOnlyHint"], false);
+    assert_eq!(publish["annotations"]["destructiveHint"], false);
+    assert_eq!(publish["annotations"]["idempotentHint"], false);
+}
+
+#[test]
+fn initialize_result_includes_instructions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut server = McpServer::spawn(&db, None);
+    let response = server.initialize("2025-06-18");
+    let instructions = response["result"]["instructions"]
+        .as_str()
+        .expect("instructions is a string");
+    assert!(instructions.contains("search_skills"), "{instructions}");
+    assert!(
+        instructions.contains("report_skill_outcome"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("publish_skill"), "{instructions}");
 }

@@ -4,16 +4,78 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets `dist`'s release plan run this workflow before building release artifacts
+  # (see `plan-jobs` in dist-workspace.toml), so a tag can't release untested code.
+  workflow_call:
 
 jobs:
-  test:
+  lint-scripts:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Check install.sh with shellcheck
+        run: shellcheck install.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate OpenCode plugin
+        run: |
+          # Placeholders are replaced by JSON literals, as src/setup/plugin.rs does.
+          rendered="$RUNNER_TEMP/skillvolution.mjs"
+          sed \
+            -e 's|__SKILLVOLUTION_BIN__|"/usr/bin/skillvolution"|g' \
+            -e 's|__SKILLVOLUTION_DB__|"/tmp/skillvolution.db"|g' \
+            -e 's|__SKILLVOLUTION_PROJECT_KEY__|null|g' \
+            assets/opencode/skillvolution.js > "$rendered"
+          node --check "$rendered"
+
+  msrv:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          # fmt/clippy only run on Linux below, so only install those components there.
+          components: ${{ runner.os == 'Linux' && 'rustfmt, clippy' || '' }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - if: runner.os == 'Linux'
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo build --locked --all-targets
+      - name: Run tests
+        shell: bash
+        run: cargo test --locked --no-fail-fast 2>&1 | tee target/test.log
+      # Job logs need a signed-in collaborator, but check-run annotations are
+      # public: surface each failing test's output as one so it can be read
+      # from the PR (or the annotations API) without log access.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: |
+          # GitHub keeps at most 10 error annotations per step: list every name first.
+          failed=$(sed -n 's/^test \(.*\) \.\.\. FAILED\r\{0,1\}$/\1/p' target/test.log | tr '\n' ' ')
+          echo "::error title=failing tests::${failed:-none found, see the job log}"
+          awk '
+            function flush() {
+              if (name == "") return
+              gsub(/\r/, "", buf); gsub(/%/, "%25", buf); gsub(/\n/, "%0A", buf)
+              printf "::error title=%s::%s\n", name, buf
+              name = ""
+            }
+            /^---- .* stdout ----$/ { flush(); name = $2; buf = ""; next }
+            /^failures:$/ { flush(); next }
+            name != "" && length(buf) < 4000 { buf = buf $0 "\n" }
+            END { flush() }
+          ' target/test.log

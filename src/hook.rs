@@ -2,19 +2,28 @@ use crate::vault::Vault;
 use anyhow::Result;
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fmt::Write as _,
     fs::File,
     io::{Read, Seek, SeekFrom},
 };
 
 const CATALOG_LIMIT: i64 = 30;
-const WORK_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+pub const WORK_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
 // Devin tool names are lowercase and its hook payloads carry no transcript path,
 // so the same worked/reviewed judgment is kept as per-session flags instead.
-pub(crate) const DEVIN_WORK_TOOLS: [&str; 4] = ["write", "edit", "apply_patch", "notebook_edit"];
+pub const DEVIN_WORK_TOOLS: &[&str] = &["write", "edit", "apply_patch", "notebook_edit"];
+// The file-editing tool names of the other flag-tracked clients, as their
+// PostToolUse-style hook payloads report them in `tool_name`.
+pub const CODEX_WORK_TOOLS: &[&str] = &["apply_patch"];
+pub const GEMINI_WORK_TOOLS: &[&str] = &["write_file", "replace"];
+// Cursor's documented native tools are Shell, Read, Write, Grep, Delete, and Task; file
+// edits (not just whole-file writes) go through the same "Write" tool, with no separate
+// "Edit"/"MultiEdit" name. https://cursor.com/docs/hooks
+pub const CURSOR_WORK_TOOLS: &[&str] = &["Write"];
 
-pub const STOP_REASON: &str = "Skillvolution review: you changed files or ran commands since the last review. \
+pub const STOP_REASON: &str = "Skillvolution review: you edited files since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, \
 and for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent now \
 — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
@@ -52,9 +61,9 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     Ok(text)
 }
 
-/// Returns a reason to block the stop when the transcript shows work since the
-/// last review and no outcome report or proposal. Each transcript span is
-/// judged once, and a stop already continued by this hook is never blocked.
+/// Returns a reason to block the stop when the transcript shows work not
+/// followed by an outcome report or proposal. Each transcript span is judged
+/// once, and a stop already continued by this hook is never blocked.
 pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
     let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
@@ -85,16 +94,52 @@ pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     if stop_hook_active {
         return Ok(None);
     }
-    let (mut worked, mut reviewed) = (false, false);
-    for line in bytes[..complete].split(|b| *b == b'\n') {
-        if let Ok(entry) = serde_json::from_slice::<Value>(line) {
-            visit_tool_uses(&entry, &mut |name| {
-                worked |= WORK_TOOLS.contains(&name);
-                reviewed |= REVIEW_TOOLS.iter().any(|tool| name.ends_with(tool));
-            });
-        }
+    Ok(has_unreviewed_work(&bytes[..complete]).then_some(STOP_REASON))
+}
+
+/// Whether the transcript lines in `span` contain a work tool call after the
+/// last review tool call. A review whose tool_result is an error (a rejected
+/// publish, say) reviewed nothing, so it does not count.
+fn has_unreviewed_work(span: &[u8]) -> bool {
+    let mut position = 0;
+    let mut last_work = None;
+    let mut reviews = Vec::new();
+    let mut failed = HashSet::new();
+    for line in span.split(|b| *b == b'\n') {
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        visit_objects(&entry, &mut |object| match object["type"].as_str() {
+            Some("tool_use") => {
+                position += 1;
+                let name = object["name"].as_str().unwrap_or_default();
+                if WORK_TOOLS.contains(&name) {
+                    last_work = Some(position);
+                } else if is_review_tool(name) {
+                    let id = object["id"].as_str().unwrap_or_default();
+                    reviews.push((position, id.to_owned()));
+                }
+            }
+            Some("tool_result") if object["is_error"].as_bool() == Some(true) => {
+                if let Some(id) = object["tool_use_id"].as_str() {
+                    failed.insert(id.to_owned());
+                }
+            }
+            _ => {}
+        });
     }
-    Ok((worked && !reviewed).then_some(STOP_REASON))
+    let last_review = reviews
+        .into_iter()
+        .filter(|(_, id)| !failed.contains(id))
+        .map(|(position, _)| position)
+        .max();
+    // None orders below any Some, so no work never blocks and work with no
+    // successful review always does.
+    last_work > last_review
+}
+
+fn is_review_tool(name: &str) -> bool {
+    REVIEW_TOOLS.iter().any(|tool| name.ends_with(tool))
 }
 
 /// Devin SessionStart: same catalog as `session_start`, wrapped in the JSON
@@ -110,50 +155,61 @@ pub fn devin_session_start(vault: &Vault, project: Option<&str>) -> Result<Strin
     .to_string())
 }
 
-/// Devin PostToolUse: flags the session as having done work or having reviewed
-/// it, based on the tool that just ran. Any other tool leaves the flags alone.
-pub fn devin_tool_use(vault: &Vault, input: &str) -> Result<()> {
-    let input: Value = serde_json::from_str(input)?;
-    let (Some(session), Some(tool)) = (input["session_id"].as_str(), input["tool_name"].as_str())
-    else {
-        return Ok(());
-    };
-    let (mut worked, mut reviewed) = vault.devin_hook_state(session)?;
-    if REVIEW_TOOLS.iter().any(|t| tool.ends_with(t)) {
-        reviewed = true;
-    } else if DEVIN_WORK_TOOLS.contains(&tool) {
-        worked = true;
-    } else {
-        return Ok(());
-    }
-    vault.set_devin_hook_state(session, worked, reviewed)
+/// The session a hook payload belongs to: `session_id`, or `conversation_id`
+/// for clients that name it that way.
+fn session_of(input: &Value) -> Option<&str> {
+    input["session_id"]
+        .as_str()
+        .or_else(|| input["conversation_id"].as_str())
 }
 
-/// Devin Stop: returns the review reason once per unreviewed span. The span is
-/// consumed when it blocks, so a stop caused by the agent simply ignoring the
-/// reminder is not blocked again; a stop already continued by this hook
-/// (stop_hook_active) is never blocked either.
+/// Devin PostToolUse: `tool_use` with Devin's file-editing tools.
+pub fn devin_tool_use(vault: &Vault, input: &str) -> Result<()> {
+    tool_use(vault, input, DEVIN_WORK_TOOLS)
+}
+
+/// PostToolUse for the flag-tracked clients (every client but Claude Code, whose
+/// transcript is scanned instead): flags the session as having done work (which a
+/// previous review no longer covers) when the tool is one of `work_tools`, or as
+/// having reviewed it after a review tool. Any other tool leaves the flags alone.
+/// The flags live in `devin_hook_state`, whatever the client.
+pub fn tool_use(vault: &Vault, input: &str, work_tools: &[&str]) -> Result<()> {
+    let input: Value = serde_json::from_str(input)?;
+    let (Some(session), Some(tool)) = (session_of(&input), input["tool_name"].as_str()) else {
+        return Ok(());
+    };
+    if is_review_tool(tool) {
+        vault.mark_devin_review(session)
+    } else if work_tools.contains(&tool) {
+        vault.mark_devin_work(session)
+    } else {
+        Ok(())
+    }
+}
+
+/// Devin Stop: returns the review reason when the span since the last stop
+/// has work not followed by a review. Every judged stop consumes its span, so
+/// a stop caused by the agent simply ignoring the reminder is not blocked
+/// again. A stop already continued by this hook (stop_hook_active) is never
+/// blocked and leaves the flags alone.
+/// The same judgment serves every flag-tracked client.
 pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
     if input["stop_hook_active"].as_bool() == Some(true) {
         return Ok(None);
     }
-    let Some(session) = input["session_id"].as_str() else {
+    let Some(session) = session_of(&input) else {
         return Ok(None);
     };
-    let (worked, reviewed) = vault.devin_hook_state(session)?;
-    if !worked || reviewed {
-        return Ok(None);
-    }
-    vault.set_devin_hook_state(session, false, false)?;
-    Ok(Some(STOP_REASON))
+    let (worked, reviewed) = vault.take_devin_hook_state(session)?;
+    Ok((worked && !reviewed).then_some(STOP_REASON))
 }
 
 /// Devin SessionEnd: drops the session's flag row so the table does not grow
 /// with dead sessions.
 pub fn devin_session_end(vault: &Vault, input: &str) -> Result<()> {
     let input: Value = serde_json::from_str(input)?;
-    if let Some(session) = input["session_id"].as_str() {
+    if let Some(session) = session_of(&input) {
         vault.clear_devin_hook_state(session)?;
     }
     Ok(())
@@ -177,20 +233,18 @@ pub fn devin_approve(input: &str) -> Result<Option<&'static str>> {
     Ok(approved.then_some("Skillvolution-managed tool"))
 }
 
-/// Walks the whole JSON value rather than a fixed path: transcript entry
-/// shapes vary across Claude Code versions, and tool_use blocks can be
-/// nested inside content arrays at different depths.
-fn visit_tool_uses(value: &Value, visit: &mut impl FnMut(&str)) {
+/// Calls `visit` on every object in the value, walking all of it rather than a
+/// fixed path: transcript entry shapes vary across Claude Code versions, and
+/// tool_use/tool_result blocks can be nested inside content arrays at
+/// different depths. Array items are visited in order, so the blocks of one
+/// content array keep their transcript order.
+fn visit_objects(value: &Value, visit: &mut impl FnMut(&Value)) {
     match value {
         Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("tool_use")
-                && let Some(name) = map.get("name").and_then(Value::as_str)
-            {
-                visit(name);
-            }
-            map.values().for_each(|child| visit_tool_uses(child, visit));
+            visit(value);
+            map.values().for_each(|child| visit_objects(child, visit));
         }
-        Value::Array(items) => items.iter().for_each(|child| visit_tool_uses(child, visit)),
+        Value::Array(items) => items.iter().for_each(|child| visit_objects(child, visit)),
         _ => {}
     }
 }

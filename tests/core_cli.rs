@@ -160,7 +160,10 @@ fn default_database_respects_xdg_then_home() {
         command
             .arg("outcomes")
             .env("HOME", dir.path())
-            .env_remove("XDG_DATA_HOME");
+            .env_remove("XDG_DATA_HOME")
+            // On Windows, LOCALAPPDATA takes priority over this XDG/HOME fallback;
+            // remove it so this test exercises the fallback regardless of platform.
+            .env_remove("LOCALAPPDATA");
         let base = if use_xdg {
             let base = dir.path().join("xdg data");
             command.env("XDG_DATA_HOME", &base);
@@ -179,6 +182,49 @@ fn default_database_respects_xdg_then_home() {
 }
 
 #[test]
+#[cfg(windows)]
+fn default_database_prefers_local_app_data_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_app_data = dir.path().join("Local");
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("outcomes")
+        .env("LOCALAPPDATA", &local_app_data)
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(local_app_data.join("skillvolution/skills.db").exists());
+}
+
+#[test]
+#[cfg(windows)]
+fn default_database_keeps_using_a_legacy_home_vault_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_app_data = dir.path().join("Local");
+    let legacy = dir.path().join(".local/share/skillvolution/skills.db");
+    skillvolution::vault::Vault::open(&legacy).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("outcomes")
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("USERPROFILE", dir.path())
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("SKILLVOLUTION_DB")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!local_app_data.join("skillvolution/skills.db").exists());
+}
+
+#[test]
 fn setup_without_project_defaults_bin_and_xdg_database_globally() {
     // `setup` without `--project` now configures the user's global config instead of
     // defaulting the project to the current directory.
@@ -188,7 +234,11 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
     let workspace = tempfile::tempdir().unwrap();
 
     let bin = env!("CARGO_BIN_EXE_skillvolution");
-    let canonical_bin = fs::canonicalize(bin).unwrap();
+    // Absolutized the same way `setup` resolves its own `--bin` default
+    // (`resolve_bin`, via `std::path::absolute`): plain `fs::canonicalize` also
+    // resolves symlinks and, on Windows, returns the verbatim `\\?\` form, neither
+    // of which the app's own command string carries.
+    let canonical_bin = std::path::absolute(bin).unwrap();
 
     let output = Command::new(bin)
         .arg("setup")
@@ -197,6 +247,9 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
         .current_dir(workspace.path())
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &xdg_base)
+        // LOCALAPPDATA outranks XDG_DATA_HOME on Windows; remove it so this
+        // test's expected database path holds on every platform.
+        .env_remove("LOCALAPPDATA")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env("PATH", empty_path.path())
         .output()
@@ -213,8 +266,10 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
         .unwrap();
     // --bin defaulted to this test's own binary, canonicalized.
     assert!(command.contains(canonical_bin.to_str().unwrap()));
-    // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db.
-    let db_path = xdg_base.join("skillvolution/skills.db");
+    // --db defaulted to $XDG_DATA_HOME/skillvolution/skills.db. Two joins, not one
+    // string with an embedded `/`: Windows keeps that `/` literally, while the app's
+    // own path rebuilds the value component-by-component and gets `\`.
+    let db_path = xdg_base.join("skillvolution").join("skills.db");
     assert!(command.contains(db_path.to_str().unwrap()));
     assert!(db_path.is_file(), "setup must initialize the database");
 }

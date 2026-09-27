@@ -13,6 +13,10 @@ use std::{
 struct Env {
     home: tempfile::TempDir,
     xdg_config: PathBuf,
+    // Devin's global config dir on Windows (`%APPDATA%\devin`); unused on Unix, where
+    // Devin reads `$HOME/.config/devin` instead. Sandboxed here too so a global Devin
+    // install doesn't touch (or get confused by) the real user profile.
+    appdata: PathBuf,
     empty_path: tempfile::TempDir,
     // Kept alive only so `bin`/`db`, which point inside it, stay valid for the test.
     _workspace: tempfile::TempDir,
@@ -24,6 +28,7 @@ impl Env {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
         let xdg_config = home.path().join("xdg-config");
+        let appdata = home.path().join("AppData/Roaming");
         let empty_path = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // Named exactly `skillvolution`: hook ownership (see `owned_command`) matches on
@@ -35,6 +40,7 @@ impl Env {
         Self {
             home,
             xdg_config,
+            appdata,
             empty_path,
             _workspace: workspace,
             bin,
@@ -42,9 +48,9 @@ impl Env {
         }
     }
 
-    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/PATH pinned to this
-    /// sandbox and no `claude` on PATH. Callers add `--client` and override PATH to add
-    /// a fake `claude` when needed.
+    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/APPDATA/PATH pinned to
+    /// this sandbox and no `claude` on PATH. Callers add `--client` and override PATH to
+    /// add a fake `claude` when needed.
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         cmd.arg("--db")
@@ -54,8 +60,11 @@ impl Env {
             .arg(&self.bin)
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", &self.xdg_config)
+            .env("APPDATA", &self.appdata)
             .env_remove("CLAUDE_CONFIG_DIR")
-            .env("PATH", self.empty_path.path());
+            .env("PATH", self.empty_path.path())
+            // Outside any git repo, so the project-install warning never fires by accident.
+            .current_dir(self.home.path());
         cmd
     }
 
@@ -67,8 +76,13 @@ impl Env {
         self.xdg_config.join("opencode")
     }
 
+    /// Devin's global config dir: `%APPDATA%\devin` on Windows, `$HOME/.config/devin`
+    /// elsewhere (see `src/setup/devin.rs::global_dir`, which this mirrors).
     fn devin_dir(&self) -> PathBuf {
-        self.home.path().join(".config/devin")
+        #[cfg(windows)]
+        return self.appdata.join("devin");
+        #[cfg(not(windows))]
+        return self.home.path().join(".config/devin");
     }
 }
 
@@ -89,6 +103,10 @@ fn read_json(path: impl AsRef<Path>) -> Value {
 /// `fail_add_json`, every `mcp add-json` call prints an unrelated error to stderr and
 /// exits 1 (not "already exists"), so setup's fresh-add attempt fails outright without
 /// ever calling `mcp remove`.
+///
+/// A `#!/bin/sh` script made executable with `chmod`; unix-only, like every test that
+/// calls it.
+#[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
     let failure = if fail_add_json {
         "if [ \"$1 $2\" = \"mcp add-json\" ]; then echo 'fake add-json boom' >&2; exit 1; fi\n"
@@ -106,19 +124,24 @@ fn write_fake_claude(dir: &Path, log: &Path, fail_add_json: bool) -> PathBuf {
 /// Writes an executable fake `claude` that simulates updating an existing user-scope
 /// `skillvolution` registration: its first `mcp add-json` call fails with "already
 /// exists" (as the real CLI does), `mcp remove` succeeds, and its second `add-json` call
-/// succeeds or fails per `second_add_succeeds`. Counts calls itself (in a sibling file,
-/// via shell builtins only) rather than relying on `grep`/`wc`, since the test process
-/// runs this script with `PATH` pointed only at its own directory.
+/// succeeds or fails per `second_add_succeeds`. The "already exists" message goes to
+/// stdout when `message_on_stdout` (some `claude` versions print it there), else stderr.
+/// Counts calls itself (in a sibling file, via shell builtins only) rather than relying
+/// on `grep`/`wc`, since the test process runs this script with `PATH` pointed only at
+/// its own directory. Unix-only, like every test that calls it (see `write_fake_claude`).
+#[cfg(unix)]
 fn write_fake_claude_already_registered(
     dir: &Path,
     log: &Path,
     second_add_succeeds: bool,
+    message_on_stdout: bool,
 ) -> PathBuf {
     let second = if second_add_succeeds {
         "exit 0\n".to_owned()
     } else {
         "echo 'fake second add-json boom' >&2; exit 1\n".to_owned()
     };
+    let redirect = if message_on_stdout { "" } else { " >&2" };
     let script = format!(
         "echo \"$@\" >> {{log}}\n\
          if [ \"$1 $2\" = \"mcp add-json\" ]; then\n\
@@ -127,7 +150,7 @@ fn write_fake_claude_already_registered(
          \x20\x20count=$((count + 1))\n\
          \x20\x20echo \"$count\" > {{count_file}}\n\
          \x20\x20if [ \"$count\" = \"1\" ]; then\n\
-         \x20\x20\x20\x20echo 'MCP server skillvolution already exists in user config' >&2\n\
+         \x20\x20\x20\x20echo 'MCP server skillvolution already exists in user config'{redirect}\n\
          \x20\x20\x20\x20exit 1\n\
          \x20\x20fi\n\
          \x20\x20{second}\
@@ -144,19 +167,20 @@ fn write_fake_claude_already_registered(
     )
 }
 
+/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`.
+#[cfg(unix)]
 fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     let body = body_template.replace("{log}", &log.display().to_string());
     fs::write(&claude, format!("#!/bin/sh\n{body}")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_owned()
 }
 
+#[cfg(unix)]
 #[test]
 fn global_both_clients_write_expected_files_and_register_mcp() {
     let env = Env::new();
@@ -190,7 +214,7 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert!(!session_cmd.contains("--project"));
     assert_eq!(
         settings["permissions"]["allow"],
-        serde_json::json!(["Task", "mcp__skillvolution"])
+        serde_json::json!(["Agent", "Task", "mcp__skillvolution"])
     );
 
     // OpenCode: opencode.json entry with no --project, skill, AGENTS.md, plugin.
@@ -257,9 +281,14 @@ fn global_claude_code_without_claude_cli_still_writes_files_and_prints_note() {
         stdout.contains("claude mcp add-json --scope user skillvolution"),
         "{stdout}"
     );
-    assert!(stdout.contains(env.bin.to_str().unwrap()), "{stdout}");
+    // The printed command embeds `bin` as a JSON string, so on Windows its
+    // backslashes come out doubled (`\\`) there; escape the same way before
+    // searching for it.
+    let bin_in_json = env.bin.to_str().unwrap().replace('\\', "\\\\");
+    assert!(stdout.contains(&bin_in_json), "{stdout}");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_detect_only_claude_present_configures_claude_and_skips_opencode() {
     // No `--client`: setup must detect that only Claude Code is present (a fake `claude`
@@ -348,6 +377,7 @@ fn global_explicit_client_both_configures_both_even_when_neither_detected() {
     assert!(!stdout.contains("Skipped"), "{stdout}");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     let env = Env::new();
@@ -370,55 +400,122 @@ fn global_add_json_failure_fails_setup_but_keeps_the_files_it_already_wrote() {
     assert!(env.claude_dir().join("settings.json").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn global_mcp_update_of_existing_registration_removes_then_readds() {
     // The first add-json attempt reports the name already exists (as the real `claude`
     // CLI does for a second registration under the same name); setup must then remove
     // the old one and add the new definition, rather than treating the first failure as
-    // fatal and leaving the old (possibly stale) registration in place.
+    // fatal and leaving the old (possibly stale) registration in place. The message is
+    // recognized on either stream.
+    for message_on_stdout in [false, true] {
+        let env = Env::new();
+        let log = env.home.path().join("claude.log");
+        let bin_dir = write_fake_claude_already_registered(
+            &env.home.path().join("bin"),
+            &log,
+            true,
+            message_on_stdout,
+        );
+
+        let output = env
+            .command()
+            .arg("--client")
+            .arg("claude-code")
+            .env("PATH", &bin_dir)
+            .output()
+            .unwrap();
+        assert_success(&output);
+
+        let lines: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                format!(
+                    "mcp add-json --scope user skillvolution {}",
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": env.bin,
+                        "args": ["--db", &env.db, "serve"],
+                    })
+                ),
+                "mcp remove --scope user skillvolution".to_owned(),
+                format!(
+                    "mcp add-json --scope user skillvolution {}",
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": env.bin,
+                        "args": ["--db", &env.db, "serve"],
+                    })
+                ),
+            ],
+            "stdout={message_on_stdout}: {lines:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn global_hanging_claude_cli_times_out() {
     let env = Env::new();
     let log = env.home.path().join("claude.log");
-    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, true);
+    let bin_dir = write_fake_claude_script(
+        &env.home.path().join("bin"),
+        "echo \"$@\" >> {log}\nexec /bin/sleep 60\n",
+        &log,
+    );
 
+    let started = std::time::Instant::now();
     let output = env
         .command()
         .arg("--client")
         .arg("claude-code")
         .env("PATH", &bin_dir)
+        .env("SKILLVOLUTION_CLAUDE_TIMEOUT_SECS", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
+}
+
+#[test]
+fn manual_registration_command_is_shell_quoted() {
+    let mut env = Env::new();
+    let dir = env.home.path().join("it's here");
+    fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("skillvolution");
+    fs::write(&bin, "test binary").unwrap();
+    env.bin = bin.clone();
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
         .output()
         .unwrap();
     assert_success(&output);
 
-    let lines: Vec<String> = fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(
-        lines,
-        vec![
-            format!(
-                "mcp add-json --scope user skillvolution {}",
-                serde_json::json!({
-                    "type": "stdio",
-                    "command": env.bin,
-                    "args": ["--db", &env.db, "serve"],
-                })
-            ),
-            "mcp remove --scope user skillvolution".to_owned(),
-            format!(
-                "mcp add-json --scope user skillvolution {}",
-                serde_json::json!({
-                    "type": "stdio",
-                    "command": env.bin,
-                    "args": ["--db", &env.db, "serve"],
-                })
-            ),
-        ],
-        "{lines:?}"
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json =
+        serde_json::json!({"type": "stdio", "command": bin, "args": ["--db", &env.db, "serve"]})
+            .to_string();
+    let quoted = format!("'{}'", json.replace('\'', r"'\''"));
+    assert!(
+        stdout.contains(&format!(
+            "claude mcp add-json --scope user skillvolution {quoted}"
+        )),
+        "{stdout}"
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
     // The first add-json fails as "already exists", remove succeeds, but the follow-up
@@ -426,7 +523,8 @@ fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
     // never pretend the update succeeded or silently leave no registration at all.
     let env = Env::new();
     let log = env.home.path().join("claude.log");
-    let bin_dir = write_fake_claude_already_registered(&env.home.path().join("bin"), &log, false);
+    let bin_dir =
+        write_fake_claude_already_registered(&env.home.path().join("bin"), &log, false, false);
 
     let output = env
         .command()
@@ -486,6 +584,8 @@ fn non_utf8_db_path_fails_cleanly_before_any_write() {
         .arg("--bin")
         .arg(&bin)
         .env("HOME", home.path())
+        // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+        .env("APPDATA", home.path().join("AppData"))
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env("PATH", empty_path.path())
@@ -531,6 +631,8 @@ fn non_utf8_db_path_is_an_error_not_a_panic_in_every_mode() {
             .arg("--bin")
             .arg(&bin)
             .env("HOME", home.path())
+            // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
+            .env("APPDATA", home.path().join("AppData"))
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", empty_path.path())
@@ -576,6 +678,7 @@ fn global_settings_json_preserves_foreign_hooks_and_other_keys() {
     assert_eq!(session_groups[0]["hooks"][0]["command"], "echo foreign");
 }
 
+#[cfg(unix)]
 #[test]
 fn global_rerun_is_idempotent_without_extra_backups() {
     let env = Env::new();
@@ -849,6 +952,7 @@ fn global_detect_devin_on_path_configures_devin() {
     assert!(env.devin_dir().join("config.json").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn global_detect_all_three_present_configures_all_noninteractively() {
     // No `--client`, all three detected, and no terminal (the test's pipes): every
@@ -866,7 +970,9 @@ fn global_detect_all_three_present_configures_all_noninteractively() {
     assert!(env.opencode_dir().join("opencode.json").exists());
     assert!(env.devin_dir().join("config.json").exists());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains("Skipped"), "{stdout}");
+    for name in ["Claude Code", "OpenCode", "Devin CLI"] {
+        assert!(!stdout.contains(&format!("Skipped {name}")), "{stdout}");
+    }
 }
 
 #[test]
@@ -890,4 +996,70 @@ fn agents_md_block_is_created_in_the_global_config_dir() {
     let text = fs::read_to_string(env.opencode_dir().join("AGENTS.md")).unwrap();
     assert!(text.starts_with("# Team notes\nKeep me.\n"));
     assert!(text.contains("<!-- skillvolution:start -->"));
+}
+
+#[test]
+fn global_claude_setup_warns_about_a_project_install_in_the_current_repo() {
+    let env = Env::new();
+    let repo = env.home.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    let nested = repo.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+
+    // A repo without our entries: no warning.
+    fs::write(
+        repo.join(".mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"x"}}}"#,
+    )
+    .unwrap();
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    // Hooks and a server left by an old project-level setup: one warning per file.
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/skillvolution hook stop"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".mcp.json"),
+        r#"{"mcpServers":{"skillvolution":{"command":"/old/skillvolution"}}}"#,
+    )
+    .unwrap();
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The warning is built from the process's current directory. macOS reports it with
+    // symlinks resolved (/var -> /private/var); Windows reports it as it was set, which
+    // on CI runners is the 8.3 short form (RUNNER~1) that canonicalize() would expand.
+    let canonical = fs::canonicalize(&repo).unwrap();
+    // Windows canonical paths carry a verbatim `\\?\` prefix that current_dir() lacks.
+    let canonical = std::path::PathBuf::from(
+        canonical
+            .to_str()
+            .unwrap()
+            .strip_prefix(r"\\?\")
+            .unwrap_or(canonical.to_str().unwrap()),
+    );
+    for file in [".claude/settings.local.json", ".mcp.json"] {
+        let reported = |root: &std::path::Path| {
+            stderr.contains(&format!("warning: {}", root.join(file).display()))
+        };
+        assert!(reported(&repo) || reported(&canonical), "{stderr}");
+    }
 }

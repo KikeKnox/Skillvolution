@@ -1,12 +1,15 @@
-//! SessionStart/Stop hook merging shared by project (`.claude/settings.local.json`) and
-//! global (`settings.json`) Claude Code setup. Both own their hook entries by matching on
-//! the command text, so a rerun (even with a changed `--bin`/`--db`) replaces the old
-//! entry instead of duplicating it, and any foreign hook is left untouched.
+//! Hook command building and merging shared by all client setups, project and global.
+//! Our hook entries are recognized by their command text, so a rerun (even with a changed
+//! `--bin`/`--db`) replaces the old entry instead of duplicating it, and any foreign hook
+//! is left untouched.
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+// POSIX single-quoting, used for every client's hook command. On Windows, Claude Code
+// runs hook commands through Git Bash, so this quoting is still correct there; Devin's
+// Windows behavior is unverified (see TRACK J report), so it keeps the same quoting.
 pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
@@ -18,6 +21,21 @@ pub fn shell_quote(text: &str) -> String {
 pub fn require_utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str()
         .with_context(|| format!("{what} is not valid UTF-8: {}", path.display()))
+}
+
+/// A hook command line, `<bin> --db <db> hook <event><extra>`, with `bin` and `db`
+/// shell-quoted. `extra` is appended as-is, so it must already be shell-safe (see
+/// `project_flag`).
+pub fn hook_cmd(bin: &Path, db: &Path, event: &str, extra: &str) -> Result<String> {
+    let bin = shell_quote(require_utf8(bin, "--bin")?);
+    let db = shell_quote(require_utf8(db, "--db")?);
+    Ok(format!("{bin} --db {db} hook {event}{extra}"))
+}
+
+/// ` --project '<key>'` for a project's hooks; empty for global ones.
+pub fn project_flag(key: Option<&str>) -> String {
+    key.map(|key| format!(" --project {}", shell_quote(key)))
+        .unwrap_or_default()
 }
 
 /// Splits `command` into shell words: single-quoted segments (including the
@@ -72,18 +90,20 @@ const HOOK_EVENTS: [&str; 5] = [
 ];
 
 /// A Skillvolution-owned hook command: one whose first shell word is a path named
-/// `skillvolution` and whose remaining words contain `hook <event>` as whole words
+/// `skillvolution` (any extension, any case, so `skillvolution.exe` on Windows counts)
+/// and whose remaining words contain `hook <event>` as whole words
 /// (`hook session-start`, `hook stop`, `hook tool-use --client devin`, ...).
 /// Independent of the bin path, db path, or project key, so a changed one replaces
 /// the old entry instead of duplicating it; independent of the command text
 /// otherwise, so a foreign command that merely contains the substring " hook stop"
 /// (e.g. another tool's own `hook stop`, or a `hook stopwatch`) is left alone.
-fn owned_command(command: &str) -> bool {
+pub(super) fn owned_command(command: &str) -> bool {
     let words = shell_words(command);
     let Some(first) = words.first() else {
         return false;
     };
-    if Path::new(first).file_name() != Some(std::ffi::OsStr::new("skillvolution")) {
+    let stem = Path::new(first).file_stem().and_then(|stem| stem.to_str());
+    if !stem.is_some_and(|stem| stem.eq_ignore_ascii_case("skillvolution")) {
         return false;
     }
     words
@@ -91,13 +111,47 @@ fn owned_command(command: &str) -> bool {
         .any(|pair| pair[0] == "hook" && HOOK_EVENTS.contains(&pair[1].as_str()))
 }
 
-fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<()> {
+/// The Skillvolution binary path read back from the first owned hook command
+/// found in `config["hooks"]`, if any. `doctor` uses this to check that the
+/// binary a client's hooks point at still exists.
+pub(crate) fn owned_bin(config: &Value) -> Option<PathBuf> {
+    let hooks = config.get("hooks")?.as_object()?;
+    let command = hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+        .find(|command| owned_command(command))?;
+    shell_words(command).into_iter().next().map(PathBuf::from)
+}
+
+/// Whether `config["hooks"]` holds a Skillvolution-owned command under any event.
+pub fn has_owned(config: &Value) -> bool {
+    let Some(hooks) = config.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+        .any(owned_command)
+}
+
+/// Removes our entries from `hooks[event]`, and any group they leave empty. Returns
+/// whether anything was removed.
+fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<bool> {
     let Some(value) = hooks.get_mut(event) else {
-        return Ok(());
+        return Ok(false);
     };
     let groups = value
         .as_array_mut()
         .with_context(|| format!("hooks.{event} must be an array"))?;
+    let mut removed = false;
     for group in groups.iter_mut() {
         let group = group
             .as_object_mut()
@@ -106,16 +160,18 @@ fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<()> {
             let entries = entries
                 .as_array_mut()
                 .with_context(|| format!("hooks.{event}[].hooks must be an array"))?;
+            let count = entries.len();
             entries.retain(|entry| {
                 !entry
                     .get("command")
                     .and_then(Value::as_str)
                     .is_some_and(owned_command)
             });
+            removed |= entries.len() != count;
         }
     }
     groups.retain(|group| !matches!(group.get("hooks"), Some(Value::Array(e)) if e.is_empty()));
-    Ok(())
+    Ok(removed)
 }
 
 fn append_group(
@@ -138,7 +194,10 @@ fn append_group(
 }
 
 /// Replaces our entries in `config["hooks"]` with `entries` (event, optional
-/// `matcher` regex, command), preserving every other event and every foreign hook.
+/// `matcher` regex, command), preserving every foreign hook. Our entries are stripped
+/// from every event, not just the ones merged now, so a hook an older version wrote
+/// under an event it no longer uses doesn't linger; an event that stripping leaves
+/// empty is removed.
 pub fn merge(config: &mut Value, entries: &[(&str, Option<String>, String)]) -> Result<()> {
     let hooks = config
         .as_object_mut()
@@ -154,11 +213,54 @@ fn merge_entries(
     hooks: &mut Map<String, Value>,
     entries: &[(&str, Option<String>, String)],
 ) -> Result<()> {
+    let (_, emptied) = strip_owned_from_all(hooks)?;
     for (event, matcher, command) in entries {
-        strip_owned(hooks, event)?;
         append_group(hooks, event, matcher.as_deref(), command.clone())?;
     }
+    // Checked after appending, so an event we re-add keeps its place in the file.
+    hooks.retain(|event, groups| {
+        !(emptied.contains(event) && groups.as_array().is_some_and(Vec::is_empty))
+    });
     Ok(())
+}
+
+/// Strips our commands from every event in `hooks`. Returns whether anything was
+/// removed, and which events that stripping alone left with an empty group array
+/// (before any new entries are appended back).
+fn strip_owned_from_all(hooks: &mut Map<String, Value>) -> Result<(bool, Vec<String>)> {
+    let events: Vec<String> = hooks.keys().cloned().collect();
+    let mut removed_anything = false;
+    let mut emptied = Vec::new();
+    for event in events {
+        let removed = strip_owned(hooks, &event)?;
+        removed_anything |= removed;
+        if removed && hooks[&event].as_array().is_some_and(Vec::is_empty) {
+            emptied.push(event);
+        }
+    }
+    Ok((removed_anything, emptied))
+}
+
+/// The removal counterpart of `merge`: strips our commands from every event of
+/// `config["hooks"]` without adding anything back, dropping any event that leaves empty
+/// and the whole `hooks` object if that in turn empties it. A config with no `hooks` key
+/// at all, or none of ours, is left untouched. Returns whether anything was removed.
+pub fn remove_owned(config: &mut Value) -> Result<bool> {
+    let Some(root) = config.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(hooks_value) = root.get_mut("hooks") else {
+        return Ok(false);
+    };
+    let hooks = hooks_value
+        .as_object_mut()
+        .context("hooks must be an object")?;
+    let (removed, emptied) = strip_owned_from_all(hooks)?;
+    hooks.retain(|event, _| !emptied.contains(event));
+    if hooks.is_empty() {
+        root.remove("hooks");
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -195,12 +297,107 @@ mod tests {
         assert!(owned_command(
             "/opt/skillvolution hook session-start --client devin"
         ));
+        // Gemini CLI's commands carry the same --client flag, so a rerun replaces
+        // rather than duplicates its hook entries too.
+        for event in ["session-start", "tool-use", "stop", "session-end"] {
+            assert!(owned_command(&format!(
+                "/opt/skillvolution hook {event} --client gemini"
+            )));
+        }
     }
 
     #[test]
     fn a_skillvolution_named_binary_with_unrelated_args_is_not_owned() {
         assert!(!owned_command("/opt/skillvolution hook stopwatch"));
         assert!(!owned_command("/opt/skillvolution serve"));
+    }
+
+    #[test]
+    fn windows_style_binary_names_are_owned_case_insensitively() {
+        assert!(owned_command("/opt/skillvolution.exe hook stop"));
+        assert!(owned_command("/opt/Skillvolution.EXE hook session-start"));
+        assert!(!owned_command("/opt/skillvolution-helper.exe hook stop"));
+    }
+
+    #[test]
+    fn merge_strips_owned_hooks_under_every_event_and_keeps_foreign_ones() {
+        let ours = |event: &str| json!({"type": "command", "command": format!("/old/skillvolution hook {event}")});
+        let foreign = json!({"type": "command", "command": "echo foreign"});
+        let mut config = json!({"hooks": {
+            // A stale event from an older version that this merge doesn't write.
+            "SessionEnd": [{"hooks": [ours("session-end")]}],
+            // Our hook sharing a group with a foreign one.
+            "PreToolUse": [{"matcher": "Bash", "hooks": [ours("tool-use"), foreign.clone()]}],
+            "Stop": [{"hooks": [ours("stop")]}],
+        }});
+
+        merge(
+            &mut config,
+            &[("Stop", None, "/new/skillvolution hook stop".to_owned())],
+        )
+        .unwrap();
+
+        let hooks = &config["hooks"];
+        assert!(hooks.get("SessionEnd").is_none(), "{hooks}");
+        assert_eq!(
+            hooks["PreToolUse"],
+            json!([{"matcher": "Bash", "hooks": [foreign]}])
+        );
+        assert_eq!(
+            hooks["Stop"],
+            json!([{"hooks": [{"type": "command", "command": "/new/skillvolution hook stop", "timeout": 10}]}])
+        );
+    }
+
+    #[test]
+    fn merge_keeps_an_event_the_user_left_empty() {
+        let mut config = json!({"hooks": {"Notification": []}});
+        merge(
+            &mut config,
+            &[("Stop", None, "/x/skillvolution hook stop".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(config["hooks"]["Notification"], json!([]));
+    }
+
+    #[test]
+    fn remove_owned_strips_our_hooks_and_drops_emptied_events_and_the_hooks_object() {
+        let ours = |event: &str| json!({"type": "command", "command": format!("/old/skillvolution hook {event}")});
+        let foreign = json!({"type": "command", "command": "echo foreign"});
+        let mut config = json!({"model": "existing", "hooks": {
+            "SessionStart": [{"hooks": [ours("session-start")]}],
+            "PreToolUse": [{"matcher": "Bash", "hooks": [ours("tool-use"), foreign.clone()]}],
+            "Stop": [{"hooks": [ours("stop")]}],
+        }});
+
+        assert!(remove_owned(&mut config).unwrap());
+
+        assert_eq!(
+            config,
+            json!({
+                "model": "existing",
+                "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [foreign]}]},
+            })
+        );
+    }
+
+    #[test]
+    fn remove_owned_drops_the_hooks_object_entirely_when_only_ours_was_there() {
+        let mut config = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/x/skillvolution hook stop"}]}]}});
+        assert!(remove_owned(&mut config).unwrap());
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn remove_owned_is_a_no_op_without_a_hooks_key_or_our_entries() {
+        let mut config = json!({"model": "existing"});
+        assert!(!remove_owned(&mut config).unwrap());
+        assert_eq!(config, json!({"model": "existing"}));
+
+        let mut config = json!({"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "echo foreign"}]}]}});
+        let before = config.clone();
+        assert!(!remove_owned(&mut config).unwrap());
+        assert_eq!(config, before);
     }
 
     #[test]

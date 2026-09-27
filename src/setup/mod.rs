@@ -1,20 +1,30 @@
 mod claude;
 mod claude_cli;
-mod detect;
+mod client;
+mod codex;
+mod common;
+mod cursor;
 mod devin;
 mod fs_safe;
+mod gemini;
 mod global;
-mod global_claude;
-mod global_devin;
-mod global_opencode;
 mod hooks;
+mod inspect;
 mod opencode;
 mod permissions;
 mod plugin;
 mod prompt;
+mod remove;
+
+pub(crate) use client::{ClientKind, Clients, Scope};
+pub(crate) use inspect::{
+    claude_mcp_registered, configured_bin, double_install_warning, missing_configured_bin,
+    skill_marker_version,
+};
+pub(crate) use remove::Edit;
 
 use crate::vault::Vault;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -22,66 +32,10 @@ use std::{
 
 pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
 
-/// The set of AI clients a setup run configures, whether chosen explicitly via
-/// `--client` or detected/prompted for a global run.
-#[derive(Clone, Copy, Default)]
-struct Clients {
-    claude_code: bool,
-    opencode: bool,
-    devin: bool,
-}
-
-impl Clients {
-    fn all() -> Self {
-        Self {
-            claude_code: true,
-            opencode: true,
-            devin: true,
-        }
-    }
-
-    fn any(self) -> bool {
-        self.claude_code || self.opencode || self.devin
-    }
-
-    /// (selected, display name, `--client` token) in stable order.
-    fn list(self) -> [(bool, &'static str, &'static str); 3] {
-        [
-            (self.claude_code, "Claude Code", "claude-code"),
-            (self.opencode, "OpenCode", "opencode"),
-            (self.devin, "Devin CLI", "devin"),
-        ]
-    }
-
-    /// The `--client` tokens for the selected clients, in stable order.
-    fn cli_names(self) -> Vec<&'static str> {
-        self.list()
-            .into_iter()
-            .filter_map(|(on, _, token)| on.then_some(token))
-            .collect()
-    }
-
-    /// Maps `--client` tokens to flags: `all` selects every client, `both` keeps
-    /// its original meaning (Claude Code + OpenCode).
-    fn parse(tokens: &[String]) -> Result<Self> {
-        let mut clients = Clients::default();
-        for token in tokens {
-            match token.as_str() {
-                "all" => clients = Clients::all(),
-                "both" => {
-                    clients.claude_code = true;
-                    clients.opencode = true;
-                }
-                "claude-code" => clients.claude_code = true,
-                "opencode" => clients.opencode = true,
-                "devin" => clients.devin = true,
-                other => bail!("unknown --client {other}"),
-            }
-        }
-        ensure!(clients.any(), "--client selects no clients");
-        Ok(clients)
-    }
-}
+/// A file setup writes, with its full new content. `write_clients` turns each into an
+/// `Edit::Write` before handing it to `write_all`; `remove::run` builds `Edit`s directly,
+/// since a removal can also delete a file outright.
+pub(crate) type Change = (PathBuf, String);
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
@@ -89,14 +43,18 @@ pub struct SetupArgs {
     /// project then shares.
     #[arg(long)]
     project: Option<PathBuf>,
-    /// Which client(s) to configure: a comma-separated list of `claude-code`,
-    /// `opencode`, `devin`, `all`, or `both` (claude-code + opencode, kept for
-    /// backwards compatibility). Defaults to `all` for `--project`; for global
-    /// setup, omitting it detects installed clients and asks which to configure.
+    /// Which client(s) to configure: a comma-separated list of `claude-code`, `opencode`,
+    /// `devin`, `codex`, `gemini`, `cursor`, `all` (all clients), or `both` (claude-code +
+    /// opencode, for backwards compatibility). For `--project`: omit to configure all
+    /// clients, or specify some. For global setup: omit to detect installed clients and
+    /// ask interactively, or specify some. For `--remove`: omit to remove from all
+    /// configured clients, or specify some.
     #[arg(
         long,
         value_delimiter = ',',
-        value_parser = ["all", "both", "opencode", "claude-code", "devin"]
+        value_parser = [
+            "all", "both", "opencode", "claude-code", "devin", "codex", "gemini", "cursor"
+        ]
     )]
     client: Vec<String>,
     /// Path to the skillvolution binary; defaults to the currently running executable.
@@ -109,6 +67,14 @@ pub struct SetupArgs {
     /// Requires --project.
     #[arg(long)]
     project_key: Option<String>,
+    /// Remove Skillvolution from the selected clients instead of configuring them,
+    /// keeping every entry setup does not own.
+    #[arg(long, conflicts_with_all = ["bin", "project_key"])]
+    remove: bool,
+    /// Print a unified diff of every file setup would write (or remove), without writing
+    /// anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl SetupArgs {
@@ -126,14 +92,32 @@ pub fn run(args: SetupArgs) -> Result<()> {
         args.project.is_some() || args.project_key.is_none(),
         "--project-key requires --project"
     );
-    let bin = resolve_bin(args.bin)?;
-    let db = resolve_db(args.db)?;
-    // Client configs embed these paths as JSON strings, which must be valid UTF-8.
+    if args.remove {
+        let explicit = if args.client.is_empty() {
+            None
+        } else {
+            Some(Clients::parse(&args.client)?)
+        };
+        let db = resolve_db(args.db)?;
+        return remove::run(explicit, args.project.as_deref(), &db, args.dry_run);
+    }
+    let bin = resolve_bin(args.bin.clone())?;
+    // Client configs embed this path as a JSON string, which must be valid UTF-8.
     hooks::require_utf8(&bin, "--bin")?;
-    hooks::require_utf8(&db, "--db")?;
+    if args.dry_run {
+        let db = resolve_db(args.db.clone())?;
+        hooks::require_utf8(&db, "--db")?;
+        return dry_run_install(&args, &bin, &db);
+    }
 
     match args.project {
         Some(project) => {
+            let db = resolve_db(args.db)?;
+            hooks::require_utf8(&db, "--db")?;
+            // Before any client config is written, so an unusable --db leaves no config
+            // pointing at it.
+            Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+            crate::vault::warn_if_unsafe(&db);
             let clients = if args.client.is_empty() {
                 Clients::all()
             } else {
@@ -142,26 +126,100 @@ pub fn run(args: SetupArgs) -> Result<()> {
             run_project(project, clients, &bin, &db, args.project_key.as_deref())?;
         }
         None => {
-            if args.client.is_empty() {
-                global::run_detected(&bin, &db)?;
+            let clients = if args.client.is_empty() {
+                None
             } else {
-                global::run(Clients::parse(&args.client)?, &bin, &db)?;
-            }
+                Some(Clients::parse(&args.client)?)
+            };
+            global::run(clients, &bin, args.db)?;
         }
     }
-
-    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     Ok(())
 }
 
+/// `--dry-run` without `--remove`: computes exactly the edits a real run would write and
+/// prints their diffs, plus the `claude` CLI command a global Claude Code install would
+/// run, without writing anything or opening the vault (so it never creates the database
+/// file). Client selection mirrors the real run, except that global setup with no
+/// `--client` uses detection alone (skipping the interactive prompt, since a preview
+/// shouldn't block on stdin).
+fn dry_run_install(args: &SetupArgs, bin: &Path, db: &Path) -> Result<()> {
+    match &args.project {
+        Some(project) => {
+            let project = fs::canonicalize(project).context("project must exist")?;
+            ensure!(project.is_dir(), "project must be a directory");
+            let key = resolve_project_key(args.project_key.as_deref(), &project)?;
+            let clients = if args.client.is_empty() {
+                Clients::all()
+            } else {
+                Clients::parse(&args.client)?
+            };
+            print_install_diff(
+                clients,
+                Scope::Project {
+                    dir: &project,
+                    key: &key,
+                },
+                bin,
+                db,
+            )
+        }
+        None => {
+            let clients = if args.client.is_empty() {
+                ClientKind::ALL
+                    .into_iter()
+                    .filter(|kind| kind.detect())
+                    .collect()
+            } else {
+                Clients::parse(&args.client)?
+            };
+            print_install_diff(clients, Scope::Global, bin, db)
+        }
+    }
+}
+
+/// Prints the diffs `clients` would write for `scope`, plus the `claude mcp add-json`
+/// command a global Claude Code install would run. Prints "No changes." if there's
+/// nothing to show.
+fn print_install_diff(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Result<()> {
+    let mut changes = Vec::new();
+    for kind in clients.iter() {
+        changes.extend(kind.changes(scope, bin, db)?);
+    }
+    let edits: Vec<Edit> = changes
+        .into_iter()
+        .map(|(path, content)| Edit::Write(path, content))
+        .collect();
+    let mut printed = remove::print_diffs(&edits);
+    if matches!(scope, Scope::Global) && clients.contains(ClientKind::ClaudeCode) {
+        println!("Would run: {}", claude_cli::add_json_command(bin, db));
+        printed = true;
+    }
+    if !printed {
+        println!("No changes.");
+    }
+    Ok(())
+}
+
+/// Makes `bin` absolute without resolving symlinks: package managers (Homebrew, Nix,
+/// mise) expose a stable symlink into a versioned store path, and recording the
+/// resolved target would break every config on the next upgrade.
 fn resolve_bin(bin: Option<PathBuf>) -> Result<PathBuf> {
     let bin = match bin {
         Some(bin) => bin,
         None => std::env::current_exe().context("determine current executable")?,
     };
-    let bin = fs::canonicalize(&bin).context("binary must exist")?;
+    let bin = std::path::absolute(&bin).context("resolve binary path")?;
+    ensure!(bin.exists(), "binary must exist: {}", bin.display());
     ensure!(bin.is_file(), "binary must be a regular file");
     Ok(bin)
+}
+
+/// Registers the MCP server at user scope through the `claude` CLI, exactly as global
+/// setup does. Exposed to `relocate`, which is outside this module's tree and so can't
+/// reach `claude::register_mcp` (`pub(super)`) directly.
+pub(crate) fn register_claude_code_mcp(bin: &Path, db: &Path) -> Result<String> {
+    claude::register_mcp(bin, db)
 }
 
 fn resolve_db(db: Option<PathBuf>) -> Result<PathBuf> {
@@ -188,58 +246,116 @@ fn run_project(
     ensure!(project.is_dir(), "project must be a directory");
     let key = resolve_project_key(project_key, &project)?;
 
-    let mut changes = Vec::new();
-    if clients.opencode {
-        changes.extend(opencode::changes(&project, bin, db, &key)?);
-    }
-    if clients.claude_code {
-        changes.extend(claude::changes(&project, bin, db, &key)?);
-    }
-    if clients.devin {
-        changes.extend(devin::changes(&project, bin, db, &key)?);
-    }
-    write_all(changes)?;
+    let scope = Scope::Project {
+        dir: &project,
+        key: &key,
+    };
+    write_clients(clients, scope, bin, db)?;
+    let tokens: Vec<&str> = clients.iter().map(ClientKind::token).collect();
     println!(
         "Configured {} for {}.",
-        clients.cli_names().join(", "),
+        tokens.join(", "),
         project.display()
     );
     Ok(())
 }
 
+/// Writes every selected client's files for `scope`, all computed (and so validated)
+/// before the first write.
+fn write_clients(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Result<()> {
+    let mut changes = Vec::new();
+    for kind in clients.iter() {
+        changes.extend(kind.changes(scope, bin, db)?);
+    }
+    let edits = changes
+        .into_iter()
+        .map(|(path, content)| Edit::Write(path, content))
+        .collect();
+    write_all(edits)
+}
+
 /// Validates every write target before touching any of them, so a bad target further
-/// down the list leaves everything already-checked untouched.
-fn write_all(changes: Vec<(PathBuf, String)>) -> Result<()> {
-    for (path, _) in &changes {
+/// down the list leaves everything already-checked untouched. If an edit still fails,
+/// the edits applied before it are put back as they were (see `roll_back`).
+pub(crate) fn write_all(edits: Vec<Edit>) -> Result<()> {
+    for edit in &edits {
+        let path = edit.path();
         fs_safe::check_target(path)?;
-        if path.exists() {
-            fs_safe::backup_path(path)?;
-        }
+        fs_safe::check_backups(path)?;
         for parent in path.ancestors().skip(1) {
             if parent.exists() {
                 ensure!(parent.is_dir(), "not a directory: {}", parent.display());
             }
         }
     }
-    for (path, content) in changes {
-        fs_safe::write(&path, &content).with_context(|| {
-            format!(
-                "setup failed at {}; earlier changes may exist; inspect .skillvolution.bak backups",
-                path.display()
-            )
-        })?;
+    // Each edited path with its previous content (`None`: it didn't exist).
+    let mut written: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+    for edit in edits {
+        let path = edit.path().to_owned();
+        let result = apply(&edit);
+        match result {
+            Ok(old) => written.push((path, old)),
+            Err(e) => {
+                let context = match roll_back(written) {
+                    Ok(()) => format!(
+                        "setup failed at {}; earlier changes were rolled back",
+                        path.display()
+                    ),
+                    Err(rollback) => format!(
+                        "setup failed at {}; rolling back earlier changes also failed ({rollback:#}); \
+                         inspect .skillvolution.bak backups",
+                        path.display()
+                    ),
+                };
+                return Err(e.context(context));
+            }
+        }
     }
     Ok(())
 }
 
-/// Resolves `path` to an absolute path: canonicalizes it (also resolving symlinks) when
-/// it exists, otherwise absolutizes it against the current directory and lexically
-/// collapses `.`/`..` components. Unlike a plain existence check, this lets a `--db` path
-/// that doesn't exist yet still contain `..`.
-fn absolutize(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()));
+/// Applies one edit, returning the path's previous content (`None` if it didn't exist)
+/// so a later failure can restore it. Every `removals` implementation only emits a
+/// `Delete` for a path it already found on disk, so deleting an already-absent one here
+/// is not expected; if it happens anyway, it's a no-op that reports `None`, same as a
+/// path that never existed.
+fn apply(edit: &Edit) -> Result<Option<Vec<u8>>> {
+    let path = edit.path();
+    let old = fs_safe::read_optional_bytes(path)?;
+    match edit {
+        Edit::Write(_, content) => fs_safe::write(path, content)?,
+        Edit::Delete(_) => {
+            if old.is_some() {
+                fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
     }
+    Ok(old)
+}
+
+/// Undoes `written` newest first: a created file is deleted, a changed one gets its
+/// previous content back. Keeps going past a failure and reports the first one.
+fn roll_back(written: Vec<(PathBuf, Option<Vec<u8>>)>) -> Result<()> {
+    let mut first_error = None;
+    for (path, old) in written.into_iter().rev() {
+        let result = match old {
+            None => fs::remove_file(&path).with_context(|| format!("remove {}", path.display())),
+            Some(old) => fs_safe::restore(&path, &old),
+        };
+        if let Err(e) = result {
+            first_error.get_or_insert(e);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Resolves `path` to an absolute path lexically: absolutizes it against the current
+/// directory and collapses `.`/`..` components, without resolving symlinks. The vault is
+/// therefore spelled the same in every config whether or not it existed when setup ran
+/// (resolving symlinks only once the file exists made reruns rewrite every config, e.g.
+/// under macOS's `/var` -> `/private/var`), a `--db` that doesn't exist yet may still
+/// contain `..`, and the result is never Windows' verbatim `\\?\C:\...` form.
+pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         match component {
@@ -265,4 +381,27 @@ fn resolve_project_key(explicit: Option<&str>, project: &Path) -> Result<String>
     };
     crate::vault::validate_id(&key).context("invalid --project-key")?;
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolutize_is_the_same_before_and_after_the_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        fs::create_dir(&link).unwrap();
+        let db = link.join("skills.db");
+        let before = absolutize(&db).unwrap();
+        fs::write(&db, "").unwrap();
+        assert_eq!(absolutize(&db).unwrap(), before);
+        assert!(before.starts_with(&link), "{before:?}");
+        assert!(!before.to_str().unwrap().starts_with(r"\\?\"), "{before:?}");
+    }
 }

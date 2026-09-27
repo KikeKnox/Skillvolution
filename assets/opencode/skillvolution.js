@@ -8,20 +8,28 @@ import { execFile } from "node:child_process";
 
 const BIN = __SKILLVOLUTION_BIN__;
 const DB = __SKILLVOLUTION_DB__;
+// The project scope key for a project-mode setup; null for a global (per-user)
+// setup, where the running MCP server's project is detected from cwd instead.
+const PROJECT_KEY = __SKILLVOLUTION_PROJECT_KEY__;
 
 // Keep in sync with STOP_REASON in src/hook.rs.
 const REVIEW_REMINDER =
-  "Skillvolution review: this session did work that has not been reviewed yet. " +
-  "Before finishing, follow the Report and Reflect steps of the evolution skill: " +
-  "call report_skill_outcome for any vault skill you applied, and for any candidate " +
-  "lesson that meets every lesson criterion, dispatch a fresh subagent now — " +
-  "without asking the user — to judge it " +
-  "(global scope, project scope, or discard), then call publish_skill with the verdict and its reason.";
+  "Skillvolution review: you edited files since the last review. " +
+  "Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, " +
+  "and for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent now " +
+  "— do not ask the user first — to judge it " +
+  "(global scope, project scope, or discard), then call publish_skill with the verdict and its reason. " +
+  'If there is nothing to report or evaluate, reply only "No lesson."';
 
-// OpenCode built-in tool ids that change files or run commands.
+// OpenCode built-in tool ids that edit files.
 const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"]);
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
 const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
+
+// Session-keyed maps are pruned on session.deleted, but a long-running
+// `opencode serve` can outlive that event for some sessions; capping every
+// map bounds their growth regardless.
+const MAX_TRACKED_SESSIONS = 500;
 
 export const SkillvolutionPlugin = async ({ client, directory }) => {
   const log = (level, message) =>
@@ -32,8 +40,14 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
   const catalogs = new Map(); // sessionID -> Promise<string>
   const sessions = new Map(); // sessionID -> { worked, reviewed, remind }
   const parents = new Map(); // sessionID -> Promise<parentID | undefined>
+  const capped = (map) => {
+    while (map.size > MAX_TRACKED_SESSIONS) map.delete(map.keys().next().value);
+  };
   const state = (id) => {
-    if (!sessions.has(id)) sessions.set(id, { worked: false, reviewed: false, remind: false });
+    if (!sessions.has(id)) {
+      sessions.set(id, { worked: false, reviewed: false, remind: false });
+      capped(sessions);
+    }
     return sessions.get(id);
   };
 
@@ -42,12 +56,17 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
   const env = { ...process.env };
   delete env.CLAUDE_PROJECT_DIR;
 
-  const loadCatalog = () =>
+  const loadCatalog = (sessionID) =>
     new Promise((resolve) => {
+      const args = ["--db", DB, "hook", "session-start"];
+      if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
-      execFile(BIN, ["--db", DB, "hook", "session-start"], options, (error, stdout) => {
+      execFile(BIN, args, options, (error, stdout) => {
         if (error) {
           log("warn", `catalog unavailable: ${error.message}`);
+          // Don't cache the failure: retry on the next turn instead of an
+          // empty catalog for the rest of the session.
+          catalogs.delete(sessionID);
           return resolve("");
         }
         resolve(stdout.trim());
@@ -66,15 +85,50 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
           .then(({ data }) => data?.parentID)
           .catch(() => undefined),
       );
+      capped(parents);
     }
     return parents.get(id);
   };
   const ownerOf = async (id) => (await parentOf(id)) ?? id;
 
+  let warnedMissingSessionID = false;
+
+  const handleEvent = async (event) => {
+    const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
+    if (!sessionID) return;
+    if (event.type === "session.idle" || event.type === "session.error") {
+      // A subagent's own idle fires mid-parent-turn; only the parent turn's
+      // own idle should judge and reset the shared flags.
+      if (event.type === "session.idle" && (await parentOf(sessionID))) return;
+      const s = sessions.get(await ownerOf(sessionID));
+      if (!s) return;
+      // Idle: a turn that did work without reviewing earns a reminder on the
+      // following turns; each span is judged once. Error: aborted or failed
+      // turns are not reviewed; a pending reminder survives either way.
+      if (event.type === "session.idle" && s.worked && !s.reviewed) s.remind = true;
+      s.worked = s.reviewed = false;
+    } else if (event.type === "session.deleted") {
+      sessions.delete(sessionID);
+      catalogs.delete(sessionID);
+      parents.delete(sessionID);
+    }
+  };
+
   return {
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
-      if (!sessionID) return; // e.g. agent generation outside a session
-      if (!catalogs.has(sessionID)) catalogs.set(sessionID, loadCatalog());
+      if (!sessionID) {
+        // e.g. agent generation outside a session: nothing to key the
+        // catalog cache or review state on, so this call is skipped.
+        if (!warnedMissingSessionID) {
+          warnedMissingSessionID = true;
+          console.error("skillvolution: chat.system.transform called without a sessionID; catalog and review reminder skipped for this call");
+        }
+        return;
+      }
+      if (!catalogs.has(sessionID)) {
+        catalogs.set(sessionID, loadCatalog(sessionID));
+        capped(catalogs);
+      }
       const catalog = await catalogs.get(sessionID);
       if (catalog) output.system.push(catalog);
       if (sessions.get(sessionID)?.remind) output.system.push(REVIEW_REMINDER);
@@ -89,22 +143,10 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       }
     },
 
-    event: async ({ event }) => {
-      const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
-      if (!sessionID) return;
-      if (event.type === "session.idle" || event.type === "session.error") {
-        const s = sessions.get(await ownerOf(sessionID));
-        if (!s) return;
-        // Idle: a turn that did work without reviewing earns a reminder on the
-        // following turns; each span is judged once. Error: aborted or failed
-        // turns are not reviewed; a pending reminder survives either way.
-        if (event.type === "session.idle" && s.worked && !s.reviewed) s.remind = true;
-        s.worked = s.reviewed = false;
-      } else if (event.type === "session.deleted") {
-        sessions.delete(sessionID);
-        catalogs.delete(sessionID);
-        parents.delete(sessionID);
-      }
+    // Fire-and-forget: awaiting the parent lookup here would hold up event
+    // delivery for unrelated sessions.
+    event: ({ event }) => {
+      void handleEvent(event).catch((error) => log("warn", `event handling failed: ${error.message}`));
     },
   };
 };

@@ -1,0 +1,3 @@
+# Keep LF everywhere: include_str! embeds assets byte for byte, and a CRLF
+# checkout (core.autocrlf on Windows) would ship them with \r\n.
+* text=auto eol=lf

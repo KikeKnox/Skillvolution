@@ -1,100 +1,204 @@
 # Architecture
 
-## Modules
+Skillvolution is a single Rust binary (`skillvolution`) that stores reusable
+"skills" (verified lessons) in a SQLite vault, serves them to agent clients
+over MCP (JSON-RPC on stdio), and wires each client up via `setup` and
+client hooks.
 
-- `src/vault/mod.rs` — opens the SQLite connection (WAL, busy timeout, foreign keys), runs schema
-  migration, and holds shared validation helpers, transcript-offset storage, and deprecation
-  toggling. Validation includes `validate_sections` (the four required `content` headings, in
-  order) and `validate_no_secrets` (rejects credential-shaped values in `description`, `content`,
-  and `evidence` by prefix/JWT/bearer-token shape); there is deliberately no generic `key=value`
-  rule, since that flags legitimate documentation about *how* to configure a credential (e.g.
-  `api_key=$OPENAI_API_KEY`) as if it were one.
-- `src/vault/revisions.rs` — `propose` (publishes immediately), `inspect`, `diff`, `get`.
-- `src/vault/search.rs` — builds and ranks FTS5 queries.
-- `src/vault/outcomes.rs` — records and summarizes `helped`/`failed`/`not_applicable` reports.
-- `src/vault/schema.sql` — table and view definitions (below).
-- `src/mcp.rs` — JSON-RPC framing over stdio, protocol negotiation, tool dispatch.
-- `src/hook.rs` — the SessionStart catalog text and the Stop transcript scan, independent of stdio
-  so both are unit-testable against fixture transcripts.
-- `src/main.rs` — CLI parsing and dispatch (`clap`); `resolve_project` picks `--project` when
-  given, else the working directory's git repository, falling back to `CLAUDE_PROJECT_DIR`'s, for
-  `serve` and `hook session-start`.
-- `src/project.rs` — derives a project key from a directory's enclosing git repository root
-  (lowercased, non-alphanumeric runs collapsed to `-`, ≤64 bytes); `None` outside a git repo. Used
-  for runtime auto-detection and to default `setup --project`'s `--project-key`.
-- `src/setup/mod.rs` — resolves the binary/database paths and dispatches to project setup
-  (`--project PATH`) or global, per-user setup (no `--project`).
-- `src/setup/fs_safe.rs` — shared filesystem/JSON helpers: strict-JSON parsing with duplicate-key
-  rejection, marker-block merge, managed-file ownership checks, backup-before-write.
-- `src/setup/hooks.rs` — merges SessionStart/Stop hook entries into a settings JSON value, shared
-  by project (`.claude/settings.local.json`) and global (`~/.claude/settings.json`) setup.
-- `src/setup/plugin.rs` — renders the OpenCode plugin asset with `--bin`/`--db` substituted.
-- `src/setup/claude.rs` / `src/setup/opencode.rs` — per-project changes; `src/setup/global.rs`,
-  `global_claude.rs`, `global_opencode.rs` — the global equivalents. The global Claude Code side
-  registers its MCP server via the `claude` CLI (`src/setup/claude_cli.rs`) instead of editing
-  `~/.claude.json` directly, which Claude Code itself rewrites. `src/setup/detect.rs` decides which
-  clients global setup configures when `--client` is omitted.
-- `install.sh` — one-command install: runs the release installer, then `skillvolution setup`.
-- `assets/evolution/SKILL.md` — the native `evolution` skill installed for both clients.
-- `assets/opencode/skillvolution.js` — the OpenCode plugin template: catalog injection plus the
-  post-idle review reminder.
+## Module map
+
+### CLI / entry
+
+| Module | Role |
+|---|---|
+| `main.rs` | Arg parsing, command dispatch, `hook` subcommands, project detection |
+| `lib.rs` | Re-exports the modules so integration tests and the binary share them |
+
+### MCP
+
+| Module | Role |
+|---|---|
+| `mcp.rs` | JSON-RPC server loop on stdio; `initialize`, `tools/list`, `tools/call`; tool argument validation |
+
+### Hooks
+
+| Module | Role |
+|---|---|
+| `hook.rs` | `session-start`, `tool-use`, `stop`, `session-end`, `approve` implementations; Claude transcript scan; per-session work/review flags |
+
+### Vault
+
+| Module | Role |
+|---|---|
+| `vault/mod.rs` | `Vault` connection setup, pragmas, migrations, validation helpers, deprecate/undeprecate |
+| `vault/schema.sql` | Table/view definitions for the initial schema |
+| `vault/search.rs` | FTS5 search, ranking, catalog listing |
+| `vault/revisions.rs` | Publish logic: versioning, scope, optimistic concurrency, proven-version guard |
+| `vault/outcomes.rs` | Outcome recording and listing (`helped`/`failed`/`not_applicable`) |
+| `vault/transfer.rs` | `purge`, JSON export/import, `backup` (`VACUUM INTO`) |
+| `vault/location.rs` | Default vault path; network-filesystem detection (advisory) |
+
+### Setup / clients
+
+| Module | Role |
+|---|---|
+| `setup/mod.rs` | `Scope`, `Change`/`Edit` model, atomic apply with rollback, `setup`/`--remove`/`--dry-run` orchestration |
+| `setup/client.rs` | `ClientKind` enum, client sets, per-client `global_dir`/`changes`/`removals` dispatch |
+| `setup/common.rs` | Shared pieces: config dirs from env, managed skill/`AGENTS.md` changes, MCP server argv |
+| `setup/fs_safe.rs` | Atomic file writes with backup; strict-JSON load/merge/remove helpers |
+| `setup/hooks.rs` | Builds hook entries for all clients; own entries are recognized by command text so reruns replace instead of duplicating |
+| `setup/permissions.rs` | Permission grants merged into client settings (subagent dispatch + MCP tools) |
+| `setup/plugin.rs` | Embeds `assets/opencode/skillvolution.js` with `--bin`/`--db` substitution |
+| `setup/claude.rs` | Claude Code: settings, `.mcp.json`, skill install, legacy `CLAUDE.md` cleanup |
+| `setup/claude_cli.rs` | Shelling out to `claude mcp add-json/remove/get` for user-scope MCP registration |
+| `setup/opencode.rs` | OpenCode: `opencode.json`/`opencode.jsonc`, permissions, plugin |
+| `setup/devin.rs` | Devin CLI: `mcp_config.json`, `config.json`, `AGENTS.md` |
+| `setup/codex.rs` | Codex CLI: `config.toml`, `hooks.json`, `AGENTS.md` |
+| `setup/gemini.rs` | Gemini CLI: `settings.json`, `GEMINI.md` |
+| `setup/cursor.rs` | Cursor: `mcp.json`, `hooks.json`, `cli.json`, rules file |
+| `setup/global.rs` | Global-scope orchestration: client detection, `claude mcp` registration |
+| `setup/inspect.rs` | Read-only inspection `doctor` uses to compare files against what setup would write |
+| `setup/remove.rs` | `setup --remove` planning and diff printing |
+| `setup/prompt.rs` | Interactive client selection via `/dev/tty`; `SKILLVOLUTION_NO_INPUT` handling |
+
+### Doctor / relocate
+
+| Module | Role |
+|---|---|
+| `doctor.rs` | Read-only health checks (vault + client configuration) |
+| `relocate.rs` | Move the vault file and repoint client configs |
+| `project.rs` | Derive the project key from the enclosing git repository |
 
 ## Data model
 
-- **skills**(`id`, `scope`, `deprecated`) — `scope` is `NULL` (global) or a project key, fixed on
-  the skill's first proposal. `deprecated` hides it from search without deleting history.
-- **revisions**(`id`, `version`, `description`, `tags`, `content`, `evidence`,
-  `expected_version`, `status`, `created_at`, `reviewed_at`, `review_note`) — new revisions are
-  always `published`; `draft`, `rejected`, and `superseded` remain only for rows written before
-  proposals published directly. `expected_version` names the published version a proposal was based
-  on (`0` for a new skill); proposing checks it still matches and marks any legacy draft sharing
-  that same base as `superseded` with a `review_note` noting the published version that superseded
-  them. Every normal publish also fills `reviewed_at` (the publish timestamp) and `review_note`,
-  set to `"<verdict>: <verdict_reason>"` from the evaluator's verdict and its one-line reason —
-  not just the legacy `superseded` path.
-- **outcomes**(`id`, `version`, `result`, `note`, `project`, `created_at`) — `result` is `helped`,
-  `failed`, or `not_applicable`; only recordable against a published revision visible to `project`.
-- **hook_state**(`session_id`, `transcript_offset`) — the byte offset each Claude Code session's
-  transcript has been reviewed up to.
-- **skills_fts** — an FTS5 virtual table (`id`, `description`, `tags`, `content`, tokenizer
-  `unicode61 remove_diacritics 2`) rewritten for a skill each time a revision is published; search
-  ranks matches by `bm25` weighted 4:3:2:1 across those columns, scaled by a factor
-  `1 + (helped - failed) / (ABS(helped - failed) + 2.0)` derived from the *current published
-  version's* outcome counts. That factor stays in the open range `(0, 2)`: exactly `1.0` when
-  `helped = failed` (an unreported or evenly-split skill ranks purely on text relevance), below
-  `1.0` as `failed` grows past `helped` (a weaker text match can then outrank it), and up to `2.0`
-  for a proven skill — `not_applicable` reports never enter the count either way. Ties break on
-  `helped - failed` then id. Outcome counts are per published *version*, so republishing a skill
-  (even as a wholesale replacement) starts its ranking factor fresh at `1.0`. The empty-query
-  catalog (used for the SessionStart listing) does not use this factor at all: it is ordered only
-  by `helped - failed` then id.
-- **current_skills** — a view joining each skill to its latest published revision and outcome
-  counts; backs search and the outcome summary.
-- The schema is versioned with SQLite's `user_version` pragma. A fresh database is initialized to
-  the current version; a database at the current version is left alone; a database with a pre-1
-  schema is refused with a clear message to move it aside and create a new one; any other version
-  fails to open with an upgrade prompt.
+From `src/vault/schema.sql` (current schema v3):
 
-## MCP tools
+| Table / view | Purpose |
+|---|---|
+| `skills` | One row per skill `id`; `scope` (`global`/`project`, fixed at first publish), `deprecated` flag, `fts_rowid` |
+| `revisions` | Every published version: `id`, `version`, `description`, `tags` (JSON), `content`, `evidence`, `expected_version`, `status`, timestamps and review fields |
+| `outcomes` | Agent reports: `id`, `version`, `result` (`helped`/`failed`/`not_applicable`), `note`, `project`, `created_at` |
+| `hook_state` | Claude Code transcript offsets (incremental Stop scan) |
+| `devin_hook_state` | Per-session `worked`/`reviewed` flags; used by every flag-tracked client (Devin, Codex, Gemini, Cursor) |
+| `skills_fts` | FTS5 index over id/description/tags/content, `unicode61 remove_diacritics 2` |
+| `current_skills` | View: each skill's latest published revision plus helped/failed outcome counts |
 
-- `search_skills(query, limit, offset)` — search published skill metadata; an empty query lists the
-  catalog. Returns `skills` (metadata only), `total` count, and `has_more` flag for pagination.
-  Bodies are never returned.
-- `get_skill(id, version?)` — fetch one published skill's body, defaulting to its latest version.
-- `report_skill_outcome(id, version, result, note)` — record whether an applied skill helped.
-- `publish_skill(id, description, tags?, content, evidence, expected_version, scope?, verdict,
-  verdict_reason, replaces_proven?)` — publish a new or replacement skill immediately; meant to be
-  called only after a fresh-context evaluation. `verdict` must be exactly `"keep global"` or
-  `"keep project"` (a `"discard"` verdict is refused outright) and must agree with `scope` (`keep
-  project` requires a project `scope`, `keep global` requires none); `verdict_reason` is the
-  evaluator's one-line reason, at most 280 bytes. `content` must contain the four required
-  headings — `## When to use`, `## Procedure`, `## Pitfalls`, `## Verification` — in order.
-  `description`, `content`, and `evidence` are scanned for credential-shaped values and the
-  publish is refused if one is found. `replaces_proven` (default `false`) must be `true` to
-  overwrite a version whose `helped` count exceeds its `failed` count.
+## Schema versioning and migrations
+
+- Current version: **v3**. Ordered `MIGRATIONS` chain in `src/vault/mod.rs`:
+  - v1 → v2: add `devin_hook_state`.
+  - v2 → v3: FTS rows addressed by `rowid`; one outcome per skill/version/project/UTC day; legacy drafts retired; hook-state timestamp columns and pruning support.
+- `PRAGMA application_id` is `SKV1`; a non-empty database with a different `application_id` is refused as foreign.
+- A database with a newer schema version is refused.
+- When the schema is already current the vault opens without taking a write lock, so concurrent read-only opens don't serialize.
+- `hook_state`/`devin_hook_state` rows older than 30 days are pruned.
+
+## Search ranking
+
+From `src/vault/search.rs`:
+
+- FTS5 `bm25` column weights: **id 4.0, description 3.0, tags 2.0, content 1.0**. The raw `bm25` score is sign-inverted and clamped at zero so higher is better.
+- Outcome multiplier applied to the text score:
+
+  ```text
+  1 + (helped - failed) / (ABS(helped - failed) + 2.0)
+  ```
+
+  The factor is in `(0, 2)`; `not_applicable` outcomes do not affect it.
+- Ranked ordering: score after multiplier, then `helped - failed` descending, then `id` ascending.
+- Empty query (catalog): `helped - failed` descending, then `id` ascending.
+- Limits: `limit` 1–100, `offset` >= 0, query at most 512 UTF-8 bytes with no NUL.
+
+## Publishing rules
+
+Enforced in `src/vault/revisions.rs` (and `mcp.rs` for tool-level checks):
+
+- `id` and tags: lowercase ASCII letters/digits in hyphen-separated groups. `id` 1–64 bytes; at most 8 tags of 32 bytes each.
+- `description` and `verdict_reason`: single line, at most 280 bytes.
+- `content` must contain these headings, each on its own `## ` line, in this order (case-insensitive): `## When to use`, `## Procedure`, `## Pitfalls`, `## Verification`. Preamble and extra sections are allowed.
+- Secret scanning over `description`, `content`, `evidence`, `verdict_reason` and outcome `note`: token prefixes (AWS/GitHub/OpenAI/Google/Slack/Stripe/GitLab/npm/Hugging Face/PyPI/OAuth shapes), full JWTs, quoted bearer tokens, PEM private-key blocks, credential URLs with passwords, Slack webhook URLs. Local-dev defaults like `root:secret@localhost` are allowed.
+- Verdict: exactly `keep global` or `keep project` (compared trimmed/lowercased, stored verbatim); everything else is refused.
+- Verdict/scope pairing: `keep project` requires `scope: project` and a project key; `keep global` requires global scope.
+- `scope` is fixed per skill id at first publication.
+- `expected_version` provides optimistic concurrency; stale versions are rejected.
+- Replacing a proven version (more `helped` than `failed`) requires `replaces_proven: true`.
+- Publication is immediate; there is no draft or approval stage.
+
+## Outcomes
+
+- Unique key: `(id, version, project, UTC day)`. A second report on the same day replaces the first — last write wins.
+- `helped`/`failed` feed the search multiplier and the proven-version check; `not_applicable` only records a note.
 
 ## Concurrency
 
-Every connection enables WAL mode and a 5-second busy timeout on open. `propose` runs in an
-`IMMEDIATE` transaction, so two writers never interleave a read-check with a conflicting write — a
-stale or competing proposal fails cleanly instead of corrupting state.
+- SQLite WAL journal with a busy timeout, so readers and the occasional writer tolerate each other.
+- Mutations run in `IMMEDIATE` transactions.
+- Flag-tracked hook state updates are atomic upserts on `devin_hook_state` keyed by session.
+
+## Hooks
+
+`src/hook.rs`. All hook entry points **fail open**: errors print
+`skillvolution hook: <err>` to stderr and the process exits 0, so a broken
+vault never stalls the agent.
+
+Two tracking designs:
+
+- **Claude Code** — transcript scan. `Stop` reads the session transcript JSONL from the stored byte offset (`hook_state`). Work tools: `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (Bash does not count). A review counts only when a `publish_skill` or `report_skill_outcome` tool result succeeds (`is_error` results don't). The hook blocks when the latest relevant edit is newer than the latest successful review. Each transcript span is judged once; `stop_hook_active=true` prevents repeated blocking.
+- **Flag-tracked clients** (Devin, Codex, Gemini, Cursor) — `tool-use` sets `worked` on matching tools and `reviewed` on vault review tools; `stop` emits the reminder if `worked` is set after `reviewed`. Work after a review re-arms the reminder; every judged stop consumes the span. `session-end` deletes the session state. Work tools per client: Devin `write`/`edit`/`apply_patch`/`notebook_edit`, Codex `apply_patch`, Gemini `write_file`/`replace`, Cursor `Write`.
+
+`hook approve` (wired to PermissionRequest for Devin and Codex) emits
+`{"decision":"approve","reason":"Skillvolution-managed tool"}` for
+`run_subagent`, `read_subagent` and every `mcp__skillvolution__*` tool.
+
+`session-start` prints the catalog: plain text for Claude, a JSON
+`additional_context` payload for flag-tracked clients.
+
+## Setup design
+
+- `ClientKind`: `ClaudeCode`, `OpenCode`, `Devin`, `Codex`, `Gemini`, `Cursor`. `--client` also accepts `all` and `both` (Claude Code + OpenCode).
+- `Scope`: global (per-user config directories) or `--project` (files inside the project directory).
+- Each client module produces a list of `FileChange`s and `removals`; the applier writes files atomically with rollback on failure.
+- Backups: overwritten user files get `.skillvolution.bak` rotation (up to three). Fully managed files get none.
+- Ownership markers decide what `setup --remove` may delete: it removes only Skillvolution-owned entries and preserves user keys and values (global install merges and preserves user keys like `env` and `enabled`; project install replaces the MCP server entry whole as a security measure; surgical removal on uninstall).
+- Global setup detects clients by executable on `PATH` or an existing config dir; non-detected clients are skipped. Prompts default to yes; `SKILLVOLUTION_NO_INPUT` (non-empty) or no TTY configures every detected client.
+- Project setup defaults to all clients and derives the project key from the directory name (`setup --project-key` overrides).
+- `setup --dry-run` prints unified diffs and writes nothing.
+- A vault on a network filesystem triggers an advisory warning (SQLite WAL should live on local storage); setup proceeds.
+
+## Transfer
+
+- `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes in an `IMMEDIATE` transaction with `secure_delete` on. Deletes the row(s) immediately, then compacts the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on disk. Compaction can't complete while another connection (an AI client's MCP server) holds the vault open; then it prints a warning and the content may linger until a later purge compacts it.
+- `export [-o FILE]` — dumps all skills, revisions and outcomes as JSON, format `skillvolution-export` version 1.
+- `import FILE` — merges an export: identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key, and aborts if a revision's or outcome's id differs from the skill it is listed under.
+- `backup PATH` — `VACUUM INTO` a path that must not exist; creates parent directories.
+
+## Doctor
+
+`skillvolution doctor` is read-only. It opens the vault read-only (schema
+version, `PRAGMA quick_check`, FTS orphan check, stats) and diffs each
+detected client's files against what `setup` would write — stale skill
+versions, missing configured binaries, Claude MCP registration status, and
+legacy installs. `--json` emits the same checks as data; the command exits
+non-zero on failures.
+
+## Relocate
+
+`skillvolution relocate PATH` moves the vault:
+
+1. Validates every global client config it would repoint first (a config that can't be read aborts with nothing written).
+2. Prints a `NOTE: close running AI client sessions: …` warning.
+3. Copies the database via the same `VACUUM INTO` path as `backup`.
+4. Verifies the copy (integrity and contents) before touching clients.
+5. Writes repointed configs for global clients that referenced the old path (re-registering Claude Code's MCP server); project-level installs are left untouched.
+6. Best-effort WAL checkpoint.
+7. Renames the old database to `<name>.relocated.bak` and any `-wal`/`-shm` sidecars to `.relocated.bak-wal`/`.relocated.bak-shm` (nothing is deleted).
+8. Prints a `SKILLVOLUTION_DB=<new>` hint when the CLI's default vault was relocated. Path matching handles both the displayable path and escaped variants (Windows canonical paths with doubled backslashes).
+
+## Project key
+
+`src/project.rs`: at runtime the key is the enclosing git repository's
+directory name — ASCII alphanumerics lowercased, runs of anything else
+collapsed to one hyphen, trimmed, capped at 64 bytes. Submodules key on
+their own folder name; worktrees resolve to the main repository name.
+`setup --project DIR` instead defaults the key from `DIR` itself, which can
+differ when `DIR` is a subdirectory of a larger repo.

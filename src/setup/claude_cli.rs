@@ -2,17 +2,19 @@
 //! `claude` CLI. We never edit `~/.claude.json` directly: Claude Code rewrites that file
 //! on its own, so a direct edit would race it and get lost.
 
+use super::{common, hooks};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 
 fn mcp_json(bin: &Path, db: &Path) -> String {
     serde_json::json!({
         "type": "stdio",
         "command": bin,
-        "args": ["--db", db, "serve"],
+        "args": common::server_args(db, None),
     })
     .to_string()
 }
@@ -21,9 +23,15 @@ fn mcp_json(bin: &Path, db: &Path) -> String {
 /// PATH so they can register the server themselves later.
 pub fn add_json_command(bin: &Path, db: &Path) -> String {
     format!(
-        "claude mcp add-json --scope user skillvolution '{}'",
-        mcp_json(bin, db)
+        "claude mcp add-json --scope user skillvolution {}",
+        hooks::shell_quote(&mcp_json(bin, db))
     )
+}
+
+/// The exact `claude mcp remove` invocation, shown to the user when `claude` isn't on
+/// PATH so they can remove the registration themselves.
+pub fn remove_command() -> String {
+    "claude mcp remove --scope user skillvolution".to_owned()
 }
 
 /// Finds `claude` on `PATH`, the same way a shell would: the first executable regular
@@ -34,24 +42,47 @@ pub fn resolve() -> Option<PathBuf> {
 
 /// Finds `name` on `PATH`, the same way a shell would: the first executable regular file
 /// named `name` in a `PATH` entry. Shared with `detect`, which uses it to look for other
-/// clients' CLIs (e.g. `opencode`).
+/// clients' CLIs (e.g. `opencode`). On Windows each `PATHEXT` extension is tried first,
+/// since npm-installed CLIs are `name.cmd` shims and native ones `name.exe`.
 pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let names = executable_names(name);
     std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(name);
-        is_executable(&candidate).then_some(candidate)
+        names
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| is_executable(candidate))
     })
 }
 
+/// The file names `name` can have as an executable: itself on Unix; on Windows, `name`
+/// plus each `PATHEXT` extension (default `.COM;.EXE;.BAT;.CMD`), then `name` itself.
+fn executable_names(name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        names.extend(
+            pathext
+                .split(';')
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!("{name}{}", ext.to_ascii_lowercase())),
+        );
+    }
+    names.push(name.to_owned());
+    names
+}
+
+/// Whether `path` is a regular, executable file. `doctor` reuses this to check a
+/// configured binary path, not just `find_on_path`'s own search.
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
@@ -63,16 +94,60 @@ enum AddOutcome {
     Failed(String),
 }
 
+/// How long a `claude mcp` call may take before it's killed: the CLI can hang (e.g.
+/// waiting on a login or network prompt), and setup must not hang with it.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Runs `claude` with `args`, capturing its output, and kills it once the timeout
+/// passes. `SKILLVOLUTION_CLAUDE_TIMEOUT_SECS` overrides the timeout (used by tests).
+/// Polling `try_wait` leaves the output in the pipes until exit, which is fine for the
+/// few lines `claude mcp` prints.
+fn run(claude: &Path, args: &[&str]) -> Result<Output> {
+    let timeout_secs = std::env::var("SKILLVOLUTION_CLAUDE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let command = format!("claude {}", args.join(" "));
+    let mut child = Command::new(claude)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run `{command}`"))?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("`{command}` timed out after {timeout_secs}s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
+        .wait_with_output()
+        .with_context(|| format!("run `{command}`"))
+}
+
+/// Whether `claude mcp get skillvolution` reports a registration. `doctor` uses
+/// this to warn when the global setup's user-scope registration is missing.
+pub(crate) fn mcp_registered(claude: &Path) -> Result<bool> {
+    Ok(run(claude, &["mcp", "get", "skillvolution"])?
+        .status
+        .success())
+}
+
 fn add_json(claude: &Path, json: &str) -> Result<AddOutcome> {
-    let output = Command::new(claude)
-        .args(["mcp", "add-json", "--scope", "user", "skillvolution", json])
-        .output()
-        .context("run `claude mcp add-json`")?;
+    let output = run(
+        claude,
+        &["mcp", "add-json", "--scope", "user", "skillvolution", json],
+    )?;
     if output.status.success() {
         return Ok(AddOutcome::Added);
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if stderr.contains("already exists") {
+    if stdout.contains("already exists") || stderr.contains("already exists") {
         Ok(AddOutcome::AlreadyExists)
     } else {
         Ok(AddOutcome::Failed(stderr))
@@ -95,10 +170,10 @@ pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
         AddOutcome::Failed(stderr) => bail!("claude mcp add-json failed: {stderr}"),
     }
 
-    let remove = Command::new(claude)
-        .args(["mcp", "remove", "--scope", "user", "skillvolution"])
-        .output()
-        .context("run `claude mcp remove --scope user skillvolution`")?;
+    let remove = run(
+        claude,
+        &["mcp", "remove", "--scope", "user", "skillvolution"],
+    )?;
     ensure!(
         remove.status.success(),
         "claude mcp remove failed: {}",
@@ -112,5 +187,49 @@ pub fn register(claude: &Path, bin: &Path, db: &Path) -> Result<()> {
              registration: {stderr}\nThe user-scope registration is now gone; re-add it with:\n{}",
             add_json_command(bin, db)
         ),
+    }
+}
+
+/// Removes the user-scope `skillvolution` registration. Idempotent, like `register`: the
+/// CLI's exact wording for "nothing registered under that name" isn't a documented,
+/// stable string, so any failure whose output mentions "not found" or "no such" is
+/// treated as already-removed rather than an error.
+pub fn unregister(claude: &Path) -> Result<()> {
+    let output = run(
+        claude,
+        &["mcp", "remove", "--scope", "user", "skillvolution"],
+    )?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let not_registered = |text: &str| text.contains("not found") || text.contains("no such");
+    if not_registered(&stdout) || not_registered(&stderr) {
+        return Ok(());
+    }
+    bail!(
+        "claude mcp remove failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(test)]
+mod executable_name_tests {
+    use super::executable_names;
+
+    #[test]
+    fn the_bare_name_is_always_a_candidate() {
+        assert_eq!(executable_names("claude").last().unwrap(), "claude");
+        #[cfg(not(windows))]
+        assert_eq!(executable_names("claude"), ["claude"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tries_pathext_shims_before_the_bare_name() {
+        let names = executable_names("claude");
+        assert!(names.contains(&"claude.cmd".to_owned()), "{names:?}");
+        assert!(names.contains(&"claude.exe".to_owned()), "{names:?}");
     }
 }

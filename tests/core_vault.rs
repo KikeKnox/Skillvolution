@@ -276,9 +276,10 @@ fn rejects_a_discard_verdict_and_a_verdict_that_contradicts_the_scope() {
 fn replacing_a_proven_version_requires_an_acknowledgement() {
     let (_dir, mut vault) = open();
     let v1 = Draft::new("proven").publish(&mut vault);
-    for note in ["worked once", "worked twice"] {
+    // Two projects, since one project's same-day reports collapse into one.
+    for project in ["proja", "projb"] {
         vault
-            .record_outcome("proven", v1, "helped", note, None)
+            .record_outcome("proven", v1, "helped", "worked", Some(project))
             .unwrap();
     }
     let replacement = Draft::new("proven").expected_version(v1);
@@ -298,9 +299,9 @@ fn replacing_a_proven_version_requires_an_acknowledgement() {
     // Control: a version with as many failures as successes is not proven, so
     // it can be replaced freely.
     let net_zero = Draft::new("unproven").publish(&mut vault);
-    for result in ["helped", "failed"] {
+    for (result, project) in [("helped", "proja"), ("failed", "projb")] {
         vault
-            .record_outcome("unproven", net_zero, result, "note", None)
+            .record_outcome("unproven", net_zero, result, "note", Some(project))
             .unwrap();
     }
     let free = vault
@@ -355,6 +356,31 @@ Re-run the command with the placeholder substituted.
 ";
     let result = vault.propose(&Draft::new("skill").raw_content(content).proposal());
     assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[test]
+fn rejects_credential_shaped_values_in_the_verdict_reason_and_outcome_note() {
+    let (_dir, mut vault) = open();
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    let error = vault
+        .propose(
+            &Draft::new("skill")
+                .verdict_reason(&format!("Reproduced with {token}"))
+                .proposal(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("verdict_reason"), "{error}");
+    assert!(!error.contains(token), "{error}");
+
+    let published = Draft::new("skill").publish(&mut vault);
+    let error = vault
+        .record_outcome("skill", published, "helped", &format!("used {token}"), None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("note"), "{error}");
+    assert!(!error.contains(token), "{error}");
+    assert!(vault.outcomes("skill").unwrap().is_empty());
 }
 
 // --- lifecycle -----------------------------------------------------------
@@ -449,10 +475,10 @@ fn publishing_supersedes_legacy_drafts_sharing_its_base() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "INSERT INTO skills (id) VALUES ('skill');
-         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
-         VALUES ('skill', 1, 'Legacy draft', '', 'body', 'evidence', 0);
-         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
-         VALUES ('skill', 2, 'Rebased draft', '', 'body', 'evidence', 0);",
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+         VALUES ('skill', 1, 'Legacy draft', '', 'body', 'evidence', 0, 'draft');
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+         VALUES ('skill', 2, 'Rebased draft', '', 'body', 'evidence', 0, 'draft');",
     )
     .unwrap();
     drop(conn);
@@ -493,6 +519,42 @@ fn diff_shows_unified_diff_against_base_and_empty_for_new_skill() {
     let diff = vault.diff("skill", second.version).unwrap();
     assert!(diff.contains("-line two"), "{diff}");
     assert!(diff.contains("+line three"), "{diff}");
+}
+
+#[test]
+fn latest_version_is_the_highest_version_of_any_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    Draft::new("skill").expected_version(1).publish(&mut vault);
+    assert_eq!(vault.latest_version("skill").unwrap(), 2);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+         VALUES ('skill', 3, 'Rejected', '', 'body', 'evidence', 2, 'rejected');",
+    )
+    .unwrap();
+    assert_eq!(vault.latest_version("skill").unwrap(), 3);
+
+    let error = vault.latest_version("missing").unwrap_err().to_string();
+    assert!(error.contains("unknown skill: missing"), "{error}");
+}
+
+#[test]
+fn new_revisions_default_to_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let vault = Vault::open(&path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO skills (id) VALUES ('skill');
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version)
+         VALUES ('skill', 1, 'Raw', '', 'body', 'evidence', 0);",
+    )
+    .unwrap();
+    assert_eq!(vault.inspect("skill", 1).unwrap().status, "published");
 }
 
 // --- scope -----------------------------------------------------------
@@ -614,9 +676,15 @@ fn a_net_negative_history_demotes_a_stronger_text_match() {
     let page = vault.search("widget", None, 20, 0).unwrap();
     assert_eq!(page.skills[0].id, "widget-cache");
 
-    for _ in 0..3 {
+    for project in ["proja", "projb", "projc"] {
         vault
-            .record_outcome("widget-cache", cache, "failed", "did not work", None)
+            .record_outcome(
+                "widget-cache",
+                cache,
+                "failed",
+                "did not work",
+                Some(project),
+            )
             .unwrap();
     }
     let page = vault.search("widget", None, 20, 0).unwrap();
@@ -642,9 +710,11 @@ fn equal_helped_and_failed_counts_leave_the_text_ranking_unchanged() {
         .description("Unrelated description")
         .content("uses a widget somewhere")
         .publish(&mut vault);
-    for result in ["helped", "failed", "helped", "failed", "helped", "failed"] {
+    let results = ["helped", "failed", "helped", "failed", "helped", "failed"];
+    for (index, result) in results.into_iter().enumerate() {
+        let project = format!("proj{index}");
         vault
-            .record_outcome("widget-cache", cache, result, "n", None)
+            .record_outcome("widget-cache", cache, result, "n", Some(&project))
             .unwrap();
     }
     assert_eq!(
@@ -752,6 +822,38 @@ fn search_validates_limit_offset_and_query_length() {
     assert!(vault.search(&"a".repeat(513), None, 1, 0).is_err());
 }
 
+#[test]
+fn republishing_replaces_the_search_entry_of_the_previous_version() {
+    let (_dir, mut vault) = open();
+    Draft::new("skill").content("alpha").publish(&mut vault);
+    Draft::new("skill")
+        .expected_version(1)
+        .content("beta")
+        .publish(&mut vault);
+    assert_eq!(vault.search("alpha", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("beta", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
+fn open_and_search_do_not_wait_for_a_concurrent_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    drop(vault);
+
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(vault.search("", None, 20, 0).unwrap().total, 1);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "open waited {:?} for the writer",
+        started.elapsed()
+    );
+}
+
 // --- outcomes ------------------------------------------------------------
 
 #[test]
@@ -786,10 +888,10 @@ fn search_metadata_counts_reset_on_new_published_version_and_support_failing_fil
     let (_dir, mut vault) = open();
     let v1 = Draft::new("skill").publish(&mut vault);
     vault
-        .record_outcome("skill", v1, "helped", "n", None)
+        .record_outcome("skill", v1, "helped", "n", Some("proja"))
         .unwrap();
     vault
-        .record_outcome("skill", v1, "failed", "n", None)
+        .record_outcome("skill", v1, "failed", "n", Some("projb"))
         .unwrap();
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!((page.skills[0].helped, page.skills[0].failed), (1, 1));
@@ -814,10 +916,10 @@ fn outcomes_returns_the_full_log_for_a_skill_newest_first() {
     let (_dir, mut vault) = open();
     let published = Draft::new("skill").publish(&mut vault);
     vault
-        .record_outcome("skill", published, "helped", "first", None)
+        .record_outcome("skill", published, "helped", "first", Some("proja"))
         .unwrap();
     vault
-        .record_outcome("skill", published, "failed", "second", None)
+        .record_outcome("skill", published, "failed", "second", Some("projb"))
         .unwrap();
     let log = vault.outcomes("skill").unwrap();
     assert_eq!(log.len(), 2);
@@ -825,7 +927,308 @@ fn outcomes_returns_the_full_log_for_a_skill_newest_first() {
     assert_eq!(log[1].note, "first");
 }
 
+#[test]
+fn same_day_reports_from_one_project_collapse_into_the_last_one() {
+    let (_dir, mut vault) = open();
+    let published = Draft::new("skill").publish(&mut vault);
+    for (result, note) in [
+        ("helped", "first"),
+        ("failed", "second"),
+        ("helped", "third"),
+    ] {
+        vault
+            .record_outcome("skill", published, result, note, None)
+            .unwrap();
+    }
+    vault
+        .record_outcome("skill", published, "failed", "other project", Some("proja"))
+        .unwrap();
+    let log = vault.outcomes("skill").unwrap();
+    assert_eq!(log.len(), 2, "{log:?}");
+    let global = log.iter().find(|record| record.project.is_none()).unwrap();
+    assert_eq!(
+        (global.result.as_str(), global.note.as_str()),
+        ("helped", "third")
+    );
+}
+
+#[test]
+fn outcomes_of_an_unknown_skill_is_an_error() {
+    let (_dir, vault) = open();
+    let error = vault.outcomes("missing").unwrap_err().to_string();
+    assert!(error.contains("unknown skill: missing"), "{error}");
+}
+
+// --- hook state ------------------------------------------------------------
+
+/// Marks every hook-state row as last touched on `timestamp`, bypassing the
+/// triggers that stamp `updated_at` on real writes.
+fn backdate_hook_state(path: &std::path::Path, timestamp: &str) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute("UPDATE hook_state SET updated_at = ?1", [timestamp])
+        .unwrap();
+    conn.execute("UPDATE devin_hook_state SET updated_at = ?1", [timestamp])
+        .unwrap();
+}
+
+#[test]
+fn prune_hook_state_drops_only_sessions_idle_past_the_cutoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let vault = Vault::open(&path).unwrap();
+    vault.set_transcript_offset("old", 10).unwrap();
+    vault.set_transcript_offset("touched", 20).unwrap();
+    vault.mark_devin_work("old-devin").unwrap();
+    backdate_hook_state(&path, "2000-01-01T00:00:00Z");
+    // A later write refreshes updated_at, so this session survives the prune.
+    vault.set_transcript_offset("touched", 30).unwrap();
+
+    vault.prune_hook_state(30).unwrap();
+
+    assert_eq!(vault.transcript_offset("old").unwrap(), 0);
+    assert_eq!(vault.transcript_offset("touched").unwrap(), 30);
+    assert_eq!(
+        vault.take_devin_hook_state("old-devin").unwrap(),
+        (false, false)
+    );
+}
+
+#[test]
+fn open_prunes_hook_state_older_than_thirty_days() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let vault = Vault::open(&path).unwrap();
+    vault.set_transcript_offset("stale", 10).unwrap();
+    vault.mark_devin_work("stale-devin").unwrap();
+    vault.mark_devin_review("stale-devin").unwrap();
+    backdate_hook_state(&path, "2000-01-01T00:00:00Z");
+    drop(vault);
+
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(vault.transcript_offset("stale").unwrap(), 0);
+    assert_eq!(
+        vault.take_devin_hook_state("stale-devin").unwrap(),
+        (false, false)
+    );
+}
+
 // --- migration -----------------------------------------------------------
+
+const APPLICATION_ID: i64 = 0x534B_5631;
+
+/// The version-1 schema as it shipped, before devin_hook_state existed.
+const V1_SCHEMA: &str = "
+CREATE TABLE skills (
+    id TEXT PRIMARY KEY,
+    scope TEXT,
+    deprecated INTEGER NOT NULL DEFAULT 0 CHECK(deprecated IN (0, 1))
+);
+CREATE TABLE revisions (
+    id TEXT NOT NULL REFERENCES skills(id),
+    version INTEGER NOT NULL CHECK(version > 0),
+    description TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    content TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    expected_version INTEGER NOT NULL CHECK(expected_version >= 0),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'rejected', 'superseded')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    reviewed_at TEXT,
+    review_note TEXT,
+    PRIMARY KEY (id, version)
+);
+CREATE TABLE outcomes (
+    id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('helped', 'failed', 'not_applicable')),
+    note TEXT NOT NULL,
+    project TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY (id, version) REFERENCES revisions(id, version)
+);
+CREATE INDEX outcomes_by_revision ON outcomes(id, version, result);
+CREATE TABLE hook_state (
+    session_id TEXT PRIMARY KEY,
+    transcript_offset INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE skills_fts USING fts5(
+    id, description, tags, content,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE VIEW current_skills AS
+SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated,
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable
+FROM skills s
+JOIN revisions r ON r.id = s.id
+WHERE r.status = 'published'
+    AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
+";
+
+/// What version 2 added on top of version 1.
+const V2_ADDITIONS: &str = "
+CREATE TABLE devin_hook_state (
+    session_id TEXT PRIMARY KEY,
+    worked INTEGER NOT NULL DEFAULT 0 CHECK(worked IN (0, 1)),
+    reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0, 1))
+);
+";
+
+/// Builds a database at schema `version` (1 or 2) the way older releases left
+/// it: two published revisions, a legacy draft, a search index still holding
+/// the superseded v1 text, and a duplicated same-day outcome.
+fn legacy_database(version: i64) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(V1_SCHEMA).unwrap();
+    if version >= 2 {
+        conn.execute_batch(V2_ADDITIONS).unwrap();
+        conn.execute_batch("INSERT INTO devin_hook_state VALUES ('devin-session', 1, 0);")
+            .unwrap();
+    }
+    let alpha = support::sectioned("alpha");
+    let beta = support::sectioned("beta");
+    conn.execute_batch("INSERT INTO skills (id) VALUES ('skill');")
+        .unwrap();
+    for (revision, content, status) in [
+        (1, &alpha, "published"),
+        (2, &beta, "published"),
+        (3, &beta, "draft"),
+    ] {
+        conn.execute(
+            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+             VALUES ('skill', ?1, 'Use when testing', 'rust', ?2, 'evidence', ?1 - 1, ?3)",
+            rusqlite::params![revision, content, status],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO skills_fts (id, description, tags, content) VALUES ('skill', 'Use when testing', 'rust', ?1)",
+        [&alpha],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO outcomes (id, version, result, note) VALUES ('skill', 2, 'helped', 'first');
+         INSERT INTO outcomes (id, version, result, note) VALUES ('skill', 2, 'failed', 'second');
+         INSERT INTO outcomes (id, version, result, note, project) VALUES ('skill', 2, 'helped', 'elsewhere', 'proja');
+         INSERT INTO hook_state VALUES ('claude-session', 42);",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", version).unwrap();
+    (dir, path)
+}
+
+fn pragma(path: &std::path::Path, name: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, name, |row| row.get(0))
+        .unwrap()
+}
+
+fn open_error(path: &std::path::Path) -> String {
+    match Vault::open(path) {
+        Ok(_) => panic!("expected {} to be refused", path.display()),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[test]
+fn new_databases_are_stamped_with_the_version_and_application_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    drop(Vault::open(&path).unwrap());
+    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
+}
+
+#[test]
+fn migrates_a_v1_database_to_v3() {
+    let (_dir, path) = legacy_database(1);
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
+    vault.mark_devin_work("devin-session").unwrap();
+    assert_eq!(
+        vault.take_devin_hook_state("devin-session").unwrap(),
+        (true, false)
+    );
+    assert_eq!(vault.search("beta", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
+fn migrates_a_v2_database_to_v3_preserving_data() {
+    let (_dir, path) = legacy_database(2);
+    let mut vault = Vault::open(&path).unwrap();
+    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
+
+    // Revisions survive; the legacy draft is retired.
+    assert_eq!(
+        vault.inspect("skill", 1).unwrap().content,
+        support::sectioned("alpha")
+    );
+    assert_eq!(vault.get("skill", None, None).unwrap().version, 2);
+    let draft = vault.inspect("skill", 3).unwrap();
+    assert_eq!(draft.status, "superseded");
+    assert_eq!(
+        draft.review_note.as_deref(),
+        Some("legacy draft retired by schema v3")
+    );
+
+    // The search index is rebuilt from the current published revision.
+    assert_eq!(vault.search("alpha", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("beta", None, 20, 0).unwrap().total, 1);
+
+    // Duplicate same-day outcomes keep only the latest report.
+    let notes: Vec<String> = vault
+        .outcomes("skill")
+        .unwrap()
+        .into_iter()
+        .map(|record| record.note)
+        .collect();
+    assert_eq!(notes, ["elsewhere", "second"]);
+
+    assert_eq!(vault.transcript_offset("claude-session").unwrap(), 42);
+    assert_eq!(
+        vault.take_devin_hook_state("devin-session").unwrap(),
+        (true, false)
+    );
+
+    // Republishing after the migration still replaces the search entry.
+    Draft::new("skill")
+        .expected_version(2)
+        .content("gamma")
+        .publish(&mut vault);
+    assert_eq!(vault.search("beta", None, 20, 0).unwrap().total, 0);
+    assert_eq!(vault.search("gamma", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
+fn refuses_a_newer_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    drop(Vault::open(&path).unwrap());
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let error = open_error(&path);
+    assert!(error.contains("upgrade skillvolution"), "{error}");
+}
+
+#[test]
+fn refuses_a_foreign_nonempty_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE notes (body TEXT);")
+        .unwrap();
+    let error = open_error(&path);
+    assert!(error.contains("not a skillvolution database"), "{error}");
+}
 
 #[test]
 fn refuses_to_migrate_a_pre_1_schema_database() {
@@ -835,9 +1238,6 @@ fn refuses_to_migrate_a_pre_1_schema_database() {
     conn.execute_batch("CREATE TABLE revisions (id TEXT PRIMARY KEY);")
         .unwrap();
     drop(conn);
-    let error = match Vault::open(&path) {
-        Ok(_) => panic!("expected the pre-1 schema to be refused"),
-        Err(error) => error.to_string(),
-    };
+    let error = open_error(&path);
     assert!(error.contains("pre-1 schema"), "{error}");
 }
