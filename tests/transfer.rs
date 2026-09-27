@@ -109,6 +109,29 @@ fn purge_and_vacuum_erase_the_purged_content_from_the_database_file() {
     }
 }
 
+#[test]
+fn purge_succeeds_uncompacted_while_another_connection_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("busy-skill").propose(&mut vault);
+    assert!(vault.purge("busy-skill", None).unwrap().compacted);
+    Draft::new("busy-skill").propose(&mut vault);
+
+    // An open read transaction elsewhere (an MCP server mid-query, say) keeps
+    // the WAL from being truncated.
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+        .unwrap();
+
+    let report = vault.purge("busy-skill", None).unwrap();
+    assert!(report.skill_removed);
+    assert!(!report.compacted);
+    assert!(vault.get("busy-skill", None, None).is_err());
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -443,6 +466,25 @@ fn cli_purge_deletes_a_revision_and_reports_it() {
     let vault = Vault::open(&db).unwrap();
     assert!(vault.inspect("cli-purge", 1).is_err());
     assert!(vault.inspect("cli-purge", 2).is_ok());
+}
+
+#[test]
+fn cli_purge_warns_when_other_connections_keep_it_from_compacting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("cli-busy").propose(&mut vault);
+    drop(vault);
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+        .unwrap();
+
+    let purged = run(&db, &["purge", "cli-busy"]);
+    assert_success(&purged);
+    let stderr = String::from_utf8_lossy(&purged.stderr);
+    assert!(stderr.contains("could not be compacted"), "{stderr}");
 }
 
 #[test]
