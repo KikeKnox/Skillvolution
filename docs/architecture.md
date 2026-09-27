@@ -159,7 +159,7 @@ Two tracking designs:
 - `Scope`: global (per-user config directories) or `--project` (files inside the project directory).
 - Each client module produces a list of `FileChange`s and `removals`; the applier writes files atomically with rollback on failure.
 - Backups: overwritten user files get `.skillvolution.bak` rotation (up to three). Fully managed files get none.
-- Ownership markers decide what `setup --remove` may delete: it removes only Skillvolution-owned entries and preserves user keys and values (merge semantics on install, surgical removal on uninstall).
+- Ownership markers decide what `setup --remove` may delete: it removes only Skillvolution-owned entries and preserves user keys and values (global install merges and preserves user keys like `env` and `enabled`; project install replaces the MCP server entry whole as a security measure; surgical removal on uninstall).
 - Global setup detects clients by executable on `PATH` or an existing config dir; non-detected clients are skipped. Prompts default to yes; `SKILLVOLUTION_NO_INPUT` (non-empty) or no TTY configures every detected client.
 - Project setup defaults to all clients and derives the project key from the directory name (`setup --project-key` overrides).
 - `setup --dry-run` prints unified diffs and writes nothing.
@@ -167,9 +167,9 @@ Two tracking designs:
 
 ## Transfer
 
-- `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes in an `IMMEDIATE` transaction with `secure_delete` on, then `VACUUM` + WAL checkpoint.
+- `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes in an `IMMEDIATE` transaction with `secure_delete` on. Deletes the row(s) immediately, then compacts the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on disk. Compaction can't complete while another connection (an AI client's MCP server) holds the vault open; then it prints a warning and the content may linger until a later purge compacts it.
 - `export [-o FILE]` — dumps all skills, revisions and outcomes as JSON, format `skillvolution-export` version 1.
-- `import FILE` — merges an export: identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key.
+- `import FILE` — merges an export: identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key, and aborts if a revision's or outcome's id differs from the skill it is listed under.
 - `backup PATH` — `VACUUM INTO` a path that must not exist; creates parent directories.
 
 ## Doctor
@@ -185,10 +185,14 @@ non-zero on failures.
 
 `skillvolution relocate PATH` moves the vault:
 
-1. Copies the database via the same `VACUUM INTO` path as `backup`.
-2. Verifies the copy (integrity and contents) before touching clients.
-3. Repoints global client configurations that referenced the old path, preserving configured binary paths where possible; project-level installs are left untouched.
-4. Renames the old database to `<name>.relocated.bak` and warns if `SKILLVOLUTION_DB` still points at it.
+1. Validates every global client config it would repoint first (a config that can't be read aborts with nothing written).
+2. Prints a `NOTE: close running AI client sessions: …` warning.
+3. Copies the database via the same `VACUUM INTO` path as `backup`.
+4. Verifies the copy (integrity and contents) before touching clients.
+5. Writes repointed configs for global clients that referenced the old path (re-registering Claude Code's MCP server); project-level installs are left untouched.
+6. Best-effort WAL checkpoint.
+7. Renames the old database to `<name>.relocated.bak` and any `-wal`/`-shm` sidecars to `.relocated.bak-wal`/`.relocated.bak-shm` (nothing is deleted).
+8. Prints a `SKILLVOLUTION_DB=<new>` hint when the CLI's default vault was relocated. Path matching handles both the displayable path and escaped variants (Windows canonical paths with doubled backslashes).
 
 ## Project key
 

@@ -107,9 +107,10 @@ defaults to `all` in this mode.
 Writes are atomic (temp file + rename) with rollback if a later write fails; a changed
 file's previous content is kept as `.skillvolution.bak`, `.bak.1`, `.bak.2` (three
 slots), except for fully managed files (the skill, the plugin, the Cursor rule), which
-get none. Existing entries are preserved: merging an MCP entry only replaces the launch
-keys (`type`, `command`, `args`), keeping user keys like `env` or a `enabled: false`
-you set, and permission grants only fill in keys you haven't chosen. Hook commands are
+get none. Existing entries are preserved: global setup merges and preserves user keys
+(`env`, `enabled: false`, timeouts) when updating an MCP entry, while project setup
+replaces the `skillvolution` MCP entry whole, discarding any pre-seeded `env`/`cwd`/`url`
+from a possibly untrusted repo. Permission grants only fill in keys you haven't chosen. Hook commands are
 recognized by content, so a rerun replaces them instead of duplicating — and stale
 entries an older version wrote under events it no longer uses are stripped. `setup`
 refuses to write through a symlinked config file and refuses a `SKILL.md`, plugin, or
@@ -130,7 +131,7 @@ One database, shared by every client and project. Default path:
 | Platform | Path |
 |---|---|
 | Linux / macOS | `$XDG_DATA_HOME/skillvolution/skills.db`, else `~/.local/share/skillvolution/skills.db` (`$USERPROFILE` when `HOME` is unset) |
-| Windows | `%LOCALAPPDATA%\skillvolution\skills.db`, else the same `XDG_DATA_HOME`/`HOME` logic |
+| Windows | `%LOCALAPPDATA%\skillvolution\skills.db`; if `LOCALAPPDATA` is unset, the same `XDG_DATA_HOME`/`HOME` logic as Linux/macOS; if that `LOCALAPPDATA` path doesn't exist yet but a legacy `%USERPROFILE%\.local\share\skillvolution\skills.db` vault does, the legacy vault keeps being used |
 
 `--db PATH` overrides per invocation and `SKILLVOLUTION_DB` overrides everywhere; the
 path is embedded in every client config `setup` writes. The database is created (and
@@ -163,7 +164,9 @@ skillvolution deprecate ID     # hide from search, keep history
 skillvolution undeprecate ID
 
 skillvolution purge ID [--version N]           # permanently delete a skill or one revision,
-                                               #   with its outcomes (secure-delete + VACUUM)
+                                               #   with its outcomes (secure-delete, VACUUM, WAL
+                                               #   checkpoint); warns if it can't compact while
+                                               #   another connection holds the vault open
 skillvolution export [-o FILE]                 # whole vault as JSON (stdout by default)
 skillvolution import FILE                      # merge an export back (atomic; conflicts abort)
 skillvolution backup PATH                      # consistent copy of the live database

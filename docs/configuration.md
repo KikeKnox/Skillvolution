@@ -80,7 +80,7 @@ Notes:
 | Platform | Default |
 |---|---|
 | Linux / macOS | `$XDG_DATA_HOME/skillvolution/skills.db` when `XDG_DATA_HOME` is an absolute, non-empty path; otherwise `~/.local/share/skillvolution/skills.db` (`USERPROFILE` standing in for `HOME` when unset) |
-| Windows | `%LOCALAPPDATA%\skillvolution\skills.db`, falling back to the same `XDG_DATA_HOME`/`HOME` logic when unset |
+| Windows | `%LOCALAPPDATA%\skillvolution\skills.db`; if `LOCALAPPDATA` is unset, the same `XDG_DATA_HOME`/`HOME` logic as Linux/macOS; if that `LOCALAPPDATA` path doesn't exist yet but a legacy `%USERPROFILE%\.local\share\skillvolution\skills.db` vault does, the legacy vault keeps being used |
 
 The database and its parent directory are created on first open; the schema migrates
 automatically. A database written by a newer version refuses to open. See

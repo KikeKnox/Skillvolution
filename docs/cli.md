@@ -222,9 +222,11 @@ skillvolution purge ID [--version N]
 ```
 
 Permanently deletes a skill — or, with `--version N`, just that revision — together
-with its outcomes and search-index row. Uses `secure_delete` plus `VACUUM` and a WAL
-checkpoint, so the purged content doesn't linger in the database or `-wal` file. Prints
-`Purged ID: N revision(s), M outcome(s)[, skill removed].`
+with its outcomes and search-index row. Deletes the row(s) immediately, then compacts
+the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on
+disk. Compaction can't complete while another connection (an AI client's MCP server)
+holds the vault open; then it prints a warning and the content may linger until a later
+purge compacts it. Prints `Purged ID: N revision(s), M outcome(s)[, skill removed].`
 
 Prefer `deprecate` for content you merely don't want surfaced; `purge` is for data that
 must be gone (a leaked secret that predates the scanner, etc.).
@@ -243,8 +245,9 @@ skillvolution import FILE
 state is not exported. `import` merges such a document into the vault in one
 transaction: new revisions are validated like fresh publishes (headings, secrets),
 identical existing revisions and duplicate outcomes are skipped, and any conflicting
-revision — or a skill that exists under a different scope — aborts the whole import
-with no partial writes. `import` prints a JSON report of imported/skipped counts.
+revision — a skill that exists under a different scope — or a revision/outcome whose
+id differs from the skill it's listed under — aborts the whole import with no partial
+writes. `import` prints a JSON report of imported/skipped counts.
 
 ```bash
 skillvolution export -o vault.json
@@ -285,13 +288,16 @@ fails.
 [warn] legacy install: project-level install found (…) alongside the global one; hooks will run twice
 ```
 
-Checks, in order: database presence, `application_id`/`user_version` (a foreign or
-newer-schema database fails; an older one warns it will migrate on next use),
-`PRAGMA quick_check`, search-index completeness, row counts; then per client:
+Checks, in order: database presence, a warning if the vault was relocated (old copy
+at `PATH.relocated.bak` exists but the current path is missing), `application_id`/
+`user_version` (a foreign or newer-schema database fails; an older one warns it will
+migrate on next use), `PRAGMA quick_check`, search-index completeness (deprecated skills
+with a published revision still count toward the index), row counts; then per client:
 installed-but-not-configured vs. configured and up to date vs. differing, staleness of
 the installed evolution skill version, a configured binary path that no longer exists
 (fail), Claude Code's user-scope MCP registration, and a project-level install left in
-the current repo next to the global one. `--json` prints
+the current repo next to the global one. A client whose config can't be read or parsed
+gets its own `[fail]` check and the report continues. `--json` prints
 `{"healthy": bool, "checks": [{"name", "status", "detail"}]}`.
 
 ## relocate
@@ -301,18 +307,26 @@ skillvolution relocate PATH
 ```
 
 Moves the vault database to `PATH` (which must not exist; parent directories are
-created): copies the database with `VACUUM INTO`, verifies the copy against the source
-before touching anything, repoints every *global* client config that referenced the old
-path (re-registering Claude Code's MCP server via the `claude` CLI), then renames the
-old file to `PATH.relocated.bak`. Project-level installs are untouched — rerun
-`setup --project DIR` for them — and a `SKILLVOLUTION_DB` still pointing at the old path
-is reported so you can update it.
+created): validates every global client config it would repoint first (a config that
+can't be read or parsed aborts with nothing written), prints a note to close running
+AI client sessions, copies the database with `VACUUM INTO` and verifies the copy against
+the source, writes repointed configs for every *global* client that referenced the old
+path (re-registering Claude Code's MCP server via the `claude` CLI), performs a
+best-effort WAL checkpoint, and renames the old file to `<path>.relocated.bak` along
+with any `-wal`/`-shm` sidecars (renamed to `.relocated.bak-wal`/`.relocated.bak-shm`
+so they're found if the backup is opened later; nothing is ever deleted). Project-level
+installs are untouched — rerun `setup --project DIR` for them. When the CLI's default
+vault was relocated, a hint is printed so you can update `SKILLVOLUTION_DB` in your
+shell profile.
 
 ```bash
+NOTE: close running AI client sessions: their MCP servers and hooks keep the old
+vault open, and anything they write to it from now on is not carried over.
 skillvolution relocate ~/vaults/skills.db
 # Relocated the vault to /home/you/vaults/skills.db.
 # Repointed OpenCode to /home/you/vaults/skills.db.
 # The old vault was kept as a backup at /home/you/.local/share/skillvolution/skills.db.relocated.bak.
+# Note: CLI commands without --db still resolve to the old path. Set SKILLVOLUTION_DB=/home/you/vaults/skills.db in your shell profile (or pass --db) so they use the new vault; AI clients are already repointed.
 ```
 
 ## MCP tools
