@@ -297,6 +297,13 @@ mod tests {
         assert!(owned_command(
             "/opt/skillvolution hook session-start --client devin"
         ));
+        // Gemini CLI's commands carry the same --client flag, so a rerun replaces
+        // rather than duplicates its hook entries too.
+        for event in ["session-start", "tool-use", "stop", "session-end"] {
+            assert!(owned_command(&format!(
+                "/opt/skillvolution hook {event} --client gemini"
+            )));
+        }
     }
 
     #[test]
