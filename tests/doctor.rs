@@ -3,6 +3,9 @@
 //! CLAUDE_CONFIG_DIR and PATH explicitly and runs the built binary as a
 //! subprocess, like tests/setup_global.rs does.
 
+// Only needed by tests that require a real, executable fake `claude` on PATH; see
+// `write_fake_claude`.
+#[cfg(unix)]
 use serde_json::Value;
 use std::{
     fs,
@@ -13,6 +16,10 @@ use std::{
 struct Env {
     home: tempfile::TempDir,
     xdg_config: PathBuf,
+    // Devin's global config dir on Windows (`%APPDATA%\devin`); sandboxed here so a
+    // `setup --client all`/`devin` run in one test can't leave real files in the host
+    // profile for another test (or the host) to trip over.
+    appdata: PathBuf,
     empty_path: tempfile::TempDir,
     // Kept alive only so `bin`/`db`, which point inside it, stay valid for the test.
     _workspace: tempfile::TempDir,
@@ -24,6 +31,7 @@ impl Env {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
         let xdg_config = home.path().join("xdg-config");
+        let appdata = home.path().join("AppData/Roaming");
         let empty_path = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // Named exactly `skillvolution` (see tests/setup_global.rs) and left
@@ -34,6 +42,7 @@ impl Env {
         Self {
             home,
             xdg_config,
+            appdata,
             empty_path,
             _workspace: workspace,
             bin,
@@ -41,13 +50,14 @@ impl Env {
         }
     }
 
-    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/PATH pinned to
+    /// Base command with HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/APPDATA/PATH pinned to
     /// this sandbox and no `claude` on PATH, outside any git repo so the
     /// legacy-install warning never fires by accident.
     fn cli(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         cmd.env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", &self.xdg_config)
+            .env("APPDATA", &self.appdata)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env("PATH", self.empty_path.path())
             .current_dir(self.home.path());
@@ -79,6 +89,9 @@ impl Env {
         cmd
     }
 
+    // Only used to seed a foreign edit to OpenCode's config in a test that needs a
+    // real, executable fake `claude` on PATH; see `write_fake_claude`.
+    #[cfg(unix)]
     fn opencode_dir(&self) -> PathBuf {
         self.xdg_config.join("opencode")
     }
@@ -103,12 +116,21 @@ fn assert_success(output: &Output) {
 
 /// A fake `claude` that succeeds on every call: `mcp add-json` (setup's
 /// registration) and `mcp get` (doctor's registration check) alike.
+///
+/// A `#!/bin/sh` script; unix-only, like every test that calls it. On Windows there's
+/// no way to make a text file with a shebang line run as `claude` would (it isn't a
+/// valid executable), so exercising a real, successful registration round-trip isn't
+/// something this fake can cover there.
+#[cfg(unix)]
 fn write_fake_claude(dir: &Path) -> PathBuf {
     fs::create_dir_all(dir).unwrap();
     write_executable(&dir.join("claude"), "#!/bin/sh\nexit 0\n");
     dir.to_owned()
 }
 
+// Only used to read back OpenCode's config in a test that needs a real, executable
+// fake `claude` on PATH; see `write_fake_claude`.
+#[cfg(unix)]
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
@@ -150,6 +172,9 @@ fn fresh_home_no_clients_no_db_is_healthy_and_creates_no_database() {
     }
 }
 
+// Needs a real, executable fake `claude` on PATH so setup's `claude mcp add-json` and
+// doctor's `claude mcp get` both actually run; see `write_fake_claude`.
+#[cfg(unix)]
 #[test]
 fn after_setup_all_clients_every_client_is_up_to_date() {
     let env = Env::new();
@@ -178,6 +203,8 @@ fn after_setup_all_clients_every_client_is_up_to_date() {
     assert!(!stdout.contains("[fail]"), "{stdout}");
 }
 
+// Needs a real, executable fake `claude` on PATH; see `write_fake_claude`.
+#[cfg(unix)]
 #[test]
 fn editing_a_configs_mcp_command_warns_only_for_that_client() {
     let env = Env::new();
@@ -277,6 +304,8 @@ fn database_older_than_supported_warns_and_is_left_unmigrated() {
     assert_eq!(version, 2, "doctor must never migrate the database");
 }
 
+// Needs a real, executable fake `claude` on PATH; see `write_fake_claude`.
+#[cfg(unix)]
 #[test]
 fn json_output_parses_with_healthy_and_checks() {
     let env = Env::new();
@@ -409,6 +438,9 @@ fn a_relocated_default_vault_warns_that_the_cli_still_uses_the_default() {
         .cli()
         .env_remove("SKILLVOLUTION_DB")
         .env_remove("XDG_DATA_HOME")
+        // On Windows, LOCALAPPDATA outranks this HOME/XDG fallback; remove it so the
+        // default database resolves to `default_db` on every platform.
+        .env_remove("LOCALAPPDATA")
         .arg("doctor")
         .output()
         .unwrap();

@@ -23,14 +23,18 @@ struct Cli {
 /// A directory with spaces (covering shell quoting) containing a file literally named
 /// `skillvolution`: hook ownership (see `owned_command` in `src/setup/hooks.rs`) matches on
 /// that exact file name, so a rerun must recognize its own previous hook entries.
-const BIN_NAME: &str = "bin dir with spaces/skillvolution";
+const BIN_DIR: &str = "bin dir with spaces";
+const BIN_NAME: &str = "skillvolution";
 
 fn run(argv: Vec<String>) -> anyhow::Result<()> {
     setup::run(Cli::parse_from(argv).setup)
 }
 
 fn write_bin(project: &Path) -> PathBuf {
-    let bin = project.join(BIN_NAME);
+    // Two joins, not one string with an embedded `/` (which Windows keeps
+    // literally instead of normalizing to `\` the way the app's own path
+    // handling does).
+    let bin = project.join(BIN_DIR).join(BIN_NAME);
     fs::create_dir_all(bin.parent().unwrap()).unwrap();
     fs::write(&bin, "test binary").unwrap();
     bin
@@ -98,7 +102,7 @@ fn installs_cursor_project_files() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     install_project(p, &bin, &db).unwrap();
 
@@ -170,7 +174,7 @@ fn cursor_project_setup_preserves_existing_config_and_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
     fs::create_dir_all(p.join(".cursor/rules")).unwrap();
 
     fs::write(
@@ -230,7 +234,7 @@ fn cursor_project_remove_restores_foreign_content_and_deletes_owned_files() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
     fs::create_dir_all(p.join(".cursor")).unwrap();
 
     let mcp = pretty_json(json!({"mcpServers": {"other": {"command": "npx"}}}));
@@ -269,7 +273,7 @@ fn cursor_dry_run_install_and_remove_write_nothing() {
     let temp = tempfile::tempdir().unwrap();
     let p = temp.path();
     let bin = write_bin(p);
-    let db = p.join("data/vault.sqlite3");
+    let db = p.join("data").join("vault.sqlite3");
 
     dry_run_install_project(p, &bin, &db).unwrap();
     assert!(!db.exists(), "dry-run must never create the vault database");

@@ -3,6 +3,9 @@
 //! constructible through clap, and these process-global environment variables couldn't
 //! be isolated between tests from in-process calls anyway).
 
+// Only needed by the one test that requires a real, executable fake `claude` on
+// PATH; see `write_fake_claude`.
+#[cfg(unix)]
 use serde_json::Value;
 use skillvolution::vault::{Proposal, Vault};
 use std::{
@@ -99,7 +102,14 @@ fn a_relative_skillvolution_db_resolves_against_the_current_directory() {
 
 /// Writes an executable fake `claude` into `dir` that appends its argv to `log` (one
 /// line per invocation, `\n`-joined) and always exits 0.
+///
+/// A `#!/bin/sh` script; unix-only, like the one test that calls it (repointing Claude
+/// Code needs a `claude` that can actually be run, and a shebang script isn't a valid
+/// executable on Windows).
+#[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     fs::write(
@@ -107,11 +117,18 @@ fn write_fake_claude(dir: &Path, log: &Path) {
         format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display()),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Unix-only, like its only caller: reads back the fake `claude`'s log (see
+/// `write_fake_claude`).
+#[cfg(unix)]
+fn claude_log_lines(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 struct Env {
@@ -122,7 +139,6 @@ struct Env {
     home_real: PathBuf,
     xdg_config: PathBuf,
     bin_dir: PathBuf,
-    log: PathBuf,
 }
 
 impl Env {
@@ -130,21 +146,22 @@ impl Env {
         let home = tempfile::tempdir().unwrap();
         let home_real = fs::canonicalize(home.path()).unwrap();
         let xdg_config = home.path().join("xdg-config");
+        // Empty (no `claude` on it) by default: only the tests that need a real,
+        // executable fake `claude` add one themselves, since that's unix-only (see
+        // `write_fake_claude`).
         let bin_dir = home.path().join("bin");
-        let log = home.path().join("claude.log");
-        write_fake_claude(&bin_dir, &log);
+        fs::create_dir_all(&bin_dir).unwrap();
         Self {
             home,
             home_real,
             xdg_config,
             bin_dir,
-            log,
         }
     }
 
-    /// Base command with HOME/XDG_CONFIG_HOME/PATH pinned to this sandbox (PATH has
-    /// only the fake `claude`) and no `--bin`, so setup and relocate both fall back to
-    /// the running test binary's own path, which is a real, existing executable.
+    /// Base command with HOME/XDG_CONFIG_HOME/PATH pinned to this sandbox and no
+    /// `--bin`, so setup and relocate both fall back to the running test binary's own
+    /// path, which is a real, existing executable.
     fn command(&self) -> Command {
         let mut cmd = bin();
         cmd.env("HOME", self.home.path())
@@ -157,33 +174,30 @@ impl Env {
         cmd
     }
 
+    #[cfg(unix)]
     fn claude_settings(&self) -> Value {
         read_json(self.home.path().join(".claude/settings.json"))
     }
 
+    #[cfg(unix)]
     fn opencode_config(&self) -> Value {
         read_json(self.xdg_config.join("opencode/opencode.json"))
     }
 
+    #[cfg(unix)]
     fn devin_mcp_config(&self) -> Value {
         read_json(self.home.path().join(".config/devin/mcp_config.json"))
     }
-
-    fn claude_log_lines(&self) -> Vec<String> {
-        fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
 }
 
+#[cfg(unix)]
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
 /// The `--db` a settings.json Claude Code hook command was built with, read back out
 /// of the (shell-quoted) SessionStart command string.
+#[cfg(unix)]
 fn hook_db_arg(settings: &Value) -> String {
     let command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
@@ -191,9 +205,14 @@ fn hook_db_arg(settings: &Value) -> String {
     command.to_owned()
 }
 
+// Repointing Claude Code re-runs its `claude mcp add-json` registration, which needs a
+// `claude` that can actually be executed; see `write_fake_claude`.
+#[cfg(unix)]
 #[test]
 fn relocate_moves_the_vault_repoints_every_global_client_and_backs_up_the_old_file() {
     let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    write_fake_claude(&env.bin_dir, &log);
     let db_a = env.home_real.join("vault-a.sqlite3");
     let db_b = env.home_real.join("moved/vault-b.sqlite3");
 
@@ -208,10 +227,10 @@ fn relocate_moves_the_vault_repoints_every_global_client_and_backs_up_the_old_fi
         .unwrap();
     assert_success(&output);
     assert_eq!(
-        env.claude_log_lines().len(),
+        claude_log_lines(&log).len(),
         1,
         "{:?}",
-        env.claude_log_lines()
+        claude_log_lines(&log)
     );
 
     publish(&db_a, "a-test-skill");
@@ -245,10 +264,10 @@ fn relocate_moves_the_vault_repoints_every_global_client_and_backs_up_the_old_fi
 
     // Claude Code's MCP registration (outside any file) was re-run.
     assert_eq!(
-        env.claude_log_lines().len(),
+        claude_log_lines(&log).len(),
         2,
         "{:?}",
-        env.claude_log_lines()
+        claude_log_lines(&log)
     );
 
     // B has the data, A is gone but kept as a renamed backup.

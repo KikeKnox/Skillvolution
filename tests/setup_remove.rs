@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 #[derive(Parser)]
@@ -274,7 +273,13 @@ fn rollback_restores_earlier_edits_on_a_failing_write() {
     );
 }
 
+/// A `#!/bin/sh` script; unix-only, like the one test that calls it (unregistering
+/// needs a `claude` that can actually be run, and a shebang script isn't a valid
+/// executable on Windows).
+#[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     fs::write(
@@ -282,13 +287,11 @@ fn write_fake_claude(dir: &Path, log: &Path) {
         format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display()),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+// Needs a real, executable fake `claude` on PATH; see `write_fake_claude`.
+#[cfg(unix)]
 #[test]
 fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mcp() {
     let home = tempfile::tempdir().unwrap();
@@ -308,6 +311,7 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
     }));
     fs::write(claude_dir.join("settings.json"), &claude_settings).unwrap();
 
+    use std::process::Command;
     let command = |args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
         cmd.arg("--db")
