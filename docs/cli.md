@@ -114,12 +114,13 @@ wired by `setup`; the exact matcher and event each client uses is in
 skillvolution hook session-start [--client CLIENT] [--project KEY]
 ```
 
-Prints the skill catalog as session context: a "follow the `evolution` skill" header,
+Prints the skill catalog as session context: a header telling the agent to check it
+before non-trivial work and say in one line which skill it applies (or that none matched),
 then up to 30 published skills visible to the project with id, version, description,
 and helped/failed counts (or `No published skills are visible to this project yet.`).
 
-`--client` selects the output envelope (default `claude-code`): `claude-code` prints the
-raw text; `devin`, `codex`, and `gemini` print
+`--client` selects the output envelope (default `claude-code`): `claude-code`, `devin`,
+`codex`, and `gemini` print
 `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":…}}`;
 `cursor` prints `{"additional_context":…}`. `--project` resolves like `serve`'s.
 

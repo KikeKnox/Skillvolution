@@ -150,8 +150,8 @@ Two tracking designs:
 `{"decision":"approve","reason":"Skillvolution-managed tool"}` for
 `run_subagent`, `read_subagent` and every `mcp__skillvolution__*` tool.
 
-`session-start` prints the catalog: plain text for Claude, a JSON
-`additional_context` payload for flag-tracked clients.
+`session-start` prints the catalog as a JSON payload: `hookSpecificOutput.additionalContext`
+for Claude Code, Devin, Codex, and Gemini, `additional_context` for Cursor.
 
 ## Setup design
 

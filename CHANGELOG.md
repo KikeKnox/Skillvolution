@@ -7,6 +7,15 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code sessions visibly check the vault again: `hook session-start`
+  now sends the catalog as `hookSpecificOutput.additionalContext` JSON
+  instead of plain stdout (which arrived as a "hook success" status line),
+  and its header asks the agent to say in one line which vault skill it is
+  applying, or that none matched, before non-trivial work.
+  The OpenCode plugin unwraps that JSON and still accepts plain text.
+
 ## [v0.3.1]
 
 _2026-09-27_

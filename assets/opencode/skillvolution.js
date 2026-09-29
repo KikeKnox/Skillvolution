@@ -56,6 +56,16 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
   const env = { ...process.env };
   delete env.CLAUDE_PROJECT_DIR;
 
+  // session-start prints Claude Code's hookSpecificOutput JSON; older
+  // binaries printed the catalog as plain text.
+  const catalogText = (stdout) => {
+    try {
+      const context = JSON.parse(stdout)?.hookSpecificOutput?.additionalContext;
+      if (typeof context === "string") return context.trim();
+    } catch {}
+    return stdout.trim();
+  };
+
   const loadCatalog = (sessionID) =>
     new Promise((resolve) => {
       const args = ["--db", DB, "hook", "session-start"];
@@ -69,7 +79,7 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
           catalogs.delete(sessionID);
           return resolve("");
         }
-        resolve(stdout.trim());
+        resolve(catalogText(stdout));
       });
     });
 

@@ -72,7 +72,8 @@ it only scans the transcript).
 Legacy cleanup: a Skillvolution-managed block in `CLAUDE.md` is removed.
 
 **Reminder behavior** (verified live): `SessionStart` prints the catalog as
-context. `Stop` scans the session transcript JSONL from the stored offset;
+`hookSpecificOutput.additionalContext` JSON; plain stdout reaches the model only
+as a "hook success" status line. `Stop` scans the session transcript JSONL from the stored offset;
 work = `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, a review counts only when
 `publish_skill` or `report_skill_outcome` succeeds. If the latest edit is
 newer than the latest successful review, the hook prints

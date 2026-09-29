@@ -519,7 +519,7 @@ fn run_hook_session_start(
 }
 
 #[test]
-fn cli_hook_session_start_prints_the_catalog() {
+fn cli_hook_session_start_prints_the_catalog_as_additional_context() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut vault = Vault::open(&db).unwrap();
@@ -527,7 +527,13 @@ fn cli_hook_session_start_prints_the_catalog() {
     drop(vault);
     let output = run_hook_session_start(&db, None, dir.path(), &[]);
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("rust-tests"));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let context = json["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("rust-tests"));
+    assert!(context.contains("tell the user in one line"));
 }
 
 // --- runtime project detection (no --project flag) ------------------------

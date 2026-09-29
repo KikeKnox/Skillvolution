@@ -133,8 +133,7 @@ impl HookClient {
     /// The SessionStart output that injects `context` into this client's session.
     fn session_context(self, context: String) -> String {
         match self {
-            Self::ClaudeCode => context,
-            Self::Devin | Self::Codex | Self::Gemini => serde_json::json!({
+            Self::ClaudeCode | Self::Devin | Self::Codex | Self::Gemini => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
                     "additionalContext": context,

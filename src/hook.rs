@@ -32,7 +32,10 @@ If there is nothing to report or evaluate, say so in a single short line with no
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     let page = vault.search("", project, CATALOG_LIMIT, 0)?;
     let mut text = String::from(
-        "Skillvolution vault (shared procedural memory): follow the `evolution` skill.\n",
+        "Skillvolution vault (shared procedural memory). Before any non-trivial task, follow \
+         step 1 of the `evolution` skill: check this catalog (run `search_skills` if nothing \
+         here fits), then tell the user in one line which vault skill you are applying (id and \
+         version) or that none matched.\n",
     );
     if page.skills.is_empty() {
         text.push_str("No published skills are visible to this project yet.\n");
