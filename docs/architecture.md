@@ -24,7 +24,7 @@ client hooks.
 
 | Module | Role |
 |---|---|
-| `hook.rs` | `session-start`, `tool-use`, `stop`, `session-end`, `approve` implementations; Claude transcript scan; per-session work/review flags |
+| `hook.rs` | `session-start`, `prompt`, `tool-use`, `stop`, `session-end`, `approve` implementations; prompt keyword extraction and relevance gate; Claude transcript scan; per-session work/review flags |
 
 ### Vault
 
@@ -42,22 +42,22 @@ client hooks.
 
 | Module | Role |
 |---|---|
-| `setup/mod.rs` | `Scope`, `Change`/`Edit` model, atomic apply with rollback, `setup`/`--remove`/`--dry-run` orchestration |
+| `setup/mod.rs` | `Scope`, `Change`/`Edit` model, atomic apply with rollback, `setup`/`--remove`/`--dry-run` orchestration; `SKILLS`, the table of managed skills (`evolution`, `skill-evaluation`, `skill-acquisition`) embedded from `assets/<name>/SKILL.md` |
 | `setup/client.rs` | `ClientKind` enum, client sets, per-client `global_dir`/`changes`/`removals` dispatch |
-| `setup/common.rs` | Shared pieces: config dirs from env, managed skill/`AGENTS.md` changes, MCP server argv |
-| `setup/fs_safe.rs` | Atomic file writes with backup; strict-JSON load/merge/remove helpers |
+| `setup/common.rs` | Shared pieces: config dirs from env, the managed skills' changes/removals (one per `SKILLS` entry) and `AGENTS.md` block, MCP server argv |
+| `setup/fs_safe.rs` | Atomic file writes with backup; per-skill ownership checks (`check_skill`/`is_our_skill` by marker name); strict-JSON load/merge/remove helpers |
 | `setup/hooks.rs` | Builds hook entries for all clients; own entries are recognized by command text so reruns replace instead of duplicating |
 | `setup/permissions.rs` | Permission grants merged into client settings (subagent dispatch + MCP tools) |
-| `setup/plugin.rs` | Embeds `assets/opencode/skillvolution.js` with `--bin`/`--db` substitution |
+| `setup/plugin.rs` | Embeds `assets/opencode/skillvolution.js` with `--bin`/`--db` substitution; a test pins the plugin's `REVIEW_REMINDER` to `hook::STOP_REASON` |
 | `setup/claude.rs` | Claude Code: settings, `.mcp.json`, skill install, legacy `CLAUDE.md` cleanup |
 | `setup/claude_cli.rs` | Shelling out to `claude mcp add-json/remove/get` for user-scope MCP registration |
 | `setup/opencode.rs` | OpenCode: `opencode.json`/`opencode.jsonc`, permissions, plugin |
 | `setup/devin.rs` | Devin CLI: `mcp_config.json`, `config.json`, `AGENTS.md` |
 | `setup/codex.rs` | Codex CLI: `config.toml`, `hooks.json`, `AGENTS.md` |
 | `setup/gemini.rs` | Gemini CLI: `settings.json`, `GEMINI.md` |
-| `setup/cursor.rs` | Cursor: `mcp.json`, `hooks.json`, `cli.json`, rules file |
+| `setup/cursor.rs` | Cursor: `mcp.json`, `hooks.json`, `cli.json`, rules file (no prompt hook: `beforeSubmitPrompt` cannot inject context) |
 | `setup/global.rs` | Global-scope orchestration: client detection, `claude mcp` registration |
-| `setup/inspect.rs` | Read-only inspection `doctor` uses to compare files against what setup would write |
+| `setup/inspect.rs` | Read-only inspection `doctor` uses to compare files against what setup would write; reads each managed skill's marker version |
 | `setup/remove.rs` | `setup --remove` planning and diff printing |
 | `setup/prompt.rs` | Interactive client selection via `/dev/tty`; `SKILLVOLUTION_NO_INPUT` handling |
 
@@ -141,17 +141,85 @@ Enforced in `src/vault/revisions.rs` (and `mcp.rs` for tool-level checks):
 `skillvolution hook: <err>` to stderr and the process exits 0, so a broken
 vault never stalls the agent.
 
-Two tracking designs:
+Two tracking designs. In both, work is a file edit **or a successful `get_skill`**: whoever loaded a skill owes an outcome report, so loading counts like editing. Vault tools are matched by name suffix, since each client prefixes MCP tool names its own way.
 
-- **Claude Code** — transcript scan. `Stop` reads the session transcript JSONL from the stored byte offset (`hook_state`). Work tools: `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (Bash does not count). A review counts only when a `publish_skill` or `report_skill_outcome` tool result succeeds (`is_error` results don't). The hook blocks when the latest relevant edit is newer than the latest successful review. Each transcript span is judged once; `stop_hook_active=true` prevents repeated blocking.
-- **Flag-tracked clients** (Devin, Codex, Gemini, Cursor) — `tool-use` sets `worked` on matching tools and `reviewed` on vault review tools; `stop` emits the reminder if `worked` is set after `reviewed`. Work after a review re-arms the reminder; every judged stop consumes the span. `session-end` deletes the session state. Work tools per client: Devin `write`/`edit`/`apply_patch`/`notebook_edit`, Codex `apply_patch`, Gemini `write_file`/`replace`, Cursor `Write`.
+- **Claude Code** — transcript scan. `Stop` reads the session transcript JSONL from the stored byte offset (`hook_state`). Work tools: `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (Bash does not count), plus `get_skill`. A review or load counts only when its tool result succeeds (`is_error` results don't). The hook blocks when the latest work (edit or successful load) is newer than the latest successful `publish_skill`/`report_skill_outcome`. Each transcript span is judged once; `stop_hook_active=true` prevents repeated blocking.
+- **Flag-tracked clients** (Devin, Codex, Gemini, Cursor) — `tool-use` sets `worked` on matching file-editing tools or `get_skill` and `reviewed` on vault review tools; `stop` emits the reminder if `worked` is set after `reviewed`. Work after a review re-arms the reminder; every judged stop consumes the span. `session-end` deletes the session state. Work tools per client: Devin `write`/`edit`/`apply_patch`/`notebook_edit`, Codex `apply_patch`, Gemini `write_file`/`replace`, Cursor `Write` (plus `get_skill` everywhere; each client's `PostToolUse` matcher includes its vault tools).
+
+The reminder text is `STOP_REASON` in `hook.rs`: it asks for `report_skill_outcome` on every skill loaded with `get_skill`, then for any lesson meeting the criteria a fresh subagent following the `skill-evaluation` skill, then `publish_skill`. The OpenCode plugin's `REVIEW_REMINDER` must be identical (a test checks it).
 
 `hook approve` (wired to PermissionRequest for Devin and Codex) emits
 `{"decision":"approve","reason":"Skillvolution-managed tool"}` for
 `run_subagent`, `read_subagent` and every `mcp__skillvolution__*` tool.
 
 `session-start` prints the catalog as a JSON payload: `hookSpecificOutput.additionalContext`
-for Claude Code, Devin, Codex, and Gemini, `additional_context` for Cursor.
+for Claude Code, Devin, Codex, and Gemini, `additional_context` for Cursor. Its header
+tells the agent to check the catalog (`search_skills` if nothing fits; matches are also
+suggested per request), say in one line which skill it applies, and follow
+`skill-acquisition` when it lacks the know-how.
+
+### Prompt hook
+
+`hook prompt` is prompt-time retrieval: SessionStart runs before the task is known, so
+the catalog alone rarely surfaces the right skill. The hook reads the payload's `prompt`
+field and runs, in `hook.rs`:
+
+1. **Keywords** — split on non-alphanumerics, lowercase and fold Latin diacritics (the
+   same folding FTS5's `remove_diacritics 2` does), then drop English and Spanish
+   stopwords (including `use` and `when`, which start every skill description), tokens
+   shorter than 3 characters or longer than 30 bytes (hashes, paths), and repeats.
+   First-seen order, capped at 16 keywords.
+2. **Minimum** — fewer than 2 keywords means no search and no output.
+3. **Search** — the keywords go through the normal `search` (project-scoped, outcome
+   ranked); the top 5 hits are candidates.
+4. **Gate** — bm25 depends on the whole corpus, so a hit is re-checked against its own
+   metadata with the same prefix semantics FTS uses: it must match one keyword in its id
+   or tags, or two distinct keywords across id, description, and tags. A body-only match
+   fails. A skill whose current version has net failures (`failed - helped`) of 2 or
+   more is never suggested. At most 3 hits are kept, in search order.
+5. **Output** — `Skillvolution: vault skills matching this request:` followed by one
+   `- id vN: description [helped H, failed F]` line per skill and an instruction to call
+   `get_skill` for the best match, say in one line which skill is applied (or that none
+   fits), and call `report_skill_outcome` afterwards. Printed as
+   `hookSpecificOutput.additionalContext` with the client's event name (`UserPromptSubmit`
+   for Claude Code, Codex, and Devin; `BeforeAgent` for Gemini CLI). When nothing is
+   relevant nothing is printed, so the client adds nothing.
+
+Cursor is not wired: its `beforeSubmitPrompt` can only allow or block the prompt, with
+no field that adds context, so `hook prompt --client cursor` fails (stderr, exit 0,
+like every hook). OpenCode has no hook config; its plugin calls `hook prompt` from the
+`chat.message` hook for each top-level user message and appends the result to that
+turn's system prompt. Devin's `UserPromptSubmit` payload follows its docs but is
+unverified against a live session.
+
+## MCP tool changes for accountability
+
+`get_skill` results carry a `next` field instructing the agent to apply the procedure
+only as far as it fits, verify it with the Verification section, and call
+`report_skill_outcome` with the loaded id and version. The tool descriptions and the
+`initialize` instructions mention per-request suggestions, the one-line "which skill I
+am applying" statement, the `skill-acquisition` skill, and that publication requires a
+fresh subagent following `skill-evaluation`.
+
+## Managed skills
+
+`setup` installs every entry of `SKILLS` (`setup/mod.rs`) per client at
+`<skills dir>/<name>/SKILL.md`:
+
+| Skill | Purpose |
+|---|---|
+| `evolution` (v10) | The vault loop: search and apply, report outcomes, reflect, dispatch the evaluator, publish |
+| `skill-evaluation` | The evaluator subagent's rubric: hard gates, 16-point rubric (keep at 11+), verdict format `publish_skill` expects |
+| `skill-acquisition` | What an agent follows on noticing it lacks know-how: vault first, then local and authoritative sources, a small experiment, stop-loss, capture |
+
+Each file starts with the frontmatter `name` and carries its own marker
+`<!-- skillvolution-managed:<name>:vN -->`. The marker decides ownership per file: setup
+overwrites a file with its marker (any version), refuses to write over a file at that
+path without it (an `unowned` conflict), and `--remove` deletes only marked files,
+skipping a user's own file with a note, then removes each skill directory that ended up
+empty. `doctor` compares each installed marker version with the binary's. The
+AGENTS.md block and the Cursor rule tell the agent to use `skill-acquisition` and to
+have the evaluator follow `skill-evaluation`.
 
 ## Setup design
 
@@ -177,7 +245,7 @@ for Claude Code, Devin, Codex, and Gemini, `additional_context` for Cursor.
 `skillvolution doctor` is read-only. It opens the vault read-only (schema
 version, `PRAGMA quick_check`, FTS orphan check, stats) and diffs each
 detected client's files against what `setup` would write — stale skill
-versions, missing configured binaries, Claude MCP registration status, and
+versions (each managed skill checked separately), missing configured binaries, Claude MCP registration status, and
 legacy installs. `--json` emits the same checks as data; the command exits
 non-zero on failures.
 

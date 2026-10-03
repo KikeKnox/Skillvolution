@@ -60,15 +60,55 @@ sanitized directory name differs (see
 - Run `skillvolution doctor` — a hook config that differs from the current binary's
   output, or a missing configured binary, is the usual cause.
 - For Claude Code the Stop hook only blocks when the transcript contains an
-  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call after the last *successful*
-  `publish_skill`/`report_skill_outcome` — `Bash` and other tools don't count as work,
-  and a review call that returned an error doesn't count as a review.
+  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call or a successful `get_skill` after the
+  last *successful* `publish_skill`/`report_skill_outcome` — `Bash` and other tools
+  don't count as work, a `get_skill` that returned an error (unknown id) doesn't count
+  as a load, and a review call that returned an error doesn't count as a review.
 - For the flag-tracked clients the `PostToolUse`/`AfterTool`/`postToolUse` hook must
   have matched a file-editing tool — `write`/`edit`/`apply_patch`/`notebook_edit`
-  (Devin), `apply_patch` (Codex), `write_file`/`replace` (Gemini CLI), `Write` (Cursor).
-  If your client names the tool something else, no work is flagged.
+  (Devin), `apply_patch` (Codex), `write_file`/`replace` (Gemini CLI), `Write` (Cursor),
+  or the vault's `get_skill`. If your client names the tool something else, no work is
+  flagged.
 - OpenCode never blocks: the reminder is added to the *system prompt* of turns after a
   working turn goes idle, so it's invisible until the next turn.
+
+## Skill suggestions never appear
+
+The `prompt` hook prints nothing unless a skill clears its gate, so silence is often
+correct. Check, in order:
+
+- **Too few keywords.** After English/Spanish filler words, words under 3 characters,
+  and repeats are dropped, the prompt needs at least 2 keywords. "hola, tests" leaves
+  one (`tests`), so it is never searched; name the tool or the error.
+- **No match in the skill's metadata.** A hit counts only when one keyword is in its
+  id or tags, or two distinct keywords are spread across id, description, and tags. A
+  body-only match is not suggested, and only the top 5 search hits are judged.
+- **The skill is failing.** A skill whose current version has two or more net
+  failures (failed minus helped) is never suggested; `skillvolution outcomes --failing`
+  lists them. Deprecated skills and project skills from another project are not
+  visible either.
+- **The hook isn't installed.** Run `skillvolution doctor` and rerun
+  `skillvolution setup`: configs written by an older binary have no `UserPromptSubmit`
+  (`BeforeAgent` for Gemini CLI) entry or plugin `chat.message` hook. Cursor never has
+  one, because `beforeSubmitPrompt` can't inject context. Subagent sessions in OpenCode
+  get no suggestions either.
+- **Try it by hand**, with the same paths the config records:
+  `echo '{"prompt":"debug docker buildx multiarch push"}' | skillvolution hook prompt`
+  prints the `additionalContext` JSON when a skill matches and nothing otherwise;
+  errors go to stderr (exit stays 0).
+
+## A user's own file at `skills/<name>/SKILL.md` blocks setup
+
+`setup` installs three managed skills (`evolution`, `skill-evaluation`,
+`skill-acquisition`) and refuses to overwrite a file at one of those paths that doesn't
+carry that skill's `skillvolution-managed:<name>:` marker, failing with
+``unowned `skill-acquisition` skill conflict: <path>`` (for whichever skill collides).
+Setup stops with that error. Rename or move your file (or merge its
+content into a differently named skill) and rerun. `setup --remove` leaves such a file
+alone and prints `skipped <path> (not ours)`.
+
+A marker with an older version is ours and is simply overwritten. `doctor` reports
+`rerun setup to update the <name> skill (installed vN, current vM)` per skill.
 
 ## The reminder fires twice in one repository
 
