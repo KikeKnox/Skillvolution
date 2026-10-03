@@ -131,6 +131,15 @@ mod tests {
     }
 
     #[test]
+    fn review_reminder_matches_the_stop_reason_exactly() {
+        let literal = serde_json::to_string(crate::hook::STOP_REASON).unwrap();
+        assert!(
+            TEMPLATE.contains(&format!("const REVIEW_REMINDER =\n  {literal};")),
+            "REVIEW_REMINDER in assets/opencode/skillvolution.js must equal STOP_REASON"
+        );
+    }
+
+    #[test]
     fn raw_template_is_valid_js_before_substitution() {
         // Placeholders are bare identifiers, which `node --check` accepts: it only
         // parses syntax, it doesn't resolve them.

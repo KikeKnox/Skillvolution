@@ -21,7 +21,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search_skills",
-            "description": "Search the shared skill vault before starting a non-trivial task. Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance and by reported outcomes: a skill with more failed than helped reports on its current version is demoted, so it can land below a weaker text match, while a proven one is promoted. Returns `skills` (metadata only: id, version, description, tags, helped/failed counts — call get_skill for the body), `total`, and `has_more` for pagination. An empty query lists the catalog.",
+            "description": "Search the shared skill vault before starting a non-trivial task, and again whenever you hit something you don't know how to do (matching skills may also be suggested with each request). Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance and by reported outcomes: a skill with more failed than helped reports on its current version is demoted, so it can land below a weaker text match, while a proven one is promoted. Returns `skills` (metadata only: id, version, description, tags, helped/failed counts — call get_skill for the body), `total`, and `has_more` for pagination. An empty query lists the catalog.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -35,7 +35,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_skill",
-            "description": "Load the body of one published skill that matched your task. Defaults to the latest published version. Only returns skills visible to the current project (global skills, plus this project's own); a deprecated skill still returns its body, with a `deprecated: true` flag.",
+            "description": "Load the body of one published skill that matched your task, then tell the user in one line which skill (id and version) you are applying. Defaults to the latest published version. Only returns skills visible to the current project (global skills, plus this project's own); a deprecated skill still returns its body, with a `deprecated: true` flag. Loading a skill commits you to reporting it: after applying it, call report_skill_outcome with this id and version, as the result's `next` field says.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -332,11 +332,16 @@ impl Server {
             }
             "get_skill" => {
                 let args: GetArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                Ok(serde_json::to_value(self.vault.get(
-                    &args.id,
-                    args.version,
-                    project,
-                )?)?)
+                let skill = self.vault.get(&args.id, args.version, project)?;
+                let next = format!(
+                    "Apply this procedure only as far as it fits the task, verify the result with its \
+                     Verification section, then call report_skill_outcome with id {} and version {}: \
+                     helped, failed (name the step that was wrong), or not_applicable.",
+                    skill.id, skill.version
+                );
+                let mut value = serde_json::to_value(skill)?;
+                value["next"] = json!(next);
+                Ok(value)
             }
             "report_skill_outcome" => {
                 let args: OutcomeArgs = serde_json::from_value(arguments).map_err(parse_error)?;
@@ -402,9 +407,11 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         "capabilities": {"tools": {"listChanged": false}},
-        "instructions": "Call search_skills before starting non-trivial work, and get_skill to load a match's body. \
-            After applying a skill, call report_skill_outcome so future rankings reflect what happened. \
-            Only call publish_skill after a fresh-context evaluator has verified the lesson is worth keeping."
+        "instructions": "Call search_skills before starting non-trivial work (matching skills may also be suggested with each request), \
+            and get_skill to load a match's body; tell the user in one line which skill (id and version) you are applying. \
+            Every skill loaded with get_skill needs a report: after applying it, call report_skill_outcome so future rankings reflect what happened. \
+            When you hit something you don't know how to do, follow the skill-acquisition skill: search the vault first, then research and verify. \
+            Only call publish_skill after a fresh subagent following the skill-evaluation skill has judged the lesson worth keeping."
     })
 }
 

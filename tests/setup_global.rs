@@ -212,6 +212,10 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     );
     assert!(stop_cmd.ends_with(" hook stop"), "{stop_cmd}");
     assert!(!session_cmd.contains("--project"));
+    let prompt_cmd = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(prompt_cmd.ends_with(" hook prompt"), "{prompt_cmd}");
     assert_eq!(
         settings["permissions"]["allow"],
         serde_json::json!(["Agent", "Task", "mcp__skillvolution"])
@@ -856,6 +860,7 @@ fn global_devin_writes_expected_files() {
     );
     for event in [
         "SessionStart",
+        "UserPromptSubmit",
         "PostToolUse",
         "Stop",
         "SessionEnd",
@@ -873,6 +878,13 @@ fn global_devin_writes_expected_files() {
         "{session_cmd}"
     );
     assert!(!session_cmd.contains("--project"), "{session_cmd}");
+    let prompt_cmd = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        prompt_cmd.ends_with("hook prompt --client devin"),
+        "{prompt_cmd}"
+    );
     let stop_cmd = config["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();

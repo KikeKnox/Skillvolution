@@ -441,6 +441,14 @@ fn settings_local_json_gets_hooks_with_correct_commands() {
     assert!(session_cmd.contains(" --db "));
     let stop_cmd = stop["command"].as_str().unwrap();
     assert!(stop_cmd.ends_with(" hook stop"));
+    // Prompt retrieval is scoped to the project like the catalog.
+    let prompt = &settings["hooks"]["UserPromptSubmit"][0];
+    assert!(prompt.get("matcher").is_none());
+    let prompt_cmd = prompt["hooks"][0]["command"].as_str().unwrap();
+    assert!(
+        prompt_cmd.contains(" hook prompt --project "),
+        "{prompt_cmd}"
+    );
 }
 
 #[test]
@@ -497,8 +505,10 @@ fn changed_bin_path_replaces_owned_hooks_without_duplicating() {
     install_full(p, "claude-code", "dir-two/skillvolution", None).unwrap();
     let settings = read_json(p.join(".claude/settings.local.json"));
     let session_groups = settings["hooks"]["SessionStart"].as_array().unwrap();
+    let prompt_groups = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
     let stop_groups = settings["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(session_groups.len(), 1, "{session_groups:?}");
+    assert_eq!(prompt_groups.len(), 1, "{prompt_groups:?}");
     assert_eq!(stop_groups.len(), 1, "{stop_groups:?}");
     let stop_cmd = stop_groups[0]["hooks"][0]["command"].as_str().unwrap();
     assert!(stop_cmd.contains("dir-two"));
@@ -664,6 +674,7 @@ fn installs_devin_project_files() {
     );
     for event in [
         "SessionStart",
+        "UserPromptSubmit",
         "PostToolUse",
         "Stop",
         "SessionEnd",
@@ -684,6 +695,13 @@ fn installs_devin_project_files() {
     assert!(
         session_cmd.contains("hook session-start --client devin --project"),
         "{session_cmd}"
+    );
+    let prompt_cmd = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        prompt_cmd.contains("hook prompt --client devin --project"),
+        "{prompt_cmd}"
     );
     // PostToolUse and PermissionRequest carry a tool-name matcher; the others don't.
     assert!(config["hooks"]["PostToolUse"][0]["matcher"].is_string());

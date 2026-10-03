@@ -1,8 +1,9 @@
 // skillvolution-managed:opencode-plugin
-// Skillvolution for OpenCode: injects the vault catalog into the system prompt
-// and, once a turn that did work ends without a report or publication, adds a
-// review reminder to the system prompt of the following turns until the work
-// is reviewed. It never prompts the session itself, so no extra turn is spent.
+// Skillvolution for OpenCode: injects the vault catalog, plus the vault skills
+// matching the latest user message, into the system prompt and, once a turn
+// that did work (file edits or get_skill loads) ends without a report or
+// publication, adds a review reminder to the system prompt of the following
+// turns until the work is reviewed. It never prompts the session itself, so no extra turn is spent.
 // Setup rewrites this file on install; local edits will be overwritten.
 import { execFile } from "node:child_process";
 
@@ -12,19 +13,17 @@ const DB = __SKILLVOLUTION_DB__;
 // setup, where the running MCP server's project is detected from cwd instead.
 const PROJECT_KEY = __SKILLVOLUTION_PROJECT_KEY__;
 
-// Keep in sync with STOP_REASON in src/hook.rs.
+// Keep in sync with STOP_REASON in src/hook.rs (a test in src/setup/plugin.rs
+// checks that this literal matches it exactly).
 const REVIEW_REMINDER =
-  "Skillvolution review: you edited files since the last review. " +
-  "Follow the Report and Reflect steps of the evolution skill now: call report_skill_outcome for any vault skill you applied, " +
-  "and for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent now " +
-  "— do not ask the user first — to judge it " +
-  "(global scope, project scope, or discard), then call publish_skill with the verdict and its reason. " +
-  'If there is nothing to report or evaluate, reply only "No lesson."';
+  "Skillvolution review: you edited files or loaded vault skills since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 // OpenCode built-in tool ids that edit files.
 const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"]);
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
 const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
+// Loading a vault skill is work too: its outcome must be reported.
+const LOAD_TOOL = "get_skill";
 
 // Session-keyed maps are pruned on session.deleted, but a long-running
 // `opencode serve` can outlive that event for some sessions; capping every
@@ -38,6 +37,7 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       .catch(() => {});
 
   const catalogs = new Map(); // sessionID -> Promise<string>
+  const suggestions = new Map(); // sessionID -> Promise<string>
   const sessions = new Map(); // sessionID -> { worked, reviewed, remind }
   const parents = new Map(); // sessionID -> Promise<parentID | undefined>
   const capped = (map) => {
@@ -56,9 +56,9 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
   const env = { ...process.env };
   delete env.CLAUDE_PROJECT_DIR;
 
-  // session-start prints Claude Code's hookSpecificOutput JSON; older
-  // binaries printed the catalog as plain text.
-  const catalogText = (stdout) => {
+  // session-start and prompt print Claude Code's hookSpecificOutput JSON;
+  // older binaries printed the catalog as plain text.
+  const contextText = (stdout) => {
     try {
       const context = JSON.parse(stdout)?.hookSpecificOutput?.additionalContext;
       if (typeof context === "string") return context.trim();
@@ -79,8 +79,27 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
           catalogs.delete(sessionID);
           return resolve("");
         }
-        resolve(catalogText(stdout));
+        resolve(contextText(stdout));
       });
+    });
+
+  // `hook prompt` reads the prompt from stdin and prints the matching skills,
+  // or nothing when none is relevant. A failure only costs this turn's
+  // suggestions, like a failed catalog load.
+  const loadSuggestions = (prompt) =>
+    new Promise((resolve) => {
+      const args = ["--db", DB, "hook", "prompt"];
+      if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
+      const options = { cwd: directory, env, timeout: 15000 };
+      const child = execFile(BIN, args, options, (error, stdout) => {
+        if (error) {
+          log("warn", `skill suggestions unavailable: ${error.message}`);
+          return resolve("");
+        }
+        resolve(contextText(stdout));
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(JSON.stringify({ prompt }));
     });
 
   // Subagent (task) sessions hand their work and reviews to the parent:
@@ -120,6 +139,7 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
     } else if (event.type === "session.deleted") {
       sessions.delete(sessionID);
       catalogs.delete(sessionID);
+      suggestions.delete(sessionID);
       parents.delete(sessionID);
     }
   };
@@ -141,12 +161,38 @@ export const SkillvolutionPlugin = async ({ client, directory }) => {
       }
       const catalog = await catalogs.get(sessionID);
       if (catalog) output.system.push(catalog);
+      const suggestion = await suggestions.get(sessionID);
+      if (suggestion) output.system.push(suggestion);
       if (sessions.get(sessionID)?.remind) output.system.push(REVIEW_REMINDER);
+    },
+
+    // A new user message: look up the skills matching its text for this
+    // turn's system prompt. Subagent sessions get none (their prompt is the
+    // parent's delegation), and the lookup runs without holding up the
+    // message itself.
+    "chat.message": async ({ sessionID }, output) => {
+      if (!sessionID) return;
+      const text = (output?.parts ?? [])
+        .filter((part) => part?.type === "text" && !part.synthetic && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("\n")
+        .trim();
+      if (!text) {
+        suggestions.delete(sessionID);
+        return;
+      }
+      suggestions.set(
+        sessionID,
+        parentOf(sessionID)
+          .then((parent) => (parent ? "" : loadSuggestions(text)))
+          .catch(() => ""),
+      );
+      capped(suggestions);
     },
 
     "tool.execute.after": async ({ tool, sessionID }) => {
       const s = state(await ownerOf(sessionID));
-      if (WORK_TOOLS.has(tool)) s.worked = true;
+      if (WORK_TOOLS.has(tool) || tool.endsWith(LOAD_TOOL)) s.worked = true;
       if (REVIEW_TOOLS.some((name) => tool.includes(name))) {
         s.reviewed = true;
         s.remind = false;

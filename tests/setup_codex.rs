@@ -78,8 +78,9 @@ fn remove_project(project: &Path, db: &Path, dry_run: bool) -> anyhow::Result<()
 
 /// The event names every hook entry `changes` writes, and (for the flag-tracked ones)
 /// a substring their command must carry.
-const HOOK_EVENTS: [(&str, &str); 5] = [
+const HOOK_EVENTS: [(&str, &str); 6] = [
     ("SessionStart", "hook session-start --client codex"),
+    ("UserPromptSubmit", "hook prompt --client codex"),
     ("PostToolUse", "hook tool-use --client codex"),
     ("Stop", "hook stop --client codex"),
     ("SessionEnd", "hook session-end"),
@@ -137,6 +138,13 @@ fn project_install_writes_expected_config_toml_and_hooks_json() {
     assert!(
         session_start.contains(&format!("--project '{key}'")),
         "{session_start}"
+    );
+    let prompt = hook_command(&hooks, "UserPromptSubmit");
+    assert!(prompt.contains(&format!("--project '{key}'")), "{prompt}");
+    assert!(
+        hooks["hooks"]["UserPromptSubmit"][0]
+            .get("matcher")
+            .is_none()
     );
     let matcher = hooks["hooks"]["PostToolUse"][0]["matcher"]
         .as_str()
@@ -253,6 +261,8 @@ fn project_remove_restores_foreign_content_and_deletes_owned_files() {
     fs::write(p.join("AGENTS.md"), &agents).unwrap();
 
     install_project(p, &bin, &db).unwrap();
+    let installed = fs::read_to_string(p.join(".codex/hooks.json")).unwrap();
+    assert!(installed.contains("\"UserPromptSubmit\""), "{installed}");
     remove_project(p, &db, false).unwrap();
 
     assert_eq!(

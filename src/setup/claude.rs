@@ -1,5 +1,6 @@
-//! Claude Code: the native skill file, SessionStart/Stop hooks and permissions in the
-//! settings file (`.claude/settings.local.json` in a project, `settings.json` globally),
+//! Claude Code: the native skill file, SessionStart/UserPromptSubmit/Stop hooks and
+//! permissions in the settings file (`.claude/settings.local.json` in a project,
+//! `settings.json` globally),
 //! and the MCP server: in `.mcp.json` for a project, registered through the `claude`
 //! CLI globally (see `claude_cli`). Project setup also removes the legacy CLAUDE.md
 //! `@import` block.
@@ -55,12 +56,20 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     Ok(changes)
 }
 
+/// SessionStart (catalog), UserPromptSubmit (skills matching each request, injected as
+/// `additionalContext`: https://code.claude.com/docs/en/hooks), and Stop (review). `key`
+/// scopes both retrieval hooks to the project.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start = hooks::hook_cmd(bin, db, "session-start", &hooks::project_flag(key))?;
+    let prompt = hooks::hook_cmd(bin, db, "prompt", &hooks::project_flag(key))?;
     let stop = hooks::hook_cmd(bin, db, "stop", "")?;
     hooks::merge(
         config,
-        &[("SessionStart", None, session_start), ("Stop", None, stop)],
+        &[
+            ("SessionStart", None, session_start),
+            ("UserPromptSubmit", None, prompt),
+            ("Stop", None, stop),
+        ],
     )
 }
 

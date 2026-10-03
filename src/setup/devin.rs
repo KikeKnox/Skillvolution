@@ -101,10 +101,16 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
     Ok(edits)
 }
 
-/// The `hooks` entries for a Devin config: session catalog, per-tool
-/// worked/reviewed tracking, the review-blocking stop, session cleanup, and
-/// auto-approval for the tools the evolution flow needs. `key` scopes
-/// session-start to the project, like the Claude Code setup does.
+/// The `hooks` entries for a Devin config: session catalog, skills matching each
+/// prompt, per-tool worked/reviewed tracking, the review-blocking stop, session cleanup,
+/// and auto-approval for the tools the evolution flow needs. `key` scopes session-start
+/// and prompt to the project, like the Claude Code setup does.
+///
+/// UserPromptSubmit carries the user's text in `prompt` and adds
+/// `hookSpecificOutput.additionalContext` to the agent's context:
+/// https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks (documented, not yet
+/// verified against a live session, like the other Devin hooks). The PostToolUse
+/// matcher's `mcp__skillvolution__.*` covers `get_skill`, which marks work.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start_extra = format!(" --client devin{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
@@ -116,6 +122,11 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
             "SessionStart",
             None,
             hooks::hook_cmd(bin, db, "session-start", &session_start_extra)?,
+        ),
+        (
+            "UserPromptSubmit",
+            None,
+            hooks::hook_cmd(bin, db, "prompt", &session_start_extra)?,
         ),
         (
             "PostToolUse",

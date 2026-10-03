@@ -140,6 +140,13 @@ fn project_remove_restores_foreign_content_and_deletes_owned_files() {
     fs::write(p.join(".devin/config.json"), &devin_config).unwrap();
 
     install_project(p, &bin, &db, "all").unwrap();
+    // The prompt-retrieval hooks are installed, so the byte-for-byte restores below
+    // also prove they are stripped.
+    for path in [".claude/settings.local.json", ".devin/config.json"] {
+        let text = fs::read_to_string(p.join(path)).unwrap();
+        assert!(text.contains("\"UserPromptSubmit\""), "{path}: {text}");
+        assert!(text.contains(" hook prompt"), "{path}: {text}");
+    }
     remove_project(p, &db, None, false).unwrap();
 
     assert_eq!(

@@ -142,7 +142,13 @@ fn rule_content() -> String {
 /// The `hooks` entries for Cursor's `hooks.json`: session catalog, per-tool worked/reviewed
 /// tracking, the review-blocking stop, and session cleanup. `--client cursor` is passed
 /// explicitly on every event but `session-end` (which takes no `--client`), since `hook`'s
-/// own default client is Devin.
+/// own default client is Devin. The `postToolUse` matcher's `MCP:skillvolution_.*` covers
+/// `get_skill`, which marks work, as well as the review tools.
+///
+/// There is no prompt-retrieval hook here: Cursor's `beforeSubmitPrompt` can only let the
+/// prompt through or block it (`continue`/`user_message`), with no field that adds context
+/// for the model (https://cursor.com/docs/hooks), so `hook prompt` has nothing to return
+/// to it. The SessionStart catalog and the skill remain Cursor's only retrieval triggers.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start_extra = format!(" --client cursor{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
@@ -327,6 +333,8 @@ mod tests {
                 "{event}"
             );
         }
+        // beforeSubmitPrompt can't inject context, so no prompt hook is wired.
+        assert!(config["hooks"].get("beforeSubmitPrompt").is_none());
     }
 
     #[test]
