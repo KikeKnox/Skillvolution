@@ -1,6 +1,6 @@
 ---
 name: evolution
-description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills that may match" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
+description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills matching this request" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
 ---
 <!-- skillvolution-managed:evolution:v10 -->
 # Evolution
@@ -13,7 +13,7 @@ Two companion skills handle the parts of the loop that need more depth:
 
 ## 1. Retrieve (before non-trivial work)
 
-1. If the context holds a "Skillvolution: vault skills that may match" suggestion for this request, start there: it was matched against the request's own words. Otherwise scan the session catalog, and run `search_skills` 1-3 times with short keyword sets: technology + action + symptom (e.g. `sqlite migration locked`, `cargo cross-compile linker`). Skip trivial tasks.
+1. If the context holds a "Skillvolution: vault skills matching this request" suggestion, start there: it was matched against the request's own words. Otherwise scan the session catalog, and run `search_skills` 1-3 times with short keyword sets: technology + action + symptom (e.g. `sqlite migration locked`, `cargo cross-compile linker`). Skip trivial tasks.
 2. Call `get_skill` for clear matches — reading the body is cheap, and a skill only improves if someone applies it and reports back. Prefer skills with more helped than failed outcomes.
 3. State in one line which skill (id and version) you are applying, or that none matched.
 4. Mid-task, when you hit something you don't know how to do, switch to the `skill-acquisition` skill instead of guessing; it searches the vault again with the specific gap.
