@@ -145,6 +145,70 @@ fn failed_publish_does_not_count_as_review() {
 }
 
 #[test]
+fn a_loaded_skill_without_a_report_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let get = "mcp__skillvolution__get_skill";
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            user_text("fix the flaky test"),
+            assistant_tool_use(get),
+            tool_result(get, false),
+        ],
+    );
+    let input = stop_input("s1", &transcript, false);
+    assert_eq!(hook::stop(&vault, &input).unwrap(), Some(hook::STOP_REASON));
+}
+
+#[test]
+fn a_loaded_skill_followed_by_a_report_does_not_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let get = "mcp__skillvolution__get_skill";
+    let report = "mcp__skillvolution__report_skill_outcome";
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            assistant_tool_use(get),
+            tool_result(get, false),
+            assistant_tool_use(report),
+            tool_result(report, false),
+        ],
+    );
+    let input = stop_input("s1", &transcript, false);
+    assert!(hook::stop(&vault, &input).unwrap().is_none());
+}
+
+#[test]
+fn a_failed_skill_load_is_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let get = "mcp__skillvolution__get_skill";
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[assistant_tool_use(get), tool_result(get, true)],
+    );
+    let input = stop_input("s1", &transcript, false);
+    assert!(hook::stop(&vault, &input).unwrap().is_none());
+}
+
+#[test]
+fn stop_reason_asks_for_outcomes_of_loaded_skills_and_names_the_evaluation_skill() {
+    for expected in [
+        "edited files or loaded vault skills",
+        "report_skill_outcome for every skill you loaded with get_skill",
+        "fresh subagent that follows the skill-evaluation skill",
+        "publish_skill",
+    ] {
+        assert!(hook::STOP_REASON.contains(expected), "{expected}");
+    }
+}
+
+#[test]
 fn stop_hook_active_never_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
@@ -249,6 +313,198 @@ fn session_start_lists_published_skills_or_says_there_are_none() {
     assert!(text.contains("Use when running tests"));
 }
 
+#[test]
+fn session_start_mentions_per_request_suggestions_and_skill_acquisition() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    let text = hook::session_start(&vault, None).unwrap();
+    assert!(text.contains("suggested with each request"), "{text}");
+    assert!(text.contains("`skill-acquisition` skill"), "{text}");
+}
+
+// --- prompt retrieval: keywords and the relevance gate -----------------------
+
+#[test]
+fn keywords_drop_english_and_spanish_stopwords() {
+    assert_eq!(
+        hook::keywords("How do I fix the flaky cargo tests in this repo, please?"),
+        ["fix", "flaky", "cargo", "tests", "repo"]
+    );
+    assert_eq!(
+        hook::keywords("¿Cómo puedo arreglar los tests de cargo para este proyecto?"),
+        ["arreglar", "tests", "cargo", "proyecto"]
+    );
+    // "Use when" opens every skill description, so it must never be a keyword.
+    assert!(hook::keywords("use it when you want").is_empty());
+}
+
+#[test]
+fn keywords_drop_short_tokens_and_repeats_and_fold_case_and_accents() {
+    assert_eq!(
+        hook::keywords("go to db: API api Api, Configuración configuracion"),
+        ["api", "configuracion"]
+    );
+    // A token longer than any useful word (a hash, say) is dropped too.
+    assert_eq!(
+        hook::keywords(&format!("{} cargo", "f".repeat(64))),
+        ["cargo"]
+    );
+}
+
+#[test]
+fn keywords_are_capped_in_first_seen_order() {
+    let prompt: Vec<String> = (0..40).map(|i| format!("word{i}")).collect();
+    let terms = hook::keywords(&prompt.join(" "));
+    assert_eq!(terms.len(), 16);
+    assert_eq!(terms, prompt[..16]);
+}
+
+/// A vault with three unrelated skills, distinct in id, description, and tags.
+fn retrieval_vault(dir: &Path) -> Vault {
+    let mut vault = Vault::open(&dir.join("skills.db")).unwrap();
+    Draft::new("cargo-flaky-tests")
+        .description("Use when cargo test fails intermittently with timeouts")
+        .tags(&["rust", "cargo"])
+        .publish(&mut vault);
+    Draft::new("docker-compose-networking")
+        .description("Use when containers cannot reach each other over the compose network")
+        .tags(&["docker"])
+        .publish(&mut vault);
+    Draft::new("postgres-lock-migrations")
+        .description("Use when a schema migration locks a large table")
+        .tags(&["postgres", "sql"])
+        .content("Also seen with kubernetes deployments.")
+        .publish(&mut vault);
+    vault
+}
+
+fn ids(skills: &[skillvolution::vault::SkillMetadata]) -> Vec<&str> {
+    skills.iter().map(|skill| skill.id.as_str()).collect()
+}
+
+#[test]
+fn a_relevant_prompt_suggests_the_matching_skill_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    let skills =
+        hook::relevant_skills(&vault, None, "my cargo tests time out, are they flaky?").unwrap();
+    assert_eq!(ids(&skills), ["cargo-flaky-tests"]);
+    // The same request in Spanish matches by id and tags all the same.
+    let skills = hook::relevant_skills(&vault, None, "los tests de cargo fallan a veces").unwrap();
+    assert_eq!(ids(&skills)[0], "cargo-flaky-tests");
+}
+
+#[test]
+fn an_unrelated_or_stopword_only_prompt_suggests_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    for prompt in [
+        "write a poem about autumn leaves",
+        "how do I do this, please?",
+        "¿cómo puedo hacer esto para que funcione bien?",
+        // One keyword is too little to go on, even when it names a skill.
+        "docker",
+    ] {
+        assert!(
+            hook::relevant_skills(&vault, None, prompt)
+                .unwrap()
+                .is_empty(),
+            "{prompt}"
+        );
+        let input = json!({ "prompt": prompt }).to_string();
+        assert!(
+            hook::prompt(&vault, None, &input).unwrap().is_none(),
+            "{prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_match_only_in_the_body_or_one_description_word_does_not_clear_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    // "kubernetes" is only in a body; "large" only in one description.
+    for prompt in ["kubernetes pods restarting", "large autumn poem"] {
+        assert!(
+            hook::relevant_skills(&vault, None, prompt)
+                .unwrap()
+                .is_empty(),
+            "{prompt}"
+        );
+    }
+    // Two description words are enough without an id or tag match.
+    let skills =
+        hook::relevant_skills(&vault, None, "containers cannot reach the network").unwrap();
+    assert_eq!(ids(&skills), ["docker-compose-networking"]);
+}
+
+#[test]
+fn a_skill_with_net_failures_is_never_suggested() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    let prompt = "cargo tests flaky";
+    for project in ["proja", "projb"] {
+        vault
+            .record_outcome(
+                "cargo-flaky-tests",
+                1,
+                "failed",
+                "step 2 wrong",
+                Some(project),
+            )
+            .unwrap();
+    }
+    assert!(
+        hook::relevant_skills(&vault, None, prompt)
+            .unwrap()
+            .is_empty()
+    );
+    // One helped report brings it back under the threshold.
+    vault
+        .record_outcome("cargo-flaky-tests", 1, "helped", "worked", Some("projc"))
+        .unwrap();
+    assert_eq!(
+        ids(&hook::relevant_skills(&vault, None, prompt).unwrap()),
+        ["cargo-flaky-tests"]
+    );
+}
+
+#[test]
+fn at_most_three_skills_are_suggested() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    for id in ["rust-one", "rust-two", "rust-three", "rust-four"] {
+        Draft::new(id).tags(&["rust"]).publish(&mut vault);
+    }
+    let skills = hook::relevant_skills(&vault, None, "rust compile errors").unwrap();
+    assert_eq!(skills.len(), 3, "{:?}", ids(&skills));
+}
+
+#[test]
+fn prompt_context_lists_matches_with_outcomes_and_the_instruction() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    let input = json!({"session_id": "s1", "prompt": "cargo tests are flaky"}).to_string();
+    let text = hook::prompt(&vault, None, &input).unwrap().unwrap();
+    assert!(
+        text.contains(
+            "- cargo-flaky-tests v1: Use when cargo test fails intermittently with timeouts [helped 0, failed 0]\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "Before starting, call get_skill for the best match and tell the user in one line \
+             which vault skill you are applying (id and version), or that none fits. After \
+             applying it, call report_skill_outcome."
+        ),
+        "{text}"
+    );
+    // A payload without a prompt field suggests nothing.
+    let input = json!({"session_id": "s1"}).to_string();
+    assert!(hook::prompt(&vault, None, &input).unwrap().is_none());
+}
+
 // --- Devin hooks (flag-based; the payloads carry no transcript) -------------
 
 fn devin_tool(session: &str, tool: &str) -> String {
@@ -348,6 +604,71 @@ fn devin_work_after_a_review_prompted_by_a_block_blocks_again() {
     );
     hook::devin_tool_use(&vault, &devin_tool("s1", "write")).unwrap();
     assert!(hook::devin_stop(&vault, &input).unwrap().is_some());
+}
+
+#[test]
+fn a_loaded_skill_marks_work_for_every_flag_tracked_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    // Each client's own MCP tool naming, with its own work tools.
+    for (session, tool, work_tools) in [
+        (
+            "devin",
+            "mcp__skillvolution__get_skill",
+            hook::DEVIN_WORK_TOOLS,
+        ),
+        (
+            "codex",
+            "mcp__skillvolution__get_skill",
+            hook::CODEX_WORK_TOOLS,
+        ),
+        (
+            "gemini",
+            "mcp_skillvolution_get_skill",
+            hook::GEMINI_WORK_TOOLS,
+        ),
+        (
+            "cursor",
+            "MCP:skillvolution_get_skill",
+            hook::CURSOR_WORK_TOOLS,
+        ),
+    ] {
+        hook::tool_use(&vault, &devin_tool(session, tool), work_tools).unwrap();
+        let input = devin_stop_input(session, false);
+        assert_eq!(
+            hook::devin_stop(&vault, &input).unwrap(),
+            Some(hook::STOP_REASON),
+            "{session}"
+        );
+    }
+}
+
+#[test]
+fn a_loaded_skill_followed_by_a_report_is_reviewed() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    hook::devin_tool_use(&vault, &devin_tool("s1", "mcp__skillvolution__get_skill")).unwrap();
+    hook::devin_tool_use(
+        &vault,
+        &devin_tool("s1", "mcp__skillvolution__report_skill_outcome"),
+    )
+    .unwrap();
+    assert!(
+        hook::devin_stop(&vault, &devin_stop_input("s1", false))
+            .unwrap()
+            .is_none()
+    );
+    // Searching is not loading: it owes no report.
+    hook::devin_tool_use(
+        &vault,
+        &devin_tool("s1", "mcp__skillvolution__search_skills"),
+    )
+    .unwrap();
+    assert!(
+        hook::devin_stop(&vault, &devin_stop_input("s1", false))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -534,6 +855,90 @@ fn cli_hook_session_start_prints_the_catalog_as_additional_context() {
         .unwrap();
     assert!(context.contains("rust-tests"));
     assert!(context.contains("tell the user in one line"));
+}
+
+// --- CLI: hook prompt ---------------------------------------------------------
+
+/// `retrieval_vault` at `dir/skills.db`, closed so the CLI can open it.
+fn retrieval_db(dir: &Path) -> std::path::PathBuf {
+    drop(retrieval_vault(dir));
+    dir.join("skills.db")
+}
+
+#[test]
+fn cli_hook_prompt_prints_each_clients_context_injection_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = retrieval_db(dir.path());
+    let input = json!({"session_id": "s1", "prompt": "cargo tests are flaky"}).to_string();
+    for (client, event) in [
+        (None, "UserPromptSubmit"),
+        (Some("claude-code"), "UserPromptSubmit"),
+        (Some("codex"), "UserPromptSubmit"),
+        (Some("devin"), "UserPromptSubmit"),
+        (Some("gemini"), "BeforeAgent"),
+    ] {
+        let mut args = vec!["prompt", "--project", "proja"];
+        args.extend(client.iter().flat_map(|client| ["--client", client]));
+        let output = run_hook(&db, &args, &input);
+        assert!(output.status.success(), "{client:?}");
+        assert!(output.stderr.is_empty(), "{client:?}");
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["hookEventName"], event);
+        let context = json["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("- cargo-flaky-tests v1: "), "{context}");
+        assert!(context.contains("call get_skill"), "{context}");
+    }
+}
+
+#[test]
+fn cli_hook_prompt_prints_nothing_without_a_relevant_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = retrieval_db(dir.path());
+    for prompt in ["write a poem about autumn leaves", "hola, ¿qué tal?"] {
+        let input = json!({ "prompt": prompt }).to_string();
+        let output = run_hook(&db, &["prompt", "--project", "proja"], &input);
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty(), "{prompt}");
+        assert!(output.stderr.is_empty(), "{prompt}");
+    }
+}
+
+#[test]
+fn cli_hook_prompt_is_scoped_by_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("widget-cache-reset")
+        .tags(&["widget"])
+        .scope("proja")
+        .publish(&mut vault);
+    drop(vault);
+    let input = json!({"prompt": "reset the widget cache"}).to_string();
+    let in_a = run_hook(&db, &["prompt", "--project", "proja"], &input);
+    assert!(String::from_utf8_lossy(&in_a.stdout).contains("widget-cache-reset"));
+    let in_b = run_hook(&db, &["prompt", "--project", "projb"], &input);
+    assert!(in_b.status.success());
+    assert!(in_b.stdout.is_empty());
+}
+
+#[test]
+fn cli_hook_prompt_fails_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = retrieval_db(dir.path());
+    assert_failed_open(&run_hook(
+        &db,
+        &["prompt", "--project", "proja"],
+        "not json",
+    ));
+    // Cursor's beforeSubmitPrompt has no way to add context.
+    let input = json!({"prompt": "cargo tests are flaky"}).to_string();
+    assert_failed_open(&run_hook(
+        &db,
+        &["prompt", "--project", "proja", "--client", "cursor"],
+        &input,
+    ));
 }
 
 // --- runtime project detection (no --project flag) ------------------------

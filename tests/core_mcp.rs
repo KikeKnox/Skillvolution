@@ -178,6 +178,14 @@ fn publish_skill_is_immediately_visible_to_the_same_running_server() {
     let get_body = text_of(&get);
     assert_eq!(get_body["content"], content.as_str());
     assert_eq!(get_body["version"], 1);
+    // Loading a skill asks for its outcome report, naming this exact revision.
+    let next = get_body["next"].as_str().unwrap();
+    assert!(next.contains("Verification section"), "{next}");
+    assert!(
+        next.contains("call report_skill_outcome with id rust-tests and version 1"),
+        "{next}"
+    );
+    assert!(next.contains("not_applicable"), "{next}");
 }
 
 #[test]
@@ -683,4 +691,9 @@ fn initialize_result_includes_instructions() {
         "{instructions}"
     );
     assert!(instructions.contains("publish_skill"), "{instructions}");
+    assert!(
+        instructions.contains("follow the skill-acquisition skill"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("skill-evaluation"), "{instructions}");
 }

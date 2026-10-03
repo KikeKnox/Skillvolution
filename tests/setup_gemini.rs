@@ -124,7 +124,13 @@ fn installs_gemini_project_files() {
     assert!(args[4].is_string(), "{args:?}");
     assert_eq!(server["trust"], true);
 
-    for event in ["SessionStart", "AfterTool", "AfterAgent", "SessionEnd"] {
+    for event in [
+        "SessionStart",
+        "BeforeAgent",
+        "AfterTool",
+        "AfterAgent",
+        "SessionEnd",
+    ] {
         let groups = settings["hooks"][event].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{event}");
         let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
@@ -136,6 +142,13 @@ fn installs_gemini_project_files() {
     assert!(
         session_cmd.contains("hook session-start --client gemini --project"),
         "{session_cmd}"
+    );
+    let prompt_cmd = settings["hooks"]["BeforeAgent"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        prompt_cmd.contains("hook prompt --client gemini --project"),
+        "{prompt_cmd}"
     );
     let tool_cmd = settings["hooks"]["AfterTool"][0]["hooks"][0]["command"]
         .as_str()
@@ -160,6 +173,7 @@ fn installs_gemini_project_files() {
             .is_none()
     );
     assert!(settings["hooks"]["AfterAgent"][0].get("matcher").is_none());
+    assert!(settings["hooks"]["BeforeAgent"][0].get("matcher").is_none());
 
     let gemini_md = fs::read_to_string(p.join("GEMINI.md")).unwrap();
     assert!(gemini_md.contains("<!-- skillvolution:start -->"));
@@ -196,7 +210,13 @@ fn gemini_project_setup_preserves_existing_config_and_is_idempotent() {
     assert_eq!(fs::read(p.join(".gemini/settings.json")).unwrap(), before);
     assert!(!p.join(".gemini/settings.json.skillvolution.bak.1").exists());
     let settings_after_rerun = read_json(p.join(".gemini/settings.json"));
-    for event in ["SessionStart", "AfterTool", "AfterAgent", "SessionEnd"] {
+    for event in [
+        "SessionStart",
+        "BeforeAgent",
+        "AfterTool",
+        "AfterAgent",
+        "SessionEnd",
+    ] {
         assert_eq!(
             settings_after_rerun["hooks"][event]
                 .as_array()
@@ -295,6 +315,8 @@ fn gemini_project_remove_restores_foreign_content_and_deletes_owned_files() {
     fs::write(p.join("GEMINI.md"), &gemini_md).unwrap();
 
     install_project(p, &bin, &db).unwrap();
+    let installed = fs::read_to_string(p.join(".gemini/settings.json")).unwrap();
+    assert!(installed.contains("\"BeforeAgent\""), "{installed}");
     remove_project(p, &db, false).unwrap();
 
     assert_eq!(

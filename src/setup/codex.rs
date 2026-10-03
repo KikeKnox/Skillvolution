@@ -105,11 +105,17 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
     Ok(edits)
 }
 
-/// The `hooks.json` entries: session catalog, per-tool worked/reviewed tracking, the
-/// review-blocking stop, session cleanup, and auto-approval of the vault's own MCP tools.
-/// Codex defaults `hook tool-use`/`hook stop` to Devin's client, so every event here
-/// passes `--client codex` explicitly; `key` scopes session-start to the project, like
-/// the other flag-tracked clients.
+/// The `hooks.json` entries: session catalog, skills matching each prompt, per-tool
+/// worked/reviewed tracking, the review-blocking stop, session cleanup, and
+/// auto-approval of the vault's own MCP tools. Codex defaults `hook tool-use`/`hook stop`
+/// to Devin's client, so every event here passes `--client codex` explicitly; `key`
+/// scopes session-start and prompt to the project, like the other flag-tracked clients.
+///
+/// UserPromptSubmit reads the `prompt` field and adds `hookSpecificOutput.additionalContext`
+/// to the model's context (verified in Codex's source, which the hooks page documents:
+/// <https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/user_prompt_submit.rs>).
+/// The PostToolUse matcher's `mcp__skillvolution__.*` covers `get_skill` as well as the
+/// review tools, so loading a skill marks work.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let client_flag = " --client codex";
     let session_start_extra = format!("{client_flag}{}", hooks::project_flag(key));
@@ -122,6 +128,11 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
             "SessionStart",
             None,
             hooks::hook_cmd(bin, db, "session-start", &session_start_extra)?,
+        ),
+        (
+            "UserPromptSubmit",
+            None,
+            hooks::hook_cmd(bin, db, "prompt", &session_start_extra)?,
         ),
         (
             "PostToolUse",
