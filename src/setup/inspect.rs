@@ -6,11 +6,13 @@ use super::{Change, ClientKind, claude_cli, fs_safe, hooks};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// The version embedded in an evolution skill file's managed marker
-/// (`<!-- skillvolution-managed:evolution:vN -->`), or `None` if `text` carries
+/// The version embedded in the managed skill `name`'s marker
+/// (`<!-- skillvolution-managed:<name>:vN -->`), or `None` if `text` carries
 /// no such marker.
-pub(crate) fn skill_marker_version(text: &str) -> Option<u32> {
-    let after = text.split_once("skillvolution-managed:evolution:v")?.1;
+pub(crate) fn skill_marker_version(text: &str, name: &str) -> Option<u32> {
+    let after = text
+        .split_once(&format!("skillvolution-managed:{name}:v"))?
+        .1;
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
@@ -153,13 +155,46 @@ mod tests {
     #[test]
     fn skill_marker_version_parses_and_rejects_malformed_text() {
         assert_eq!(
-            skill_marker_version("<!-- skillvolution-managed:evolution:v8 -->\nbody"),
+            skill_marker_version(
+                "<!-- skillvolution-managed:evolution:v8 -->\nbody",
+                "evolution"
+            ),
             Some(8)
         );
-        assert_eq!(skill_marker_version("no marker here"), None);
+        assert_eq!(skill_marker_version("no marker here", "evolution"), None);
         assert_eq!(
-            skill_marker_version("skillvolution-managed:evolution:vNOPE"),
+            skill_marker_version("skillvolution-managed:evolution:vNOPE", "evolution"),
             None
         );
+        assert_eq!(
+            skill_marker_version(
+                "<!-- skillvolution-managed:skill-evaluation:v2 -->",
+                "evolution"
+            ),
+            None,
+            "another skill's marker"
+        );
+    }
+
+    #[test]
+    fn every_managed_skill_carries_its_own_marker_and_frontmatter_name() {
+        for (name, content) in crate::setup::SKILLS {
+            assert!(
+                content.starts_with(&format!("---\nname: {name}\n")),
+                "{name}: frontmatter name"
+            );
+            assert!(
+                skill_marker_version(content, name).is_some(),
+                "{name}: managed marker"
+            );
+            for heading in [
+                "## When to use",
+                "## Procedure",
+                "## Pitfalls",
+                "## Verification",
+            ] {
+                assert!(content.contains(heading), "{name}: missing {heading}");
+            }
+        }
     }
 }

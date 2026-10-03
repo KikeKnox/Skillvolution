@@ -12,8 +12,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Any skill file carrying this prefix (any version) is ours to overwrite on upgrade.
-const SKILL_OWNER_PREFIX: &str = "<!-- skillvolution-managed:evolution:";
+/// The marker prefix (any version) that makes the managed skill `name`'s file ours to
+/// overwrite on upgrade: `<!-- skillvolution-managed:<name>:`.
+fn skill_owner_prefix(name: &str) -> String {
+    format!("<!-- skillvolution-managed:{name}:")
+}
 
 /// Shared prefix of every managed-file marker (the Evolution skill's, the OpenCode
 /// plugin's). A file whose old and new content both carry it is entirely ours, so
@@ -150,16 +153,16 @@ impl<'de> Visitor<'de> for UniqueKeysVisitor {
     }
 }
 
-/// Refuses an existing skill file that doesn't carry our managed marker, so we never
-/// clobber a user's own file at that path.
-pub fn check_skill(path: &Path) -> Result<()> {
-    check_owner(path, SKILL_OWNER_PREFIX, "Evolution skill")
+/// Refuses an existing file for the managed skill `name` that doesn't carry its marker,
+/// so we never clobber a user's own file at that path.
+pub fn check_skill(path: &Path, name: &str) -> Result<()> {
+    check_owner(path, &skill_owner_prefix(name), &format!("`{name}` skill"))
 }
 
-/// Whether the managed skill file at `path` is ours to delete (any version). A missing
-/// file is `false`, same as one without our marker.
-pub fn is_our_skill(path: &Path) -> Result<bool> {
-    is_marked(path, SKILL_OWNER_PREFIX)
+/// Whether the file at `path` is the managed skill `name` and so ours to delete (any
+/// version). A missing file is `false`, same as one without our marker.
+pub fn is_our_skill(path: &Path, name: &str) -> Result<bool> {
+    is_marked(path, &skill_owner_prefix(name))
 }
 
 /// Whether `path` exists and its content carries `marker`. A missing file is `false`.
@@ -670,13 +673,13 @@ mod tests {
     fn is_our_skill_recognizes_any_marker_version_and_rejects_a_users_own_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
-        assert!(!is_our_skill(&path).unwrap(), "missing file");
+        assert!(!is_our_skill(&path, "evolution").unwrap(), "missing file");
 
         fs::write(&path, "# my own notes").unwrap();
-        assert!(!is_our_skill(&path).unwrap());
+        assert!(!is_our_skill(&path, "evolution").unwrap());
 
         fs::write(&path, "<!-- skillvolution-managed:evolution:3 -->\nv3").unwrap();
-        assert!(is_our_skill(&path).unwrap());
+        assert!(is_our_skill(&path, "evolution").unwrap());
     }
 
     #[test]

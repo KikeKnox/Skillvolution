@@ -46,7 +46,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
             (dir.clone(), dir)
         }
     };
-    let mut changes = vec![common::skill_change(&dir)?];
+    let mut changes = common::skill_changes(&dir)?;
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
@@ -71,10 +71,7 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
             (dir.clone(), dir)
         }
     };
-    let mut edits = Vec::new();
-    if let Some(edit) = common::skill_removal(&dir, notes)? {
-        edits.push(edit);
-    }
+    let mut edits = common::skill_removals(&dir, notes)?;
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;

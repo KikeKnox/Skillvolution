@@ -55,7 +55,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
         }
     };
     let is_project = matches!(scope, Scope::Project { .. });
-    let mut changes = vec![common::skill_change(&dir)?];
+    let mut changes = common::skill_changes(&dir)?;
 
     let config_path = dir.join("config.toml");
     let text = fs_safe::read_optional(&config_path)?.unwrap_or_default();
@@ -83,10 +83,7 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
             (dir.clone(), dir)
         }
     };
-    let mut edits = Vec::new();
-    if let Some(edit) = common::skill_removal(&dir, notes)? {
-        edits.push(edit);
-    }
+    let mut edits = common::skill_removals(&dir, notes)?;
 
     let config_path = dir.join("config.toml");
     if let Some(text) = fs_safe::read_optional(&config_path)?

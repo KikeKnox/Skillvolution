@@ -25,7 +25,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
         Scope::Project { dir, .. } => (dir.join(".claude"), "settings.local.json"),
         Scope::Global => (global_dir()?, "settings.json"),
     };
-    let mut changes = vec![common::skill_change(&dir)?];
+    let mut changes = common::skill_changes(&dir)?;
 
     if let Scope::Project { dir: project, key } = scope {
         let path = project.join(".mcp.json");
@@ -75,10 +75,7 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
         Scope::Project { dir, .. } => (dir.join(".claude"), "settings.local.json"),
         Scope::Global => (global_dir()?, "settings.json"),
     };
-    let mut edits = Vec::new();
-    if let Some(edit) = common::skill_removal(&dir, notes)? {
-        edits.push(edit);
-    }
+    let mut edits = common::skill_removals(&dir, notes)?;
 
     if let Scope::Project { dir: project, .. } = scope {
         let path = project.join(".mcp.json");

@@ -371,3 +371,86 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Removed skillvolution with `claude mcp remove --scope user`."));
 }
+
+/// Every managed skill, as installed under a client's `skills/` directory.
+const MANAGED_SKILLS: [&str; 3] = ["evolution", "skill-evaluation", "skill-acquisition"];
+
+#[test]
+fn every_managed_skill_is_installed_per_client_and_removed_with_its_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let bin = write_bin(p);
+    let db = p.join("data/vault.sqlite3");
+
+    install_project(p, &bin, &db, "all").unwrap();
+    for client_dir in [
+        ".claude",
+        ".opencode",
+        ".devin",
+        ".codex",
+        ".gemini",
+        ".cursor",
+    ] {
+        for name in MANAGED_SKILLS {
+            let path = p
+                .join(client_dir)
+                .join("skills")
+                .join(name)
+                .join("SKILL.md");
+            let text =
+                fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(
+                text.starts_with(&format!("---\nname: {name}\n")),
+                "{}",
+                path.display()
+            );
+            assert!(text.contains(&format!("skillvolution-managed:{name}:v")));
+        }
+    }
+    let agents = fs::read_to_string(p.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("`skill-acquisition` skill"), "{agents}");
+    assert!(agents.contains("`skill-evaluation` skill"), "{agents}");
+
+    remove_project(p, &db, None, false).unwrap();
+    for client_dir in [
+        ".claude",
+        ".opencode",
+        ".devin",
+        ".codex",
+        ".gemini",
+        ".cursor",
+    ] {
+        for name in MANAGED_SKILLS {
+            let dir = p.join(client_dir).join("skills").join(name);
+            assert!(!dir.exists(), "{} should be gone", dir.display());
+        }
+    }
+}
+
+#[test]
+fn a_users_own_file_at_a_managed_skill_path_is_refused_and_kept_on_remove() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let bin = write_bin(p);
+    let db = p.join("data/vault.sqlite3");
+    let own = p.join(".claude/skills/skill-acquisition/SKILL.md");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, "# My own skill-acquisition notes\n").unwrap();
+
+    let error = install_project(p, &bin, &db, "claude-code").unwrap_err();
+    assert!(format!("{error:#}").contains("unowned"), "{error:#}");
+    assert!(!p.join(".claude/skills/evolution/SKILL.md").exists());
+
+    // Installed with the user's file moved aside, then put back: remove must skip it.
+    let aside = p.join("own-skill.md");
+    fs::rename(&own, &aside).unwrap();
+    install_project(p, &bin, &db, "claude-code").unwrap();
+    fs::rename(&aside, &own).unwrap();
+    remove_project(p, &db, Some("claude-code"), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(&own).unwrap(),
+        "# My own skill-acquisition notes\n"
+    );
+    assert!(!p.join(".claude/skills/evolution").exists());
+    assert!(!p.join(".claude/skills/skill-evaluation").exists());
+}

@@ -30,7 +30,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) const SKILL: &str = include_str!("../../assets/evolution/SKILL.md");
+/// The managed skills every client gets, as `(name, SKILL.md content)`: each is installed
+/// at `<skills dir>/<name>/SKILL.md` and carries the marker
+/// `<!-- skillvolution-managed:<name>:vN -->`. `evolution` drives the vault loop;
+/// `skill-evaluation` is the evaluator subagent's rubric; `skill-acquisition` is what an
+/// agent follows when it notices mid-task that it lacks the know-how.
+pub(crate) const SKILLS: &[(&str, &str)] = &[
+    ("evolution", include_str!("../../assets/evolution/SKILL.md")),
+    (
+        "skill-evaluation",
+        include_str!("../../assets/skill-evaluation/SKILL.md"),
+    ),
+    (
+        "skill-acquisition",
+        include_str!("../../assets/skill-acquisition/SKILL.md"),
+    ),
+];
 
 /// A file setup writes, with its full new content. `write_clients` turns each into an
 /// `Edit::Write` before handing it to `write_all`; `remove::run` builds `Edit`s directly,
