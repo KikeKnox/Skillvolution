@@ -81,8 +81,9 @@ fn shell_words(command: &str) -> Vec<String> {
 }
 
 /// Hook subcommand names that mark a command as ours, in their CLI spelling.
-const HOOK_EVENTS: [&str; 5] = [
+const HOOK_EVENTS: [&str; 6] = [
     "session-start",
+    "prompt",
     "tool-use",
     "stop",
     "session-end",
@@ -304,6 +305,12 @@ mod tests {
                 "/opt/skillvolution hook {event} --client gemini"
             )));
         }
+        // The prompt-submit hook, with and without a client or project key.
+        assert!(owned_command("/opt/skillvolution hook prompt"));
+        assert!(owned_command(
+            "/opt/skillvolution hook prompt --client gemini --project key"
+        ));
+        assert!(!owned_command("/opt/skillvolution hook prompts"));
     }
 
     #[test]

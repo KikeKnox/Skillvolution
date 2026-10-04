@@ -289,14 +289,18 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         ));
     }
 
-    if let Some(installed) = installed_skill_version(&changes)?
-        && let Some(current) = setup::skill_marker_version(setup::SKILL)
-        && installed < current
-    {
-        checks.push(Check::warn(
-            format!("{display} skill"),
-            format!("rerun setup to update the evolution skill (installed v{installed}, current v{current})"),
-        ));
+    for (name, content) in setup::SKILLS {
+        if let Some(installed) = installed_skill_version(&changes, name)?
+            && let Some(current) = setup::skill_marker_version(content, name)
+            && installed < current
+        {
+            checks.push(Check::warn(
+                format!("{display} skill"),
+                format!(
+                    "rerun setup to update the {name} skill (installed v{installed}, current v{current})"
+                ),
+            ));
+        }
     }
 
     if let Some(missing) = setup::missing_configured_bin(kind, &changes) {
@@ -346,18 +350,22 @@ fn diff_changes(changes: &[(PathBuf, String)]) -> Result<(bool, Vec<String>)> {
     Ok((configured, mismatched))
 }
 
-/// The version embedded in the on-disk evolution skill file among `changes`,
-/// if any.
-fn installed_skill_version(changes: &[(PathBuf, String)]) -> Result<Option<u32>> {
-    let Some((path, _)) = changes.iter().find(|(path, _)| path.ends_with("SKILL.md")) else {
+/// The version embedded in the on-disk file of the managed skill `name` among
+/// `changes`, if any.
+fn installed_skill_version(changes: &[(PathBuf, String)], name: &str) -> Result<Option<u32>> {
+    let Some((path, _)) = changes
+        .iter()
+        .find(|(path, _)| path.ends_with(Path::new("skills").join(name).join("SKILL.md")))
+    else {
         return Ok(None);
     };
     let Some(actual) = read_optional(path)? else {
         return Ok(None);
     };
-    Ok(setup::skill_marker_version(&String::from_utf8_lossy(
-        &actual,
-    )))
+    Ok(setup::skill_marker_version(
+        &String::from_utf8_lossy(&actual),
+        name,
+    ))
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {

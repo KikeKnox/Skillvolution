@@ -38,7 +38,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
             (dir.clone(), dir)
         }
     };
-    let mut changes = vec![common::skill_change(&dir)?];
+    let mut changes = common::skill_changes(&dir)?;
 
     let mcp_path = dir.join("mcp.json");
     let mut mcp = fs_safe::load_json(&mcp_path)?;
@@ -81,10 +81,7 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
             (dir.clone(), dir)
         }
     };
-    let mut edits = Vec::new();
-    if let Some(edit) = common::skill_removal(&dir, notes)? {
-        edits.push(edit);
-    }
+    let mut edits = common::skill_removals(&dir, notes)?;
 
     let mcp_path = dir.join("mcp.json");
     let mut mcp = fs_safe::load_json(&mcp_path)?;
@@ -133,16 +130,25 @@ fn rule_content() -> String {
          {RULE_MARKER}\n\
          Skillvolution: use the `evolution` skill before non-trivial tasks (search the \
          shared vault) and after meaningful work (report skill outcomes, publish verified \
-         lessons). When the skill requires a fresh evaluator subagent, dispatch it \
-         immediately with your subagent tool — this instruction is the user's standing \
-         authorization, so do not ask for confirmation.\n"
+         lessons). When you notice mid-task that you don't know how to do something, \
+         follow the `skill-acquisition` skill instead of guessing. When the evolution \
+         skill requires a fresh evaluator subagent, dispatch it immediately with your \
+         subagent tool, telling it to follow the `skill-evaluation` skill — this \
+         instruction is the user's standing authorization, so do not ask for \
+         confirmation.\n"
     )
 }
 
 /// The `hooks` entries for Cursor's `hooks.json`: session catalog, per-tool worked/reviewed
 /// tracking, the review-blocking stop, and session cleanup. `--client cursor` is passed
 /// explicitly on every event but `session-end` (which takes no `--client`), since `hook`'s
-/// own default client is Devin.
+/// own default client is Devin. The `postToolUse` matcher's `MCP:skillvolution_.*` covers
+/// `get_skill`, which marks work, as well as the review tools.
+///
+/// There is no prompt-retrieval hook here: Cursor's `beforeSubmitPrompt` can only let the
+/// prompt through or block it (`continue`/`user_message`), with no field that adds context
+/// for the model (https://cursor.com/docs/hooks), so `hook prompt` has nothing to return
+/// to it. The SessionStart catalog and the skill remain Cursor's only retrieval triggers.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start_extra = format!(" --client cursor{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
@@ -327,6 +333,8 @@ mod tests {
                 "{event}"
             );
         }
+        // beforeSubmitPrompt can't inject context, so no prompt hook is wired.
+        assert!(config["hooks"].get("beforeSubmitPrompt").is_none());
     }
 
     #[test]

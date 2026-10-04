@@ -115,14 +115,43 @@ skillvolution hook session-start [--client CLIENT] [--project KEY]
 ```
 
 Prints the skill catalog as session context: a header telling the agent to check it
-before non-trivial work and say in one line which skill it applies (or that none matched),
-then up to 30 published skills visible to the project with id, version, description,
+before non-trivial work (matching skills are also suggested with each request) and say
+in one line which skill it applies (or that none matched), and to follow the
+`skill-acquisition` skill when it lacks the know-how, then up to 30 published skills visible to the project with id, version, description,
 and helped/failed counts (or `No published skills are visible to this project yet.`).
 
 `--client` selects the output envelope (default `claude-code`): `claude-code`, `devin`,
 `codex`, and `gemini` print
 `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":…}}`;
 `cursor` prints `{"additional_context":…}`. `--project` resolves like `serve`'s.
+
+### hook prompt
+
+```
+skillvolution hook prompt [--client CLIENT] [--project KEY]
+```
+
+Prompt-time retrieval. Reads the client's prompt-submit payload on stdin and uses its
+`prompt` string (a payload without one prints nothing; invalid JSON is
+reported on stderr). It extracts up to 16 keywords (English and Spanish stopwords, tokens under 3
+characters or over 30 bytes, and repeats dropped; accents folded), and does nothing
+when fewer than 2 remain. Otherwise it searches the vault (project-scoped like `serve`),
+takes the top 5 hits, keeps those that match one keyword in their id or tags or two
+distinct keywords across id, description, and tags, drops any whose current version has
+2 or more net failures (failed minus helped), and keeps at most 3. Prints, when at least
+one remains,
+`{"hookSpecificOutput":{"hookEventName":EVENT,"additionalContext":…}}` where the context
+is `Skillvolution: vault skills matching this request:`, one
+`- ID vN: DESCRIPTION [helped H, failed F]` line per skill, and an instruction to call
+`get_skill` for the best match, tell the user which skill (id and version) is applied,
+and call `report_skill_outcome` afterwards. Prints nothing when no skill is relevant.
+
+`--client` (default `claude-code`) picks `EVENT`: `UserPromptSubmit` for `claude-code`,
+`codex`, and `devin`; `BeforeAgent` for `gemini`. `cursor` is rejected (`this client's
+prompt hook cannot inject context` on stderr, exit 0), since Cursor's
+`beforeSubmitPrompt` cannot add context. `--project` resolves like `serve`'s. The
+OpenCode plugin calls this subcommand itself with `{"prompt": …}` on stdin. Exit code is
+always `0`.
 
 ### hook tool-use
 
@@ -134,8 +163,9 @@ PostToolUse-style entry point for the flag-tracked clients (every client but Cla
 Code). Flags the session as having done work when `tool_name` is one of the client's
 file-editing tools — `write`, `edit`, `apply_patch`, `notebook_edit` (Devin);
 `apply_patch` (Codex); `write_file`, `replace` (Gemini CLI); `Write` (Cursor) — or as
-having reviewed when the tool name ends with `publish_skill`/`report_skill_outcome`.
-Any other tool is ignored. Work after a review re-arms the reminder. Prints nothing.
+having done work when the tool name ends with `get_skill` (loading a skill owes an
+outcome report), or as having reviewed when it ends with
+`publish_skill`/`report_skill_outcome`. Any other tool is ignored. Work after a review re-arms the reminder. Prints nothing.
 `--client` defaults to `devin`.
 
 ### hook stop
@@ -147,7 +177,8 @@ skillvolution hook stop [--client CLIENT]
 Asks for an evolution review when the session has unreviewed work, at most once per
 span. For `--client claude-code` (the default) the payload's `transcript_path` is
 scanned from the byte offset recorded for that session: if the last `Edit`/`Write`/
-`MultiEdit`/`NotebookEdit` call postdates the last *successful* review call, it prints
+`MultiEdit`/`NotebookEdit` call or successful `get_skill` call postdates the last
+*successful* review call (`publish_skill`/`report_skill_outcome`), it prints
 `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":…}}`, which makes
 Claude Code continue the turn (a `stop_hook_active` stop is never blocked; the reviewed
 offset always advances to the last complete line). For the flag-tracked clients it
@@ -216,6 +247,12 @@ If `claude` isn't on `PATH` for a global Claude Code setup, the file changes sti
 happen and setup prints the `claude mcp add-json` command to run manually (and the
 `claude mcp remove` equivalent for `--remove`).
 
+Every client gets three managed skills, `evolution`, `skill-evaluation`, and
+`skill-acquisition`, at `skills/<name>/SKILL.md`, each with its own
+`skillvolution-managed:<name>:vN` marker. A user's own file at any of those paths makes
+setup refuse (`unowned … skill conflict`); `--remove` skips it with a note and deletes
+only the marked ones, plus any skill directory left empty.
+
 ## purge
 
 ```
@@ -283,7 +320,7 @@ fails.
 [ok] vault: stats: 12 skill(s), 15 published revision(s), 34 outcome(s), 1 deprecated
 [ok] Claude Code: configured, up to date
 [warn] OpenCode: differs from what `skillvolution setup --client opencode` would write: …
-[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v8)
+[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v10)
 [fail] Devin CLI binary: configured binary /old/path/skillvolution does not exist; rerun setup
 [warn] Claude Code MCP registration: `claude mcp get skillvolution` reports no registration; rerun setup
 [warn] legacy install: project-level install found (…) alongside the global one; hooks will run twice
@@ -295,8 +332,8 @@ at `PATH.relocated.bak` exists but the current path is missing), `application_id
 migrate on next use), `PRAGMA quick_check`, search-index completeness (deprecated skills
 with a published revision still count toward the index), row counts; then per client:
 installed-but-not-configured vs. configured and up to date vs. differing, staleness of
-the installed evolution skill version, a configured binary path that no longer exists
-(fail), Claude Code's user-scope MCP registration, and a project-level install left in
+the installed version of each managed skill (`evolution`, `skill-evaluation`,
+`skill-acquisition`), a configured binary path that no longer exists (fail), Claude Code's user-scope MCP registration, and a project-level install left in
 the current repo next to the global one. A client whose config can't be read or parsed
 gets its own `[fail]` check and the report continues. `--json` prints
 `{"healthy": bool, "checks": [{"name", "status", "detail"}]}`.
@@ -373,9 +410,13 @@ never returned; use `get_skill`.
 | `id` | string | required; `^[a-z0-9]+(-[a-z0-9]+)*$`, ≤ 64 bytes |
 | `version` | integer | ≥ 1; defaults to the latest published version |
 
-Returns `id`, `version`, `scope`, `deprecated`, `description`, `tags`, `content` for a
-published revision visible to the server's project (global skills plus this project's
-own). A deprecated skill still returns its body with `deprecated: true`. Fails with
+Returns `id`, `version`, `scope`, `deprecated`, `description`, `tags`, `content`, and
+`next` for a published revision visible to the server's project (global skills plus this
+project's own). `next` is a reminder to apply the procedure only as far as it fits,
+verify it with its Verification section, and call `report_skill_outcome` with this `id`
+and `version` (`helped`, `failed` naming the wrong step, or `not_applicable`). A
+successful `get_skill` also counts as work for the stop reminder, so an unreported load
+triggers it. A deprecated skill still returns its body with `deprecated: true`. Fails with
 `no published skill ID is visible from this project`.
 
 ### report_skill_outcome

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub(super) const START: &str = "<!-- skillvolution:start -->";
 pub(super) const END: &str = "<!-- skillvolution:end -->";
 /// The trigger block setup keeps in AGENTS.md (OpenCode and Devin both read it).
-const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When the skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
+const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When you notice mid-task that you don't know how to do something, follow the `skill-acquisition` skill instead of guessing. When the evolution skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool, telling it to follow the `skill-evaluation` skill — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
 
 /// The environment variable `name` as a path, when set and nonempty.
 pub(super) fn env_dir(name: &str) -> Option<PathBuf> {
@@ -23,12 +23,22 @@ pub(super) fn home() -> Option<PathBuf> {
     env_dir("HOME").or_else(|| env_dir("USERPROFILE"))
 }
 
-/// The managed Evolution skill at `dir/skills/evolution/SKILL.md`, refusing a user's
-/// own file there.
-pub(super) fn skill_change(dir: &Path) -> Result<Change> {
-    let path = dir.join("skills/evolution/SKILL.md");
-    fs_safe::check_skill(&path)?;
-    Ok((path, super::SKILL.to_owned()))
+/// Every managed skill at `dir/skills/<name>/SKILL.md`, refusing a user's own file at
+/// any of those paths.
+pub(super) fn skill_changes(dir: &Path) -> Result<Vec<Change>> {
+    super::SKILLS
+        .iter()
+        .map(|(name, content)| {
+            let path = skill_path(dir, name);
+            fs_safe::check_skill(&path, name)?;
+            Ok((path, (*content).to_owned()))
+        })
+        .collect()
+}
+
+/// Where the managed skill `name` lives under a client's config directory `dir`.
+pub(super) fn skill_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join("skills").join(name).join("SKILL.md")
 }
 
 /// The AGENTS.md at `path` with our trigger block added, or rewritten in place.
@@ -38,19 +48,21 @@ pub(super) fn agents_change(path: &Path) -> Result<Change> {
     Ok((path.to_owned(), updated))
 }
 
-/// The managed Evolution skill's removal at `dir/skills/evolution/SKILL.md`: `Some`
-/// deletion when the file carries our marker, `None` when there's nothing there. A file
-/// that exists but isn't ours is left alone, with a note so the user knows it was
-/// skipped rather than silently ignored.
-pub(super) fn skill_removal(dir: &Path, notes: &mut Vec<String>) -> Result<Option<Edit>> {
-    let path = dir.join("skills/evolution/SKILL.md");
-    if fs_safe::is_our_skill(&path)? {
-        return Ok(Some(Edit::Delete(path)));
+/// The managed skills' removals under `dir/skills/<name>/SKILL.md`: a deletion for each
+/// file that carries its marker, nothing where there's no file. A file that exists but
+/// isn't ours is left alone, with a note so the user knows it was skipped rather than
+/// silently ignored.
+pub(super) fn skill_removals(dir: &Path, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+    let mut edits = Vec::new();
+    for (name, _) in super::SKILLS {
+        let path = skill_path(dir, name);
+        if fs_safe::is_our_skill(&path, name)? {
+            edits.push(Edit::Delete(path));
+        } else if fs_safe::read_optional(&path)?.is_some() {
+            notes.push(format!("skipped {} (not ours)", path.display()));
+        }
     }
-    if fs_safe::read_optional(&path)?.is_some() {
-        notes.push(format!("skipped {} (not ours)", path.display()));
-    }
-    Ok(None)
+    Ok(edits)
 }
 
 /// The removal of our trigger block from the AGENTS.md at `path`: rewritten with the

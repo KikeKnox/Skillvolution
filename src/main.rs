@@ -144,6 +144,18 @@ impl HookClient {
         }
     }
 
+    /// The prompt-submit event whose `hookSpecificOutput.additionalContext` this client
+    /// adds to the model's context: UserPromptSubmit for Claude Code, Codex, and Devin,
+    /// BeforeAgent for Gemini CLI. `None` for Cursor, whose beforeSubmitPrompt can only
+    /// allow or block the prompt, not add context to it.
+    fn prompt_event(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode | Self::Devin | Self::Codex => Some("UserPromptSubmit"),
+            Self::Gemini => Some("BeforeAgent"),
+            Self::Cursor => None,
+        }
+    }
+
     /// The Stop output asking a flag-tracked client to continue with `reason`.
     fn continue_with(self, reason: &str) -> serde_json::Value {
         match self {
@@ -167,6 +179,19 @@ enum HookEvent {
         project: Option<String>,
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to claude-code.
+        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        client: HookClient,
+    },
+    /// Suggest the vault skills matching the submitted prompt (UserPromptSubmit, or
+    /// Gemini CLI's BeforeAgent); prints nothing when none is relevant.
+    Prompt {
+        /// Project key for project-scoped skills.
+        /// Detected automatically from the working directory's git root when omitted,
+        /// or from CLAUDE_PROJECT_DIR.
+        #[arg(long)]
+        project: Option<String>,
+        /// The client emitting the hook: claude-code, devin, codex, or gemini (cursor
+        /// cannot inject prompt context). Defaults to claude-code.
         #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
         client: HookClient,
     },
@@ -203,7 +228,7 @@ fn validate_project(project: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Resolves the project key for `serve` and `hook session-start`: an explicit
+/// Resolves the project key for `serve`, `hook session-start`, and `hook prompt`: an explicit
 /// `--project` wins (already validated by `validate_project`); otherwise the
 /// current directory is tried first, since that is where OpenCode and a
 /// plain terminal start these processes. If the current directory is not a
@@ -254,6 +279,25 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
             let project = resolve_project(project)?;
             let context = hook::session_start(&open(db)?, project.as_deref())?;
             print!("{}", client.session_context(context));
+        }
+        HookEvent::Prompt { project, client } => {
+            validate_project(&project)?;
+            let event = client
+                .prompt_event()
+                .context("this client's prompt hook cannot inject context")?;
+            let input = read_stdin()?;
+            let project = resolve_project(project)?;
+            if let Some(context) = hook::prompt(&open(db)?, project.as_deref(), &input)? {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "additionalContext": context,
+                        }
+                    })
+                );
+            }
         }
         HookEvent::ToolUse { client } => {
             hook::tool_use(&open(db)?, &read_stdin()?, client.work_tools())?

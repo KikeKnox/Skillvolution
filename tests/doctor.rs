@@ -250,6 +250,52 @@ fn editing_a_configs_mcp_command_warns_only_for_that_client() {
 }
 
 #[test]
+fn an_install_missing_the_prompt_hook_differs() {
+    let env = Env::new();
+    assert_success(
+        &env.setup()
+            .arg("--client")
+            .arg("claude-code")
+            .output()
+            .unwrap(),
+    );
+    let up_to_date = String::from_utf8(env.doctor().output().unwrap().stdout).unwrap();
+    assert!(
+        up_to_date.contains("[ok] Claude Code: configured, up to date"),
+        "{up_to_date}"
+    );
+
+    // What an install from before prompt retrieval looks like: no UserPromptSubmit.
+    let settings_path = env.home.path().join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    settings["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("UserPromptSubmit")
+        .unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let output = env.doctor().output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "[warn] Claude Code: differs from what `skillvolution setup --client claude-code` would write"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&settings_path.display().to_string()),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn deleting_the_configured_binary_fails_with_exit_code_1() {
     let env = Env::new();
     assert_success(

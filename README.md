@@ -50,8 +50,9 @@ skillvolution setup     # detect installed clients, configure each one for your 
 skillvolution doctor    # verify the vault and everything setup wrote
 ```
 
-`setup` writes the `evolution` skill, the MCP server entry, and the hooks or plugin each
-client uses, plus the permission grants the review flow needs to run unattended. The
+`setup` writes three skills (`evolution`, `skill-evaluation`, `skill-acquisition`), the
+MCP server entry, and the hooks or plugin each client uses, plus the permission grants
+the review flow needs to run unattended. The
 vault database is created automatically on first use — there is no init step.
 `doctor` exits 0 when everything is healthy and prints what to fix when it is not.
 
@@ -59,18 +60,48 @@ vault database is created automatically on first use — there is no init step.
 
 | Client | `--client` token | What global `setup` writes | Review reminder | Notes |
 |---|---|---|---|---|
-| Claude Code | `claude-code` | `skills/evolution/SKILL.md`, `SessionStart`/`Stop` hooks + `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) after the last successful review call and returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). If `claude` isn't on `PATH`, setup prints the `mcp add-json` command to run manually |
-| OpenCode | `opencode` | `mcp.skillvolution` entry + `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, `skills/evolution/SKILL.md`, `plugins/skillvolution.js` | The plugin injects the catalog into the system prompt and, after a turn that edited files goes idle without a review, adds a reminder to later turns' system prompts | Never blocks a turn; no extra model turn is spent |
-| Devin CLI | `devin` | `mcp_config.json` server entry, `config.json` (`permissions.allow`: `run_subagent`, `read_subagent`, `mcp__skillvolution__*`, plus `SessionStart`/`PostToolUse`/`Stop`/`SessionEnd`/`PermissionRequest` hooks), `AGENTS.md` marker block, skill | `hook tool-use`/`hook stop --client devin` keep per-session worked/reviewed flags; a stop after unreviewed work prints `{"decision":"block"}` | `hook approve` auto-approves `run_subagent`/`read_subagent` and every `mcp__skillvolution__*` tool — including `publish_skill`; see the security note in the FAQ |
-| Codex CLI | `codex` | `[mcp_servers.skillvolution]` in `config.toml`, `hooks.json` (SessionStart, PostToolUse on `apply_patch`, Stop, SessionEnd, PermissionRequest on `mcp__skillvolution__*`), `AGENTS.md`, skill | Same flag tracking as Devin; `{"decision":"block"}` on Stop | Project-mode `.codex/config.toml` only loads once the project is trusted in Codex; whether tools run without prompting is governed by your `approval_policy` |
-| Gemini CLI | `gemini` | `mcpServers.skillvolution` (with `trust: true` unless already set) and `SessionStart`/`AfterTool`/`AfterAgent`/`SessionEnd` hooks in `settings.json`, `GEMINI.md` marker block, skill | Same flag tracking; AfterAgent (Gemini's Stop) prints `{"decision":"deny"}` | MCP tools are `mcp_skillvolution_*`; `trust` is the documented way to skip tool-confirmation prompts for one server |
-| Cursor | `cursor` | `mcpServers.skillvolution` in `mcp.json`, `hooks.json` (sessionStart, postToolUse on `Write`, stop, sessionEnd), `permissions.allow` `Mcp(skillvolution:*)` in `cli-config.json`, skill | Same flag tracking; `stop` prints `{"followup_message": ...}` | Cursor has no global rules file — globally the skill plus the SessionStart catalog is the only trigger; project setups also write `.cursor/rules/skillvolution.mdc` |
+| Claude Code | `claude-code` | the three skills (`skills/<name>/SKILL.md`), `SessionStart`/`UserPromptSubmit`/`Stop` hooks + `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) or `get_skill` loads after the last successful review call and returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). The prompt hook adds suggestions as `additionalContext`. If `claude` isn't on `PATH`, setup prints the `mcp add-json` command to run manually |
+| OpenCode | `opencode` | `mcp.skillvolution` entry + `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, the three skills, `plugins/skillvolution.js` | The plugin injects the catalog and the skills matching each user message into the system prompt and, after a turn that edited files or loaded a skill goes idle without a review, adds a reminder to later turns' system prompts | Never blocks a turn; no extra model turn is spent; suggestions come from `hook prompt` via the `chat.message` hook |
+| Devin CLI | `devin` | `mcp_config.json` server entry, `config.json` (`permissions.allow`: `run_subagent`, `read_subagent`, `mcp__skillvolution__*`, plus `SessionStart`/`UserPromptSubmit`/`PostToolUse`/`Stop`/`SessionEnd`/`PermissionRequest` hooks), `AGENTS.md` marker block, the three skills | `hook tool-use`/`hook stop --client devin` keep per-session worked/reviewed flags; a stop after unreviewed work prints `{"decision":"block"}` | `UserPromptSubmit` suggestions are documented but not verified live. `hook approve` auto-approves `run_subagent`/`read_subagent` and every `mcp__skillvolution__*` tool — including `publish_skill`; see the security note in the FAQ |
+| Codex CLI | `codex` | `[mcp_servers.skillvolution]` in `config.toml`, `hooks.json` (SessionStart, UserPromptSubmit, PostToolUse on `apply_patch` and `mcp__skillvolution__*`, Stop, SessionEnd, PermissionRequest on `mcp__skillvolution__*`), `AGENTS.md`, the three skills | Same flag tracking as Devin; `{"decision":"block"}` on Stop | `UserPromptSubmit` adds the suggestions. Project-mode `.codex/config.toml` only loads once the project is trusted in Codex; whether tools run without prompting is governed by your `approval_policy` |
+| Gemini CLI | `gemini` | `mcpServers.skillvolution` (with `trust: true` unless already set) and `SessionStart`/`BeforeAgent`/`AfterTool`/`AfterAgent`/`SessionEnd` hooks in `settings.json`, `GEMINI.md` marker block, the three skills | Same flag tracking; AfterAgent (Gemini's Stop) prints `{"decision":"deny"}` | `BeforeAgent` appends the suggestions to that turn's prompt. MCP tools are `mcp_skillvolution_*`; `trust` is the documented way to skip tool-confirmation prompts for one server |
+| Cursor | `cursor` | `mcpServers.skillvolution` in `mcp.json`, `hooks.json` (sessionStart, postToolUse on `Write` and `MCP:skillvolution_.*`, stop, sessionEnd), `permissions.allow` `Mcp(skillvolution:*)` in `cli-config.json`, the three skills | Same flag tracking; `stop` prints `{"followup_message": ...}` | Cursor has no global rules file — globally the skills plus the SessionStart catalog are the only trigger; project setups also write `.cursor/rules/skillvolution.mdc`. No per-prompt suggestions: Cursor's `beforeSubmitPrompt` can only allow or block a prompt, not add context to it |
 
 Setup detects a client by its CLI on `PATH` (`claude`, `opencode`, `devin`, `codex`,
 `gemini`, `cursor-agent`/`cursor`) or an existing config directory. For the exact files
 and directories, see [docs/configuration.md](docs/configuration.md); for how the hooks
 and the plugin behave, see [docs/integrations.md](docs/integrations.md) and the
 [FAQ](#faq) below.
+
+## How agents find and learn skills
+
+Retrieval has four layers, from cheapest to most deliberate:
+
+1. **Session catalog** — `hook session-start` (or the OpenCode plugin) puts the top 30
+   published skills in context at session start.
+2. **Per-prompt suggestions** — `hook prompt` runs on every submitted prompt (Claude
+   Code, Codex, and Devin `UserPromptSubmit`, Gemini CLI `BeforeAgent`, the OpenCode
+   plugin's `chat.message`). It extracts keywords (English and Spanish stopwords
+   dropped, accents folded, at most 16), searches the vault, and suggests up to 3 of
+   the top 5 hits that clear a relevance gate: one keyword in the skill's id or tags,
+   or two across id, description, and tags. A skill whose current version has two or
+   more net failures is never suggested, and a prompt with fewer than two keywords is
+   not searched. When nothing qualifies the hook prints nothing. Cursor gets none of
+   this, because its prompt hook cannot inject context.
+3. **`search_skills` / `get_skill`** — the agent's own lookup when the catalog and
+   suggestions miss. A successful `get_skill` commits the agent to reporting: the result
+   carries a `next` field asking for `report_skill_outcome`, and loading a skill counts
+   as work for the review reminder.
+4. **`skill-acquisition`** — what the agent follows when it notices mid-task that it
+   lacks the know-how (an unfamiliar tool or error, two failed attempts): search the
+   vault, look locally, check authoritative sources, confirm with a small experiment,
+   then capture the lesson.
+
+Learning has one more layer: before anything is published, a fresh subagent follows the
+**`skill-evaluation`** skill — hard gates (verified, non-obvious, reusable, costly to
+miss, safe, single lesson), a 16-point rubric (keep at 11 or more, with Trigger,
+Procedure, and Verification each at least 1), and the exact verdict format
+`publish_skill` expects.
 
 ## Setup
 
@@ -106,22 +137,22 @@ defaults to `all` in this mode.
 
 Writes are atomic (temp file + rename) with rollback if a later write fails; a changed
 file's previous content is kept as `.skillvolution.bak`, `.bak.1`, `.bak.2` (three
-slots), except for fully managed files (the skill, the plugin, the Cursor rule), which
+slots), except for fully managed files (the skills, the plugin, the Cursor rule), which
 get none. Existing entries are preserved: global setup merges and preserves user keys
 (`env`, `enabled: false`, timeouts) when updating an MCP entry, while project setup
 replaces the `skillvolution` MCP entry whole, discarding any pre-seeded `env`/`cwd`/`url`
 from a possibly untrusted repo. Permission grants only fill in keys you haven't chosen. Hook commands are
 recognized by content, so a rerun replaces them instead of duplicating — and stale
 entries an older version wrote under events it no longer uses are stripped. `setup`
-refuses to write through a symlinked config file and refuses a `SKILL.md`, plugin, or
-`.mdc` rule file that doesn't carry its managed marker. If the current directory's git
+refuses to write through a symlinked config file and refuses a `SKILL.md` (any of the
+three), plugin, or `.mdc` rule file that doesn't carry its managed marker. If the current directory's git
 repo still carries a project-level install (the only kind 0.1.x had) next to the global
 one, hooks would run twice there: global `setup` warns on stderr when it finds Claude
 Code's entries (`.claude/settings.local.json`, `.mcp.json`), and `doctor` reports it as
 a `legacy install` warning for every globally configured client.
 
 Rerun `setup` after installing a new AI client, and after upgrading the binary — it
-refreshes the skill, hooks, and plugin; `doctor` flags installs that differ from what
+refreshes the skills, hooks, and plugin; `doctor` flags installs that differ from what
 the current binary would write.
 
 ## Where the vault lives
@@ -185,7 +216,7 @@ skillvolution setup --remove --client codex  # just one
 skillvolution setup --project DIR --remove   # a project-level install
 ```
 
-It removes the managed skill file, hooks, MCP entries, plugin, rule file, and the
+It removes the three managed skill files (and their directories once empty), hooks, MCP entries, plugin, rule file, and the
 Skillvolution-specific permission grants, and unregisters Claude Code's user-scope MCP
 server via `claude mcp remove`. It deliberately keeps:
 
@@ -199,7 +230,7 @@ server via `claude mcp remove`. It deliberately keeps:
 
 Rerun the install command (or `cargo install --locked --path .`), then rerun
 `skillvolution setup` — the registered configs keep pointing at the same binary path,
-but the skill file, hooks, and plugin are only refreshed when setup runs. `doctor`
+but the skill files, hooks, and plugin are only refreshed when setup runs. `doctor`
 reports an install as "differs from what `skillvolution setup --client X` would write"
 when it's stale. The database schema migrates automatically on first open; a vault
 written by a newer version refuses to open with "upgrade skillvolution".
@@ -208,10 +239,11 @@ written by a newer version refuses to open with "upgrade skillvolution".
 
 **Claude Code printed a "Skillvolution review" message (shown as Stop hook feedback) —
 is something broken?** No — that's the review reminder working. `hook stop` scans the
-session transcript since the offset recorded for that session; when the last file-edit
-tool call (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` — `Bash` doesn't count) comes
-after the last *successful* `publish_skill`/`report_skill_outcome` call (a rejected one
-doesn't count), it prints
+session transcript since the offset recorded for that session; when the last piece of
+work — a file-edit tool call (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` — `Bash`
+doesn't count) or a successful `get_skill` — comes after the last *successful*
+`publish_skill`/`report_skill_outcome` call (a rejected one doesn't count, and neither
+does a failed `get_skill`), it asks for a report on every skill loaded and prints
 `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext": …}}` on stdout and
 exits 0. Claude Code continues the same turn with that text; the continued Stop arrives
 with `stop_hook_active: true` and is never blocked again, and each transcript span is
@@ -223,8 +255,8 @@ hook payloads carry a session id but no transcript to scan, so `hook tool-use` k
 per-session worked/reviewed flags in the vault instead (the `PostToolUse`/`AfterTool`/
 `postToolUse` hooks match each client's file-editing tools — `write`/`edit`/
 `apply_patch`/`notebook_edit`, `apply_patch`, `write_file`/`replace`, `Write`
-respectively — plus `publish_skill`/`report_skill_outcome`, which count as a review;
-other tools are ignored). The stop hook
+respectively — plus the vault's tools: `get_skill` counts as work, and
+`publish_skill`/`report_skill_outcome` count as a review; other tools are ignored). The stop hook
 (`Stop`/`AfterAgent`/`stop`) then returns its own continue format once per unreviewed
 span: `{"decision":"block","reason":…}` for Devin and Codex, `{"decision":"deny",…}` for
 Gemini CLI, `{"followup_message":…}` for Cursor. Every judged stop consumes the span —
@@ -242,12 +274,24 @@ same hook but only approves `mcp__skillvolution__*` tools.
 
 **What does the OpenCode plugin do?** `plugins/skillvolution.js` runs
 `hook session-start` to inject the skill catalog into the system prompt once per session
-(retrying on the next turn if the load failed), and tracks file-edit tools
-(`edit`, `write`, `multiedit`, `patch`, `apply_patch` — `bash` doesn't count) on the
-top-level session — subagent work is attributed to its parent, and a subagent's own idle
+(retrying on the next turn if the load failed), and also runs `hook prompt` on each new
+top-level user message, adding the matching skills to that turn's system prompt
+(subagent sessions get none). It tracks file-edit tools
+(`edit`, `write`, `multiedit`, `patch`, `apply_patch` — `bash` doesn't count) and
+`get_skill` loads on the top-level session — subagent work is attributed to its parent, and a subagent's own idle
 events are ignored. Once a working turn goes idle without a review call, later turns'
 system prompts carry the review reminder until `publish_skill` or
 `report_skill_outcome` runs. It never blocks a turn and spends no extra model call.
+
+**Why does the reminder fire when I only read a skill?** Loading a skill with
+`get_skill` is work whose outcome is owed: the stop reminder asks for
+`report_skill_outcome` (`helped`, `failed` naming the wrong step, or `not_applicable`)
+for every loaded skill, so rankings learn from what was actually applied.
+
+**No skill suggestions appear with my prompts.** Suggestions need at least two keywords
+after filler words are dropped and a match that clears the relevance gate, and Cursor
+has none. See
+["Suggestions never appear"](docs/troubleshooting.md#skill-suggestions-never-appear).
 
 **The reminder never fired, or fired twice — why?** Usually a missing or doubled
 install: run `skillvolution doctor`, which flags configs differing from the current
@@ -273,8 +317,9 @@ each one.
 - The project key is the sanitized name of the enclosing git repository's root
   directory, so two unrelated repositories that share a directory name share project
   scope. Outside a git repository only global skills are visible.
-- Only Claude Code's hook flow (catalog injection and the blocking review reminder) has
-  been verified against a live client. Devin CLI, Codex CLI, Gemini CLI, Cursor, and the
+- Only Claude Code's catalog injection and blocking review reminder have been verified
+  against a live client; the prompt-time suggestions are exercised by tests for every
+  client, but none has been verified firing in the real client. Devin CLI, Codex CLI, Gemini CLI, Cursor, and the
   OpenCode plugin are exercised by tests and produce the documented payloads, but their
   hooks firing end-to-end inside the real clients is not verified. On Windows, Devin's
   hook invocation specifically is unverified.

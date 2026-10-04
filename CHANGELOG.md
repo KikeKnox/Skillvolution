@@ -7,6 +7,43 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+### Added
+
+- `setup` now installs three managed skills per client, each at
+  `skills/<name>/SKILL.md` with its own `skillvolution-managed:<name>:vN` marker:
+  `evolution` (now v10), `skill-evaluation` (the evaluator subagent's rubric: hard
+  gates, a 16-point rubric, and the verdict format `publish_skill` expects), and
+  `skill-acquisition` (what an agent follows when it notices mid-task that it lacks
+  the know-how). `doctor` checks each skill's version, `setup --remove` deletes each
+  owned file and any directory left empty, and a user's own file at one of those paths
+  is refused by `setup` ("unowned") and skipped by `--remove`. The `AGENTS.md` block
+  and the Cursor rule mention the new skills.
+- New `skillvolution hook prompt` subcommand: prompt-time retrieval. It extracts up to
+  16 keywords from the submitted prompt (English and Spanish stopwords dropped,
+  accents folded), searches the vault, and suggests at most 3 of the top 5 hits that
+  match one keyword in their id or tags or two across id, description, and tags; skills
+  with two or more net failures are never suggested and a prompt with fewer than two
+  keywords is not searched. `setup` wires it as `UserPromptSubmit` for Claude Code,
+  Codex, and Devin (Devin not yet verified against a live session) and `BeforeAgent`
+  for Gemini CLI, and the OpenCode plugin calls it for each top-level user message
+  through `chat.message`. Cursor is not wired: its `beforeSubmitPrompt` cannot inject
+  context.
+- `get_skill` results carry a `next` field asking the agent to verify the procedure and
+  call `report_skill_outcome` with the loaded id and version.
+
+### Changed
+
+- Loading a skill is now work the review reminder holds the agent to: a successful
+  `get_skill` counts like a file edit in the Claude Code transcript scan, the
+  flag-tracked clients' tool-use hook, and the OpenCode plugin. The reminder
+  (`STOP_REASON`, identical in the OpenCode plugin) now asks for an outcome report on
+  every loaded skill and names the `skill-evaluation` skill for the evaluator subagent.
+- MCP tool descriptions and `initialize` instructions mention per-request suggestions,
+  saying which skill is being applied, and the `skill-acquisition` skill; the
+  session-start catalog header points to `skill-acquisition` and says matching skills
+  are also suggested with each request.
+- Project-scope hook commands for `prompt` carry `--project 'KEY'`, like `session-start`.
+
 ### Fixed
 
 - Claude Code sessions visibly check the vault again: `hook session-start`

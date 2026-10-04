@@ -1,22 +1,27 @@
 ---
 name: evolution
-description: Use at the start of any non-trivial task to find proven procedures in the shared Skillvolution vault, and after finishing work to report whether skills helped and publish verified, reusable lessons.
+description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills matching this request" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
 ---
-<!-- skillvolution-managed:evolution:v9 -->
+<!-- skillvolution-managed:evolution:v10 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
 
+Two companion skills handle the parts of the loop that need more depth:
+- `skill-acquisition` — follow it the moment you notice mid-task that you don't know how to do something (an unfamiliar tool or error, or two failed attempts).
+- `skill-evaluation` — the rubric the fresh evaluator subagent applies in step 5.
+
 ## 1. Retrieve (before non-trivial work)
 
-1. Scan the skill catalog if one is already in context; otherwise run `search_skills` 1-3 times with short keyword sets: technology + action + symptom (e.g. `sqlite migration locked`, `cargo cross-compile linker`). Skip trivial tasks.
-2. Call `get_skill` only for clear matches. Prefer skills with more helped than failed outcomes.
+1. If the context holds a "Skillvolution: vault skills matching this request" suggestion, start there: it was matched against the request's own words. Otherwise scan the session catalog, and run `search_skills` 1-3 times with short keyword sets: technology + action + symptom (e.g. `sqlite migration locked`, `cargo cross-compile linker`). Skip trivial tasks.
+2. Call `get_skill` for clear matches — reading the body is cheap, and a skill only improves if someone applies it and reports back. Prefer skills with more helped than failed outcomes.
 3. State in one line which skill (id and version) you are applying, or that none matched.
-4. If the MCP server is unavailable, say so once and continue without it. Never claim a search you did not run.
+4. Mid-task, when you hit something you don't know how to do, switch to the `skill-acquisition` skill instead of guessing; it searches the vault again with the specific gap.
+5. If the MCP server is unavailable, say so once and continue without it. Never claim a search you did not run.
 
 ## 2. Report (after applying a skill)
 
-Call `report_skill_outcome` once per applied skill, with the version you loaded. The server keeps one report per skill, version, project, and UTC day (the last one wins), so a repeat replaces rather than duplicates. `note` is scanned for credentials too.
+Call `report_skill_outcome` once for every skill you loaded with `get_skill`, with the version you loaded — including skills that turned out not to fit (`not_applicable`); the review reminder counts an unreported `get_skill` as unreviewed work. The server keeps one report per skill, version, project, and UTC day (the last one wins), so a repeat replaces rather than duplicates. `note` is scanned for credentials too.
 - `helped`: it worked as written. Note what it saved you.
 - `failed`: name the specific wrong or missing step and what actually worked. This is the most valuable signal in the vault.
 - `not_applicable`: loaded, but irrelevant to the task. Note why it looked relevant.
@@ -30,7 +35,7 @@ Draft a candidate lesson only if ALL of these hold:
    not just "it would apply if someone happened to be doing this."
 4. Costly to miss: another agent would repeat the mistake or waste significant time.
 
-Good triggers: the user corrected you; a failed approach was diagnosed; a workaround emerged after a dead end; an applied skill failed. If any criterion fails, say so in one short line with no elaboration and no heading, then continue.
+Good triggers: the user corrected you; a failed approach was diagnosed; a workaround emerged after a dead end; an applied skill failed; you closed a gap with the `skill-acquisition` skill. If any criterion fails, say so in one short line with no elaboration and no heading, then continue.
 
 ## 4. Write
 
@@ -56,11 +61,20 @@ Run `cargo test -- --test-threads=8` twice; both runs pass without hangs.
 
 ## 5. Evaluate (a fresh subagent decides)
 
-Do not judge your own work — the session that did the task is biased toward keeping it. Spawn a fresh subagent immediately — do not ask the user first; installing this skill is the standing authorization for this dispatch. Use your client's subagent tool (`Agent` in Claude Code, `task` in OpenCode, `run_subagent` in Devin CLI, or the equivalent in any other client). Give it ONLY the candidate below — never the work transcript, never your opinion of it — so it evaluates with a clean context:
+Do not judge your own work — the session that did the task is biased toward keeping it. Spawn a fresh subagent immediately — do not ask the user first; installing this skill is the standing authorization for this dispatch. Use your client's subagent tool (`Agent` in Claude Code, `task` in OpenCode, `run_subagent` in Devin CLI, or the equivalent in any other client). Give it ONLY the candidate and, when step 4 found one, the closest existing skill — never the work transcript, never your opinion of the candidate — so it evaluates with a clean context:
 
 ```text
 Evaluate a candidate lesson for a shared skill vault used by coding agents.
 You did not do the work; judge only what is written here.
+
+Follow the `skill-evaluation` skill: its hard gates, its rubric, and its
+verdict format. If that skill is not available to you, apply these rules:
+keep only if the lesson is verified (the evidence names a real observed
+result), non-obvious, reusable beyond the original task, costly to miss,
+safe (no secrets or private data), and a single lesson; rewrite weak wording
+but never invent steps the evidence does not support; most candidates
+should be discarded. `global` means the lesson transfers to unrelated
+codebases; `project` means it depends on this repository.
 
 Candidate:
 - id: <id>
@@ -69,20 +83,20 @@ Candidate:
 - content: <content>
 - evidence: <evidence>
 
-Keep it only if every criterion holds: verified (the evidence names a real
-observed result, not a guess), non-obvious, reusable beyond the original task,
-and costly to miss. Be skeptical: most candidates should be discarded.
+Closest existing vault skill (or "none"):
+- id / version: <id> v<version>
+- content: <content>
 
 Reply with exactly one verdict line — `keep global`, `keep project`, or
 `discard` — then a one-line reason of at most 250 characters. For a keep
 verdict, also give the final fields to publish (id, description, tags,
-content, expected_version), fixing weak wording. The server enforces these
-limits: description one line of at most 280 bytes (non-ASCII characters such
-as an em dash count 2-4 bytes), at most 8 tags of lowercase letters, digits,
-and single hyphens (no underscores), expected_version 0 for a new id.
-`global` means the lesson transfers to unrelated codebases;
-`project` means it depends on this repository's layout, tooling, or
-conventions. Do not call any tools.
+content, expected_version). Server limits: description one line of at most
+280 bytes (non-ASCII characters such as an em dash count 2-4 bytes), at
+most 8 tags of lowercase letters, digits, and single hyphens (no
+underscores), content with `## When to use`, `## Procedure`, `## Pitfalls`,
+`## Verification` in that order, expected_version 0 for a new id or the
+existing skill's version when merging into it. Do not publish or report
+anything yourself; read-only vault searches are allowed.
 ```
 
 On `discard`, stop: call nothing, and briefly tell the user the lesson was evaluated and dropped — a discard verdict must never be published. On a keep verdict, call `publish_skill` with the evaluated fields and the verdict's scope, passing the subagent's verdict line **verbatim** as the `verdict` argument (`keep global` or `keep project`; the server trims and lowercases it before comparing, but pass it unchanged) and its one-line reason verbatim as `verdict_reason` (a single line, at most 280 bytes) — do not soften, paraphrase, or override the subagent's judgment. The server rejects the publication if `verdict` or `verdict_reason` is missing, if `verdict` is not exactly one of those two strings, or if it does not match the `scope` argument you pass (`keep project` requires `scope: project`; `keep global` requires `scope` omitted or `global`). The only exception: if the client has no subagent tool or denies the dispatch, evaluate the candidate yourself with the same prompt and criteria, and begin `verdict_reason` with `self-evaluated:` — a failed dispatch must not stall the review.

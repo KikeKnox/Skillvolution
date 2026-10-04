@@ -15,7 +15,7 @@ Variables the `skillvolution` binary reads:
 | `SKILLVOLUTION_NO_INPUT` | `setup` | Any non-empty value forces the non-interactive path: every detected client is configured and the default database path is kept, with no prompts. | unset (prompts on a terminal) |
 | `SKILLVOLUTION_CLAUDE_TIMEOUT_SECS` | `setup`, `doctor` | Seconds a `claude mcp …` call may run before being killed. | `30` |
 | `CLAUDE_CONFIG_DIR` | `setup`, `doctor` | Claude Code's config directory. | `~/.claude` |
-| `CLAUDE_PROJECT_DIR` | `serve`, `hook session-start` | Fallback project root for project-key detection when the working directory isn't inside a git repo. Set by Claude Code. | unset |
+| `CLAUDE_PROJECT_DIR` | `serve`, `hook session-start`, `hook prompt` | Fallback project root for project-key detection when the working directory isn't inside a git repo. Set by Claude Code. | unset |
 | `CODEX_HOME` | `setup`, `doctor` | Codex CLI's config directory. | `~/.codex` |
 | `GEMINI_CLI_HOME` | `setup`, `doctor` | Substitutes for the *home* directory `~/.gemini` is computed from — the config dir is `<value>/.gemini`. | `HOME` |
 | `XDG_CONFIG_HOME` | `setup`, `doctor` | OpenCode's config base — honored only when set to an absolute path. | `~/.config/opencode` |
@@ -39,8 +39,8 @@ Variables the installers read (they are not read by the binary itself):
 ## File locations
 
 `setup` writes into each client's own config directory (global mode) or into the project
-directory (`--project DIR`, project mode). Every client also gets the `evolution` skill
-at `<dir>/skills/evolution/SKILL.md`.
+directory (`--project DIR`, project mode). Every client also gets three managed skills at
+`<dir>/skills/<name>/SKILL.md`: `evolution`, `skill-evaluation`, and `skill-acquisition`.
 
 | Client | Global config directory | Global files | Project files (under `DIR`) |
 |---|---|---|---|
@@ -55,21 +55,24 @@ On Windows, `~` resolves through `USERPROFILE` when `HOME` is unset.
 
 Notes:
 
-- The managed skill file lives at `<config dir>/skills/evolution/SKILL.md` globally and
-  `.<dir>/skills/evolution/SKILL.md` in a project (e.g. `.claude/skills/…`,
-  `.codex/skills/…`).
+- The managed skill files live at `<config dir>/skills/<name>/SKILL.md` globally and
+  `.<dir>/skills/<name>/SKILL.md` in a project (e.g. `.claude/skills/…`,
+  `.codex/skills/…`), for each of `evolution`, `skill-evaluation`, and
+  `skill-acquisition`. Each carries its own `skillvolution-managed:<name>:vN` marker;
+  a file at one of those paths without it is refused by `setup` and skipped by
+  `setup --remove`.
 - `AGENTS.md` carries the same marker block for OpenCode, Devin, and Codex — shared, so
   it's written once per scope however many of those clients are configured. Gemini CLI
   uses `GEMINI.md`, Cursor uses a `.cursor/rules/skillvolution.mdc` rule file (project
-  mode only — Cursor has no global rules file, so globally the skill plus the
-  SessionStart catalog is the only trigger).
+  mode only — Cursor has no global rules file, so globally the skills plus the
+  SessionStart catalog are the only trigger).
 - MCP server entries all run `<bin> --db <db> serve` plus `--project <key>` in project
   mode (no global entry passes `--project`). They differ only in container:
   `.mcp.json`/Cursor `mcp.json`/Devin `mcp_config.json` use `mcpServers.skillvolution`;
   OpenCode uses `mcp.skillvolution` with `"type": "local"`; Codex uses
   `[mcp_servers.skillvolution]` in TOML. In project mode `--project <key>` is also baked
-  into the OpenCode plugin and Claude Code's `SessionStart` hook (its `Stop` hook doesn't
-  need it — the transcript itself locates the session).
+  into the OpenCode plugin and the `SessionStart` and prompt hooks (Claude Code's `Stop`
+  hook doesn't need it — the transcript itself locates the session).
 - Setup's backups sit next to each edited file as `NAME.skillvolution.bak`,
   `.bak.1`, `.bak.2` (three slots, newest first). Fully managed files get no backup.
 
@@ -89,7 +92,7 @@ warning.
 
 ## Project key
 
-`serve`, `hook session-start`, and `publish_skill`'s `scope: "project"` resolve the
+`serve`, `hook session-start`, `hook prompt`, and `publish_skill`'s `scope: "project"` resolve the
 project key as follows:
 
 1. An explicit `--project KEY` wins.

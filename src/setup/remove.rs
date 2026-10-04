@@ -132,14 +132,16 @@ fn run_scope(explicit: Option<Clients>, scope: Scope, db: &Path, dry_run: bool) 
     Ok(())
 }
 
-/// Best-effort: once every edit has succeeded, drop the `evolution` skill directory that
+/// Best-effort: once every edit has succeeded, drop each managed skill's directory that
 /// a deleted `SKILL.md` leaves empty. Never fails setup: a directory that's non-empty
-/// (another client's files still in `skills/`) or already gone is left alone.
+/// (the user's own files next to it) or already gone is left alone.
 fn remove_emptied_skill_dirs(planned: &[Planned]) {
     for p in planned {
         for edit in &p.edits {
             if let Edit::Delete(path) = edit
-                && path.ends_with("skills/evolution/SKILL.md")
+                && super::SKILLS.iter().any(|(name, _)| {
+                    path.ends_with(std::path::Path::new("skills").join(name).join("SKILL.md"))
+                })
                 && let Some(dir) = path.parent()
             {
                 let _ = fs::remove_dir(dir);

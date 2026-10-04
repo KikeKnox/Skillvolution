@@ -46,7 +46,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
             (dir.clone(), dir)
         }
     };
-    let mut changes = vec![common::skill_change(&dir)?];
+    let mut changes = common::skill_changes(&dir)?;
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
@@ -71,10 +71,7 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
             (dir.clone(), dir)
         }
     };
-    let mut edits = Vec::new();
-    if let Some(edit) = common::skill_removal(&dir, notes)? {
-        edits.push(edit);
-    }
+    let mut edits = common::skill_removals(&dir, notes)?;
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
@@ -104,10 +101,17 @@ fn default_trust(settings: &mut Value) {
     }
 }
 
-/// The `hooks` entries for a Gemini `settings.json`: session catalog, tool-use flagging
-/// for our work tools and the vault's own review tools, the review-blocking AfterAgent
-/// (Gemini's Stop equivalent), and session cleanup. `key` scopes session-start to the
-/// project, like the other clients' setups do.
+/// The `hooks` entries for a Gemini `settings.json`: session catalog, skills matching
+/// each prompt (BeforeAgent), tool-use flagging for our work tools and the vault's own
+/// tools (`mcp_skillvolution_.*` covers `get_skill`, which marks work, and the review
+/// tools), the review-blocking AfterAgent (Gemini's Stop equivalent), and session
+/// cleanup. `key` scopes session-start and prompt to the project, like the other
+/// clients' setups do.
+///
+/// BeforeAgent's input carries the user's text in `prompt`, and its
+/// `hookSpecificOutput.additionalContext` "is appended to the prompt for this turn
+/// only": https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md
+/// and `BeforeAgentOutput` in `packages/core/src/hooks/types.ts`.
 ///
 /// Every flag-tracked hook here passes `--client gemini` explicitly, unlike Devin's
 /// `tool-use`/reuses of the default: `HookEvent::ToolUse`'s `--client` defaults to Devin
@@ -124,6 +128,11 @@ fn merge_hooks(settings: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -
             "SessionStart",
             None,
             hooks::hook_cmd(bin, db, "session-start", &session_start_extra)?,
+        ),
+        (
+            "BeforeAgent",
+            None,
+            hooks::hook_cmd(bin, db, "prompt", &session_start_extra)?,
         ),
         (
             "AfterTool",
