@@ -7,6 +7,10 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+## [v0.4.0]
+
+_2026-10-04_
+
 ### Added
 
 - `setup` now installs three managed skills per client, each at
