@@ -102,7 +102,13 @@ binary.
 4. `cargo dist` (`dist-workspace.toml`) builds the release binaries for
    Linux (glibc + musl, x86_64/aarch64), macOS (x86_64/aarch64), and Windows
    (x86_64). The release workflow is gated on CI via
-   `plan-jobs = ["./ci"]` — a tag only releases code that passed tests.
+   `plan-jobs = ["./ci"]` — a tag only releases code that passed tests. The
+   generated `release.yml` alone doesn't enforce that: a failed CI leaves the
+   build jobs "skipped", which its `host` job accepts, so it would publish a
+   release with no binaries. `host` is therefore hand-edited to require
+   `needs.custom-ci.result == 'success'`, and `dist-workspace.toml` sets
+   `allow-dirty = ["ci"]` so `dist plan` accepts that edit. If you rerun
+   `dist init`/`dist generate`, reapply the edit before committing.
 5. The release publishes `install.sh` and `install.ps1`; installers support
    `SKILLVOLUTION_VERSION`, `SKILLVOLUTION_INSTALL_DIR`,
    `SKILLVOLUTION_NO_MODIFY_PATH`, `SKILLVOLUTION_NO_SETUP`, and

@@ -220,10 +220,14 @@ jobs:
   host:
     needs:
       - plan
+      - custom-ci
       - build-local-artifacts
       - build-global-artifacts
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # Hand-edited (see allow-dirty in dist-workspace.toml): a failed custom-ci leaves the builds
+    # "skipped", which the generated condition accepts, so CI must pass explicitly too or a
+    # failing tag publishes a release with no binaries and breaks `releases/latest`.
+    if: ${{ always() && needs.plan.result == 'success' && needs.custom-ci.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

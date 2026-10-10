@@ -266,7 +266,9 @@ fn an_install_missing_the_prompt_hook_differs() {
     );
 
     // What an install from before prompt retrieval looks like: no UserPromptSubmit.
-    let settings_path = env.home.path().join(".claude/settings.json");
+    // One component per join: doctor prints the path with native separators, so a
+    // literal ".claude/settings.json" would never match its output on Windows.
+    let settings_path = env.home.path().join(".claude").join("settings.json");
     let mut settings: serde_json::Value =
         serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
     settings["hooks"]

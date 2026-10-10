@@ -941,6 +941,20 @@ fn cli_hook_prompt_fails_open() {
     ));
 }
 
+#[test]
+fn cli_hook_prompt_reads_the_whole_payload_even_when_it_fails_open() {
+    // Larger than any pipe buffer: a hook that bailed out before reading stdin would
+    // leave this write blocked until it exited, then fail it with a broken pipe.
+    let dir = tempfile::tempdir().unwrap();
+    let db = retrieval_db(dir.path());
+    let input = json!({"prompt": "cargo ".repeat(200_000)}).to_string();
+    assert_failed_open(&run_hook(
+        &db,
+        &["prompt", "--project", "proja", "--client", "cursor"],
+        &input,
+    ));
+}
+
 // --- runtime project detection (no --project flag) ------------------------
 
 #[test]

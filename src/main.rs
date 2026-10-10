@@ -281,11 +281,13 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
             print!("{}", client.session_context(context));
         }
         HookEvent::Prompt { project, client } => {
+            // Drain the payload before anything can fail: exiting with it unread breaks
+            // the pipe under a client (or test) that is still writing it.
+            let input = read_stdin()?;
             validate_project(&project)?;
             let event = client
                 .prompt_event()
                 .context("this client's prompt hook cannot inject context")?;
-            let input = read_stdin()?;
             let project = resolve_project(project)?;
             if let Some(context) = hook::prompt(&open(db)?, project.as_deref(), &input)? {
                 println!(

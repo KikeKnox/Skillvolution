@@ -27,3 +27,7 @@ hosting = "github"
 install-updater = false
 # A tag's release must not ship untested code: run CI's checks before building artifacts.
 plan-jobs = ["./ci"]
+# release.yml's `host` job is hand-edited to also require custom-ci's success (a failing CI
+# otherwise leaves the builds "skipped" and still publishes an empty release); keep `dist`
+# from rejecting that edit. After `dist generate`, reapply it.
+allow-dirty = ["ci"]
