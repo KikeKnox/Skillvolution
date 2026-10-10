@@ -7,9 +7,32 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+## [v0.4.1]
+
+_2026-10-10_
+
+The first release that ships the v0.4.0 changes — per-prompt vault skill suggestions
+(`hook prompt`), the `skill-evaluation` and `skill-acquisition` skills, and outcome
+reports for every loaded skill; see v0.4.0 below. The `v0.4.0` tag's CI failed on
+Windows and its GitHub release was published without binaries or installers. Rerun
+`skillvolution setup` after upgrading to install the new skills and hooks.
+
+### Fixed
+
+- Releases are gated on CI for real: the release workflow's `host` job now requires
+  the CI run to succeed. Before, a failing CI left the build jobs "skipped", which the
+  generated condition accepted, so `v0.4.0` was published with only
+  `dist-manifest.json` and `releases/latest/download/...` returned 404.
+- `hook prompt` reads its whole stdin payload before it can fail open, so a client
+  still writing the payload never gets a broken pipe.
+- A `doctor` test compared a `/`-joined path against doctor's native output and
+  failed on Windows.
+
 ## [v0.4.0]
 
 _2026-10-04_
+
+Tagged but never published with binaries; see v0.4.1.
 
 ### Added
 
