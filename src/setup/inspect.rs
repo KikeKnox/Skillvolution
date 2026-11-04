@@ -2,7 +2,7 @@
 //! without ever writing anything: every function here only reads files on
 //! disk (via `fs_safe::load_json`, which treats a missing file as `{}`).
 
-use super::{Change, ClientKind, claude_cli, fs_safe, hooks};
+use super::{Change, ClientKind, claude_cli, common, fs_safe, hooks, plugin};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -82,14 +82,46 @@ pub(crate) fn missing_configured_bin(kind: ClientKind, changes: &[Change]) -> Op
 
 /// Whether `path`'s config (if any) already carries an owned hook or MCP
 /// entry: a hook command `owned_command` recognizes, or a `skillvolution`
-/// entry under `mcpServers` or `mcp`.
+/// entry under `mcpServers` or `mcp` (JSON) or `mcp_servers` (Codex's TOML).
 fn config_has_owned(path: &Path) -> bool {
+    if path.extension().is_some_and(|ext| ext == "toml") {
+        let Ok(Some(text)) = fs_safe::read_optional(path) else {
+            return false;
+        };
+        return text.parse::<toml_edit::DocumentMut>().is_ok_and(|doc| {
+            doc.get("mcp_servers")
+                .and_then(|servers| servers.get("skillvolution"))
+                .is_some()
+        });
+    }
     let Ok(config) = fs_safe::load_json(path) else {
         return false;
     };
     hooks::has_owned(&config)
         || config["mcpServers"]["skillvolution"].is_object()
         || config["mcp"]["skillvolution"].is_object()
+}
+
+/// Whether a client is configured, judged by the files its `changes()` lists: one of
+/// them already carries something setup owns, by setup's own ownership predicates (an
+/// owned hook command or MCP server entry, our AGENTS.md/GEMINI.md marker block, a
+/// managed skill file, or our OpenCode plugin). A file that merely mentions
+/// "skillvolution" (a permission entry, a comment) doesn't count, so `doctor --fix`
+/// never configures a client the user didn't.
+pub(crate) fn is_configured(changes: &[Change]) -> bool {
+    changes.iter().any(|(path, _)| carries_owned(path))
+}
+
+fn carries_owned(path: &Path) -> bool {
+    let our_skill = super::SKILLS.iter().any(|(name, _)| {
+        path.ends_with(common::skill_path(Path::new(""), name))
+            && fs_safe::is_our_skill(path, name).unwrap_or(false)
+    });
+    let our_plugin = path.ends_with(Path::new("plugins").join("skillvolution.js"))
+        && plugin::is_ours(path).unwrap_or(false);
+    let our_block = fs_safe::read_optional(path)
+        .is_ok_and(|text| text.is_some_and(|text| text.contains(common::START)));
+    our_skill || our_plugin || our_block || config_has_owned(path)
 }
 
 /// The project-level config paths `kind` writes under a project directory,
@@ -109,9 +141,10 @@ fn project_config_paths(repo: &Path, kind: ClientKind) -> Vec<PathBuf> {
             repo.join(".cursor/mcp.json"),
             repo.join(".cursor/hooks.json"),
         ],
-        // `.codex/config.toml` also has a project entry, but it's TOML (see
-        // `is_config_file`) so `config_has_owned` below can't detect it either way.
-        ClientKind::Codex => vec![repo.join(".codex/hooks.json")],
+        ClientKind::Codex => vec![
+            repo.join(".codex/config.toml"),
+            repo.join(".codex/hooks.json"),
+        ],
         ClientKind::Gemini => vec![repo.join(".gemini/settings.json")],
     }
 }

@@ -341,7 +341,7 @@ fn keywords_drop_english_and_spanish_stopwords() {
 #[test]
 fn keywords_drop_short_tokens_and_repeats_and_fold_case_and_accents() {
     assert_eq!(
-        hook::keywords("go to db: API api Api, Configuración configuracion"),
+        hook::keywords("to be ok: API api Api, Configuración configuracion"),
         ["api", "configuracion"]
     );
     // A token longer than any useful word (a hash, say) is dropped too.
@@ -349,6 +349,33 @@ fn keywords_drop_short_tokens_and_repeats_and_fold_case_and_accents() {
         hook::keywords(&format!("{} cargo", "f".repeat(64))),
         ["cargo"]
     );
+}
+
+#[test]
+fn keywords_keep_two_letter_technical_terms() {
+    assert_eq!(
+        hook::keywords("fix the CI and Go db, to JS"),
+        ["fix", "ci", "go", "db", "js"]
+    );
+}
+
+#[test]
+fn a_two_letter_tag_is_suggested_but_never_as_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("module-vendoring")
+        .description("Use when dependencies must be vendored for offline builds")
+        .tags(&["go"])
+        .publish(&mut vault);
+    Draft::new("cloud-deploys")
+        .description("Use when a deploy to the cloud hangs")
+        .tags(&["google-cloud"])
+        .publish(&mut vault);
+    let skills = hook::relevant_skills(&vault, None, "go modules vendoring").unwrap();
+    assert_eq!(ids(&skills), ["module-vendoring"]);
+    // "go" must not prefix-match google-cloud, with or without a second hit word.
+    let skills = hook::relevant_skills(&vault, None, "go banana").unwrap();
+    assert!(!ids(&skills).contains(&"cloud-deploys"), "{skills:?}");
 }
 
 #[test]
@@ -389,7 +416,7 @@ fn a_relevant_prompt_suggests_the_matching_skill_first() {
     let skills =
         hook::relevant_skills(&vault, None, "my cargo tests time out, are they flaky?").unwrap();
     assert_eq!(ids(&skills), ["cargo-flaky-tests"]);
-    // The same request in Spanish matches by id and tags all the same.
+    // The same request in Spanish matches all the same: "fallan" reads as "fail".
     let skills = hook::relevant_skills(&vault, None, "los tests de cargo fallan a veces").unwrap();
     assert_eq!(ids(&skills)[0], "cargo-flaky-tests");
 }
@@ -470,13 +497,59 @@ fn a_skill_with_net_failures_is_never_suggested() {
 }
 
 #[test]
+fn a_skill_reported_not_applicable_is_not_suggested_but_still_searchable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = retrieval_vault(dir.path());
+    let prompt = "cargo tests flaky";
+    for project in ["proja", "projb", "projc"] {
+        vault
+            .record_outcome(
+                "cargo-flaky-tests",
+                1,
+                "not_applicable",
+                "different problem",
+                Some(project),
+            )
+            .unwrap();
+    }
+    vault
+        .record_outcome("cargo-flaky-tests", 1, "helped", "worked", Some("projd"))
+        .unwrap();
+    // 3 not_applicable - 1 helped = 2: off the suggestions...
+    assert!(
+        hook::relevant_skills(&vault, None, prompt)
+            .unwrap()
+            .is_empty()
+    );
+    // ...but an explicit search still finds it, ranked as before.
+    assert_eq!(
+        ids(&vault.search(prompt, None, 20, 0).unwrap().skills)[0],
+        "cargo-flaky-tests"
+    );
+    // A new version (say, a narrowed description) gets a fresh chance.
+    Draft::new("cargo-flaky-tests")
+        .description("Use when cargo test fails intermittently with timeouts")
+        .tags(&["rust", "cargo"])
+        .expected_version(1)
+        .replaces_proven(true)
+        .publish(&mut vault);
+    assert_eq!(
+        ids(&hook::relevant_skills(&vault, None, prompt).unwrap()),
+        ["cargo-flaky-tests"]
+    );
+}
+
+#[test]
 fn at_most_three_skills_are_suggested() {
     let dir = tempfile::tempdir().unwrap();
     let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
     for id in ["rust-one", "rust-two", "rust-three", "rust-four"] {
-        Draft::new(id).tags(&["rust"]).publish(&mut vault);
+        Draft::new(id)
+            .description("Use when the borrow checker rejects a lifetime")
+            .tags(&["rust"])
+            .publish(&mut vault);
     }
-    let skills = hook::relevant_skills(&vault, None, "rust compile errors").unwrap();
+    let skills = hook::relevant_skills(&vault, None, "rust lifetime errors").unwrap();
     assert_eq!(skills.len(), 3, "{:?}", ids(&skills));
 }
 
@@ -1148,4 +1221,159 @@ fn cli_hook_approve_prints_an_approve_decision_only_for_our_tools() {
     );
     assert!(other.status.success());
     assert!(other.stdout.is_empty());
+}
+
+#[test]
+fn a_compound_tag_or_hyphenated_id_counts_as_one_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("spreadsheet-fills")
+        .description("Use when a spreadsheet saves no cell fill")
+        .tags(&["conditional-format", "xlsx"])
+        .publish(&mut vault);
+    Draft::new("kafka-consumer-lag")
+        .description("Use when offsets stall after a rebalance")
+        .publish(&mut vault);
+    // Two keywords inside the one tag, or the one id, name one thing: a single match.
+    for prompt in ["broken conditional format", "kafka consumer setup"] {
+        assert!(
+            hook::relevant_skills(&vault, None, prompt)
+                .unwrap()
+                .is_empty(),
+            "{prompt}"
+        );
+    }
+    // A match in a second place (here description words) makes two.
+    let skills =
+        hook::relevant_skills(&vault, None, "conditional format loses the cell fill").unwrap();
+    assert_eq!(ids(&skills), ["spreadsheet-fills"]);
+    let skills = hook::relevant_skills(&vault, None, "kafka offsets stall").unwrap();
+    assert_eq!(ids(&skills), ["kafka-consumer-lag"]);
+    // Spanish "forma" (a filler word) never reaches the tag word "format".
+    let prompt = "subir skills de forma manual con un comando";
+    assert!(
+        hook::relevant_skills(&vault, None, prompt)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn generic_developer_words_never_count_toward_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = retrieval_vault(dir.path());
+    // "tests" is a whole word of cargo-flaky-tests' id, and "test" of its
+    // description, but neither says which procedure applies; nor does "fix" or "run".
+    for prompt in [
+        "fix the test so the tests run",
+        "write a test file for cargo",
+    ] {
+        assert!(
+            hook::relevant_skills(&vault, None, prompt)
+                .unwrap()
+                .is_empty(),
+            "{prompt}"
+        );
+    }
+    // Two specific words still clear the gate, generic ones alongside or not.
+    let skills = hook::relevant_skills(&vault, None, "fix the flaky cargo tests").unwrap();
+    assert_eq!(ids(&skills), ["cargo-flaky-tests"]);
+}
+
+#[test]
+fn spanish_prompts_reach_english_skills_through_the_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("container-restart-loop")
+        .description("Use when a container keeps restarting after a deploy")
+        .tags(&["docker"])
+        .publish(&mut vault);
+    // No word in common with the skill: "contenedor", "reinicia", and "despliegue"
+    // translate to container, restart, and deploy, inflected forms included.
+    for prompt in [
+        "el contenedor se reinicia tras el despliegue",
+        "los contenedores se reinician al desplegar",
+        "reiniciando contenedores",
+    ] {
+        assert_eq!(
+            ids(&hook::relevant_skills(&vault, None, prompt).unwrap()),
+            ["container-restart-loop"],
+            "{prompt}"
+        );
+    }
+    // The keywords themselves stay as typed; translation happens on lookup.
+    assert_eq!(
+        hook::keywords("el contenedor se reinicia"),
+        ["contenedor", "reinicia"]
+    );
+}
+
+#[test]
+fn a_translated_spanish_word_no_longer_prefix_matches_english() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("generation-parent-sync")
+        .description("Use when the parent generation drifts")
+        .publish(&mut vault);
+    // "genera" (generates) used to prefix "generation" and "pare" (stops) "parent";
+    // translated, they are "generate" and "stop", whole words only.
+    let prompt = "genera esto y que pare";
+    assert!(
+        hook::relevant_skills(&vault, None, prompt)
+            .unwrap()
+            .is_empty()
+    );
+    // An untranslated English prompt still matches by prefix.
+    let skills = hook::relevant_skills(&vault, None, "parent generation drift").unwrap();
+    assert_eq!(ids(&skills), ["generation-parent-sync"]);
+}
+
+#[test]
+fn weak_matches_far_below_the_best_one_are_not_suggested() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("postgres-lock-migrations")
+        .description("Use when a postgres schema migration locks a large table")
+        .tags(&["postgres", "migrations"])
+        .publish(&mut vault);
+    Draft::new("table-render-speed")
+        .description("Use when a large table renders slowly")
+        .publish(&mut vault);
+    // Both are candidates and both clear the gate on "large" and "table", but only
+    // the migration skill matches the gist of the prompt.
+    let prompt = "postgres migration locks a large table";
+    let candidates = vault
+        .search(&hook::keywords(prompt).join(" "), None, 5, 0)
+        .unwrap();
+    assert_eq!(
+        ids(&candidates.skills),
+        ["postgres-lock-migrations", "table-render-speed"]
+    );
+    assert_eq!(
+        ids(&hook::relevant_skills(&vault, None, prompt).unwrap()),
+        ["postgres-lock-migrations"]
+    );
+    // On its own topic the other one is the best match and is suggested alone.
+    assert_eq!(
+        ids(&hook::relevant_skills(&vault, None, "large table renders slowly").unwrap()),
+        ["table-render-speed"]
+    );
+}
+
+#[test]
+fn two_forms_of_one_word_count_as_one_keyword() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("blue-green-deployment")
+        .description("Use when a deploy must switch traffic without downtime")
+        .tags(&["rollout"])
+        .publish(&mut vault);
+    // "deploy" and "deployment" match two places, but name one concept.
+    assert!(
+        hook::relevant_skills(&vault, None, "deploy deployment")
+            .unwrap()
+            .is_empty()
+    );
+    let skills = hook::relevant_skills(&vault, None, "deployment rollout").unwrap();
+    assert_eq!(ids(&skills), ["blue-green-deployment"]);
 }

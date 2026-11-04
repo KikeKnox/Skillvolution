@@ -247,13 +247,15 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert!(plugin.contains(&serde_json::to_string(env.bin.to_str().unwrap()).unwrap()));
     assert!(plugin.contains(&serde_json::to_string(env.db.to_str().unwrap()).unwrap()));
 
-    // A fresh registration (nothing named skillvolution existed yet) is a single
-    // `add-json` call; `remove` is only needed to replace an existing one.
+    // A fresh registration (nothing named skillvolution existed yet) is a check of the
+    // current one plus a single `add-json` call; `remove` is only needed to replace an
+    // existing one.
     let log_text = fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = log_text.lines().collect();
-    assert_eq!(lines.len(), 1, "{log_text}");
-    assert!(lines[0].starts_with("mcp add-json --scope user skillvolution "));
-    let json_arg = lines[0]
+    assert_eq!(lines.len(), 2, "{log_text}");
+    assert_eq!(lines[0], "mcp get skillvolution");
+    assert!(lines[1].starts_with("mcp add-json --scope user skillvolution "));
+    let json_arg = lines[1]
         .strip_prefix("mcp add-json --scope user skillvolution ")
         .unwrap();
     let mcp_json: Value = serde_json::from_str(json_arg).unwrap();
@@ -439,6 +441,9 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
         assert_eq!(
             lines,
             vec![
+                // The fake prints nothing for `mcp get`, so it's not recognized as
+                // identical and setup goes on to replace it.
+                "mcp get skillvolution".to_owned(),
                 format!(
                     "mcp add-json --scope user skillvolution {}",
                     serde_json::json!({
@@ -460,6 +465,91 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
             "stdout={message_on_stdout}: {lines:?}"
         );
     }
+}
+
+/// Writes an executable fake `claude` that logs its argv like `write_fake_claude` and
+/// answers `mcp get` as the real CLI does: with a user-scope stdio registration of
+/// `bin --db <db> serve` (exit 0) when `registered_db` is given, else exit 1 (nothing
+/// registered). Every other call succeeds. Unix-only (see `write_fake_claude`); uses
+/// only the `printf` builtin, since PATH holds nothing but this script.
+#[cfg(unix)]
+fn write_fake_claude_with_registration(
+    dir: &Path,
+    log: &Path,
+    bin: &Path,
+    registered_db: Option<&Path>,
+) -> PathBuf {
+    let get = match registered_db {
+        Some(db) => {
+            let lines = [
+                "skillvolution:".to_owned(),
+                "  Scope: User config (available in all your projects)".to_owned(),
+                "  Status: ✔ Connected".to_owned(),
+                "  Type: stdio".to_owned(),
+                format!("  Command: {}", bin.display()),
+                format!("  Args: --db {} serve", db.display()),
+                String::new(),
+                "To remove this server, run: claude mcp remove skillvolution -s user".to_owned(),
+            ];
+            let quoted: Vec<String> = lines.iter().map(|line| format!("'{line}'")).collect();
+            format!("printf '%s\\n' {}; exit 0", quoted.join(" "))
+        }
+        None => "exit 1".to_owned(),
+    };
+    write_fake_claude_script(
+        dir,
+        &format!(
+            "echo \"$@\" >> {{log}}\nif [ \"$1 $2\" = \"mcp get\" ]; then {get}; fi\nexit 0\n"
+        ),
+        log,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_prints_the_mcp_registration_only_when_missing_or_different() {
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = env.home.path().join("bin");
+    let setup = |dry_run: bool| {
+        let mut cmd = env.command();
+        cmd.args(["--client", "claude-code"]).env("PATH", &bin_dir);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let output = cmd.output().unwrap();
+        assert_success(&output);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let add_json = "Would run: claude mcp add-json --scope user skillvolution ";
+    let replacing = "(replacing the existing skillvolution registration)";
+
+    // Nothing registered yet.
+    write_fake_claude_with_registration(&bin_dir, &log, &env.bin, None);
+    let stdout = setup(true);
+    assert!(stdout.contains(add_json), "{stdout}");
+    assert!(!stdout.contains(replacing), "{stdout}");
+
+    // Registered, but against another vault.
+    let other_db = env.home.path().join("other.sqlite3");
+    write_fake_claude_with_registration(&bin_dir, &log, &env.bin, Some(&other_db));
+    let stdout = setup(true);
+    assert!(
+        stdout.contains(add_json) && stdout.contains(replacing),
+        "{stdout}"
+    );
+
+    // Registered exactly as setup would: a real run leaves it alone, and a dry-run
+    // after it has nothing at all to show.
+    write_fake_claude_with_registration(&bin_dir, &log, &env.bin, Some(&env.db));
+    let stdout = setup(false);
+    assert!(stdout.contains("already registered"), "{stdout}");
+    assert_eq!(setup(true), "No changes.\n");
+    let log_text = fs::read_to_string(&log).unwrap();
+    assert!(
+        log_text.lines().all(|line| line == "mcp get skillvolution"),
+        "neither run may add or remove a registration: {log_text}"
+    );
 }
 
 #[cfg(unix)]
@@ -1096,4 +1186,36 @@ fn global_claude_setup_warns_about_a_project_install_in_the_current_repo() {
         };
         assert!(reported(&repo) || reported(&canonical), "{stderr}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn registration_check_failure_warns_and_still_registers() {
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let bin_dir = write_fake_claude_script(
+        &env.home.path().join("bin"),
+        "echo \"$@\" >> {log}\nif [ \"$1 $2\" = \"mcp get\" ]; then exec /bin/sleep 5; fi\nexit 0\n",
+        &log,
+    );
+
+    let output = env
+        .command()
+        .arg("--client")
+        .arg("claude-code")
+        .env("PATH", &bin_dir)
+        .env("SKILLVOLUTION_CLAUDE_TIMEOUT_SECS", "1")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("could not check the existing MCP registration"),
+        "{err}"
+    );
+    let logged = fs::read_to_string(&log).unwrap();
+    assert!(
+        logged.contains("mcp add-json --scope user skillvolution"),
+        "{logged}"
+    );
 }

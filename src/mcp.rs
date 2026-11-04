@@ -21,11 +21,11 @@ fn tools() -> Value {
     json!([
         {
             "name": "search_skills",
-            "description": "Search the shared skill vault before starting a non-trivial task, and again whenever you hit something you don't know how to do (matching skills may also be suggested with each request). Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance and by reported outcomes: a skill with more failed than helped reports on its current version is demoted, so it can land below a weaker text match, while a proven one is promoted. Returns `skills` (metadata only: id, version, description, tags, helped/failed counts — call get_skill for the body), `total`, and `has_more` for pagination. An empty query lists the catalog.",
+            "description": "Search the shared skill vault before starting a non-trivial task, and again whenever you hit something you don't know how to do (matching skills may also be suggested with each request). Matches words in skill ids, descriptions, tags, and bodies, ranked by relevance and by reported outcomes: a skill with more failed than helped reports on its current version (plus half the record of its previous version) is demoted, so it can land below a weaker text match, while a proven one is promoted. Returns `skills` (metadata only: id, version, description, tags, and the current version's helped/failed/not_applicable counts — call get_skill for the body), `total`, and `has_more` for pagination. An empty query lists the catalog. Write queries as English keywords (technology, action, symptom) even when the request is in another language; if nothing fits, retry with a reformulation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "maxLength": 512, "description": "Keywords such as technology, action, and symptom, e.g. 'cargo flaky test timeout'"},
+                    "query": {"type": "string", "maxLength": 512, "description": "English keywords (technology, action, symptom), even for non-English requests, e.g. 'cargo flaky test timeout'"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
                     "offset": {"type": "integer", "minimum": 0, "default": 0}
                 },
@@ -333,6 +333,13 @@ impl Server {
             "get_skill" => {
                 let args: GetArgs = serde_json::from_value(arguments).map_err(parse_error)?;
                 let skill = self.vault.get(&args.id, args.version, project)?;
+                // Best effort: load telemetry must never fail the load itself.
+                if let Err(error) = self.vault.record_load(&skill.id, skill.version, project) {
+                    eprintln!(
+                        "skillvolution: could not record load of {} v{}: {error:#}",
+                        skill.id, skill.version
+                    );
+                }
                 let next = format!(
                     "Apply this procedure only as far as it fits the task, verify the result with its \
                      Verification section, then call report_skill_outcome with id {} and version {}: \

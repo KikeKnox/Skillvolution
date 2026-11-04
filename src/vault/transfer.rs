@@ -102,8 +102,34 @@ fn refresh_fts(tx: &Connection, id: &str) -> Result<()> {
 }
 
 impl Vault {
+    /// Rebuilds `skills_fts` from scratch in one IMMEDIATE transaction: clears it,
+    /// then indexes every skill's latest published revision (deprecated skills
+    /// included; `search` hides them at query time) and repoints `fts_rowid`.
+    /// Returns how many skills ended up indexed. Used by `doctor --fix`.
+    pub fn rebuild_search_index(&mut self) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM skills_fts", [])?;
+        tx.execute("UPDATE skills SET fts_rowid = NULL", [])?;
+        let ids: Vec<String> = tx
+            .prepare("SELECT id FROM skills ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in &ids {
+            refresh_fts(&tx, id)?;
+        }
+        let indexed: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM skills WHERE fts_rowid IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(indexed as usize)
+    }
+
     /// Permanently deletes one revision (`version = Some`) or a whole skill,
-    /// including its outcomes and search-index row, in one IMMEDIATE
+    /// including its outcomes, loads, and search-index row, in one IMMEDIATE
     /// transaction. `secure_delete` is turned on for this connection first so
     /// SQLite overwrites the freed pages instead of merely unlinking them,
     /// then `VACUUM` (and a WAL checkpoint) after commit rewrites the file so
@@ -126,6 +152,7 @@ impl Vault {
         );
         let mut report = match version {
             None => {
+                tx.execute("DELETE FROM loads WHERE id = ?1", [id])?;
                 let outcomes = tx.execute("DELETE FROM outcomes WHERE id = ?1", [id])?;
                 let revisions = tx.execute("DELETE FROM revisions WHERE id = ?1", [id])?;
                 revisions::clear_fts_row(&tx, id)?;
@@ -147,6 +174,10 @@ impl Vault {
                     )?,
                     "unknown version: {id} v{version}"
                 );
+                tx.execute(
+                    "DELETE FROM loads WHERE id = ?1 AND version = ?2",
+                    params![id, version],
+                )?;
                 let outcomes = tx.execute(
                     "DELETE FROM outcomes WHERE id = ?1 AND version = ?2",
                     params![id, version],
@@ -192,8 +223,8 @@ impl Vault {
     }
 
     /// Serializes every skill, revision, and outcome as a versioned JSON
-    /// document (excluding the hook-state tables, which are per-machine
-    /// session bookkeeping, not vault content). Skills are ordered by id,
+    /// document (excluding the hook-state tables and `loads`, which are
+    /// per-machine session bookkeeping and telemetry, not vault content). Skills are ordered by id,
     /// revisions by version, and outcomes by version then creation time.
     pub fn export_json(&self) -> Result<String> {
         let exported_at: String =
@@ -274,7 +305,9 @@ impl Vault {
     /// A revision that doesn't exist yet is validated exactly as `propose`
     /// validates a new one (sections, secrets) and inserted; one that exists
     /// with identical description/tags/content/evidence is skipped; one that
-    /// exists but differs is a conflict that aborts the import. Outcomes are
+    /// exists but differs is a conflict that aborts the import. A `draft` or
+    /// `rejected` revision (exports from before schema v5) is inserted as
+    /// `superseded` with its note prefixed `legacy <status>`. Outcomes are
     /// inserted, skipping duplicates under the vault's one-report-per-day
     /// index. Every imported skill's search row is then refreshed to its
     /// latest published revision.
@@ -360,6 +393,18 @@ impl Vault {
                         validate_no_secrets("description", &revision.description)?;
                         validate_no_secrets("content", &revision.content)?;
                         validate_no_secrets("evidence", &revision.evidence)?;
+                        // Exports from before schema v5 can carry draft or rejected
+                        // revisions; they land superseded, as the v5 migration maps them.
+                        let (status, review_note) = match revision.status.as_str() {
+                            legacy @ ("draft" | "rejected") => (
+                                "superseded",
+                                Some(match &revision.review_note {
+                                    Some(note) => format!("legacy {legacy}: {note}"),
+                                    None => format!("legacy {legacy}"),
+                                }),
+                            ),
+                            status => (status, revision.review_note.clone()),
+                        };
                         tx.execute(
                             "INSERT INTO revisions (id, version, description, tags, content, evidence,
                                 expected_version, status, created_at, reviewed_at, review_note)
@@ -372,10 +417,10 @@ impl Vault {
                                 revision.content,
                                 revision.evidence,
                                 revision.expected_version,
-                                revision.status,
+                                status,
                                 revision.created_at,
                                 revision.reviewed_at,
-                                revision.review_note,
+                                review_note,
                             ],
                         )?;
                         report.revisions_imported += 1;

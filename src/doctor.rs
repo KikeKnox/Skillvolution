@@ -1,11 +1,14 @@
-//! `skillvolution doctor`: read-only health checks of the vault and of the
-//! client configurations setup wrote. Never writes to the database or to any
-//! client config: the vault is opened read-only (see `open_readonly`), and
-//! every client check only compares against what `setup` would write, via
-//! `ClientKind::changes`, which itself only reads.
+//! `skillvolution doctor`: health checks of the vault and of the client
+//! configurations setup wrote. Read-only unless `--fix`: the checks open the
+//! vault read-only (see `open_readonly`) and only compare client files against
+//! what `setup` would write, via `ClientKind::changes`, which itself only reads.
+//! With `--fix`, each check that carries a `Fix` is repaired through the same
+//! machinery the rest of the CLI uses (`Vault::open` to migrate,
+//! `Vault::rebuild_search_index`, setup's `write_all` and MCP registration),
+//! then every check runs again.
 
-use crate::setup::{self, ClientKind, Scope};
-use crate::vault;
+use crate::setup::{self, Change, ClientKind, Edit, Scope};
+use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
@@ -37,6 +40,27 @@ struct Check {
     name: String,
     status: Status,
     detail: String,
+    /// What `--fix` does about this check, if anything.
+    #[serde(skip)]
+    fix: Option<Fix>,
+}
+
+/// A repair `--fix` applies for one check.
+enum Fix {
+    /// Open the vault with `Vault::open`, which migrates an older schema.
+    Migrate,
+    RebuildSearchIndex,
+    /// Re-apply global setup for a configured client: its files as computed by
+    /// `ClientKind::changes` for `bin` (plus, for Claude Code, the MCP
+    /// registration), exactly what `setup --client <kind>` writes.
+    Client {
+        kind: ClientKind,
+        bin: PathBuf,
+        changes: Vec<Change>,
+    },
+    RegisterClaudeMcp(PathBuf),
+    /// Not auto-fixable; `--fix` prints this guidance instead.
+    Manual(&'static str),
 }
 
 impl Check {
@@ -45,7 +69,13 @@ impl Check {
             name: name.into(),
             status,
             detail: detail.into(),
+            fix: None,
         }
+    }
+
+    fn with_fix(mut self, fix: Option<Fix>) -> Self {
+        self.fix = fix;
+        self
     }
 
     fn ok(name: impl Into<String>, detail: impl Into<String>) -> Self {
@@ -62,17 +92,24 @@ impl Check {
 }
 
 /// Runs every check against the database at `db`, printing a report (JSON when
-/// `json`). Returns whether everything is healthy (no failing check; warnings
-/// are fine).
-pub fn run(db: &Path, json: bool) -> Result<bool> {
+/// `json`). With `fix`, first applies every available repair (one line each;
+/// on stderr when `json`, so stdout stays a single JSON document) and then
+/// checks again. Returns whether the final report is healthy (no failing
+/// check; warnings are fine).
+pub fn run(db: &Path, json: bool, fix: bool) -> Result<bool> {
     // Resolved exactly as setup resolves it, so the paths setup wrote into
     // client configs compare equal to what doctor recomputes.
     let db = &setup::absolutize(db)?;
-    let mut checks = vault_checks(db)?;
-    let (client_checks, globally_configured) = client_checks(db)?;
-    checks.extend(client_checks);
-    if let Some(detail) = setup::double_install_warning(&globally_configured) {
-        checks.push(Check::warn("legacy install", detail));
+    let mut checks = all_checks(db)?;
+    if fix {
+        for line in repair(db, &checks) {
+            if json {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+        checks = all_checks(db)?;
     }
 
     let healthy = checks.iter().all(|check| check.status != Status::Fail);
@@ -95,6 +132,66 @@ pub fn run(db: &Path, json: bool) -> Result<bool> {
         }
     }
     Ok(healthy)
+}
+
+fn all_checks(db: &Path) -> Result<Vec<Check>> {
+    let mut checks = vault_checks(db)?;
+    let (client_checks, globally_configured) = client_checks(db)?;
+    checks.extend(client_checks);
+    if let Some(detail) = setup::double_install_warning(&globally_configured) {
+        checks.push(Check::warn("legacy install", detail));
+    }
+    Ok(checks)
+}
+
+/// Applies every check's `Fix`, returning one line per repair. A failed repair is
+/// reported and the rest still run.
+fn repair(db: &Path, checks: &[Check]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for check in checks {
+        let Some(fix) = &check.fix else { continue };
+        lines.push(match fix {
+            Fix::Manual(guidance) => format!("[not fixable] {}: {guidance}", check.name),
+            fix => match apply(fix, db) {
+                Ok(done) => format!("[fixed] {}: {done}", check.name),
+                Err(error) => format!("[fix failed] {}: {error:#}", check.name),
+            },
+        });
+    }
+    lines
+}
+
+fn apply(fix: &Fix, db: &Path) -> Result<String> {
+    match fix {
+        Fix::Migrate => {
+            Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            Ok(format!("migrated to v{}", vault::schema_version()))
+        }
+        Fix::RebuildSearchIndex => {
+            let mut vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            let indexed = vault.rebuild_search_index()?;
+            Ok(format!("rebuilt, {indexed} skill(s) indexed"))
+        }
+        Fix::Client { kind, bin, changes } => {
+            setup::write_all(
+                changes
+                    .iter()
+                    .map(|(path, content)| Edit::Write(path.clone(), content.clone()))
+                    .collect(),
+            )?;
+            let mut done = format!(
+                "re-applied `skillvolution setup --client {}` (bin {})",
+                kind.token(),
+                bin.display()
+            );
+            if *kind == ClientKind::ClaudeCode {
+                done = format!("{done}; {}", setup::register_claude_code_mcp(bin, db)?);
+            }
+            Ok(done)
+        }
+        Fix::RegisterClaudeMcp(bin) => setup::register_claude_code_mcp(bin, db),
+        Fix::Manual(guidance) => Ok((*guidance).to_owned()),
+    }
 }
 
 /// Opens `db` read-only: doctor must never create or migrate it, unlike
@@ -139,12 +236,17 @@ fn vault_checks(db: &Path) -> Result<Vec<Check>> {
         ));
         return Ok(checks);
     }
+    // Repairs write to the vault, so none is offered for a database that fails
+    // its integrity check.
+    let quick_check: String = conn.pragma_query_value(None, "quick_check", |row| row.get(0))?;
+    let intact = quick_check == "ok";
     checks.push(match user_version.cmp(&current) {
         Ordering::Equal => Check::ok("vault: schema", format!("up to date (v{user_version})")),
         Ordering::Less => Check::warn(
             "vault: schema",
             format!("v{user_version}; will be upgraded to v{current} on next use"),
-        ),
+        )
+        .with_fix(intact.then_some(Fix::Migrate)),
         Ordering::Greater => Check::fail(
             "vault: schema",
             format!(
@@ -153,18 +255,22 @@ fn vault_checks(db: &Path) -> Result<Vec<Check>> {
         ),
     });
 
-    let quick_check: String = conn.pragma_query_value(None, "quick_check", |row| row.get(0))?;
-    checks.push(if quick_check == "ok" {
+    checks.push(if intact {
         Check::ok("vault: integrity", "PRAGMA quick_check: ok")
     } else {
-        Check::fail("vault: integrity", quick_check)
+        Check::fail("vault: integrity", quick_check).with_fix(Some(Fix::Manual(
+            "not auto-fixable; restore a copy made with `skillvolution backup`, or \
+             `skillvolution export` what is still readable and `import` it into a fresh vault",
+        )))
     });
 
     // The search index and stats queries assume the current schema's tables
     // and columns, so they only run once the vault is actually at that
     // version; an older or newer vault is left to the schema check above.
     if user_version == current {
-        checks.push(search_index_check(&conn)?);
+        let check = search_index_check(&conn)?;
+        let rebuild = check.status == Status::Fail && intact;
+        checks.push(check.with_fix(rebuild.then_some(Fix::RebuildSearchIndex)));
         checks.push(stats_check(&conn)?);
     }
     Ok(checks)
@@ -267,26 +373,42 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         return Ok((vec![Check::ok(display, "not installed")], false));
     }
     let mut checks = Vec::new();
-    let mut changes = kind.changes(Scope::Global, bin, db)?;
+    // The binary the client stays configured with when it still exists, else this
+    // one (global setup's own default), so a fix never points at a missing binary.
+    let mut bin = bin.to_owned();
+    let mut changes = kind.changes(Scope::Global, &bin, db)?;
     if let Some(configured_bin) = setup::configured_bin(kind, &changes)
         && configured_bin != bin
     {
         changes = kind.changes(Scope::Global, &configured_bin, db)?;
+        bin = configured_bin;
     }
-    let (configured, mismatched) = diff_changes(&changes)?;
+    let mismatched = diff_changes(&changes)?;
+    let configured = setup::is_configured(&changes);
+    // Only a client that is already configured gets re-applied: configuring one
+    // that is merely installed is the user's call. This one fix also covers the
+    // outdated-skill and missing-binary checks below, which imply a mismatch.
+    let reapply = configured && !mismatched.is_empty();
     if mismatched.is_empty() {
         checks.push(Check::ok(display, "configured, up to date"));
     } else if !configured {
         checks.push(Check::ok(display, "installed but not configured"));
     } else {
-        checks.push(Check::warn(
-            display,
-            format!(
-                "differs from what `skillvolution setup --client {}` would write: {}",
-                kind.token(),
-                mismatched.join(", ")
-            ),
-        ));
+        checks.push(
+            Check::warn(
+                display,
+                format!(
+                    "differs from what `skillvolution setup --client {}` would write: {}",
+                    kind.token(),
+                    mismatched.join(", ")
+                ),
+            )
+            .with_fix(Some(Fix::Client {
+                kind,
+                bin: bin.clone(),
+                changes: changes.clone(),
+            })),
+        );
     }
 
     for (name, content) in setup::SKILLS {
@@ -317,37 +439,28 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         && let Some(registered) = setup::claude_mcp_registered()?
         && !registered
     {
-        checks.push(Check::warn(
-            "Claude Code MCP registration",
-            "`claude mcp get skillvolution` reports no registration; rerun setup",
-        ));
+        // Re-applying the client already registers it, like setup does.
+        checks.push(
+            Check::warn(
+                "Claude Code MCP registration",
+                "`claude mcp get skillvolution` reports no registration; rerun setup",
+            )
+            .with_fix((configured && !reapply).then(|| Fix::RegisterClaudeMcp(bin.clone()))),
+        );
     }
     Ok((checks, configured || mismatched.is_empty()))
 }
 
-/// Compares every `changes()` path against the file on disk. Returns whether
-/// any of them already carries something of ours, and the paths that differ
-/// (missing or with different content) as display strings.
-fn diff_changes(changes: &[(PathBuf, String)]) -> Result<(bool, Vec<String>)> {
-    let mut configured = false;
+/// Compares every `changes()` path against the file on disk. Returns the paths
+/// that differ (missing or with different content) as display strings.
+fn diff_changes(changes: &[(PathBuf, String)]) -> Result<Vec<String>> {
     let mut mismatched = Vec::new();
     for (path, expected) in changes {
-        match read_optional(path)? {
-            None => mismatched.push(path.display().to_string()),
-            Some(actual) => {
-                if actual != expected.as_bytes() {
-                    mismatched.push(path.display().to_string());
-                }
-                if String::from_utf8_lossy(&actual)
-                    .to_lowercase()
-                    .contains("skillvolution")
-                {
-                    configured = true;
-                }
-            }
+        if read_optional(path)?.is_none_or(|actual| actual != expected.as_bytes()) {
+            mismatched.push(path.display().to_string());
         }
     }
-    Ok((configured, mismatched))
+    Ok(mismatched)
 }
 
 /// The version embedded in the on-disk file of the managed skill `name` among

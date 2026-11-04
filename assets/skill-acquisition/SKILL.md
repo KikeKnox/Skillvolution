@@ -2,7 +2,7 @@
 name: skill-acquisition
 description: Use the moment you realize you don't know how to do something the task needs — an unfamiliar tool, API, library, build step, or error message — after two failed attempts at the same problem, or before guessing at commands, flags, or config you have not verified. Finds proven know-how in the Skillvolution vault first, then learns it reliably and captures it for next time.
 ---
-<!-- skillvolution-managed:skill-acquisition:v1 -->
+<!-- skillvolution-managed:skill-acquisition:v2 -->
 # Skill acquisition
 
 Guessing is the most expensive way to learn: a plausible command from memory that half-works can cost an hour. When you hit a gap, stop and acquire the skill deliberately — reuse what another agent already proved, otherwise learn it from authoritative sources with the smallest experiment that settles it, and leave the lesson behind so nobody has to learn it twice.
@@ -19,7 +19,7 @@ Not for trivial lookups you can settle with one `--help` call, and not a reason 
 ## Procedure
 
 1. **Name the gap in one line**: what you need to be able to do, and the observable result that will prove you can (a command that succeeds, a test that passes, an output you expect). Tell the user that line, briefly.
-2. **Vault first.** Run `search_skills` 2-3 times with short keyword sets — technology + action (`docker buildx multiarch`), the distinctive words of the error message (`database is locked`), and a synonym. `get_skill` every clear match. If one fits, say which (id and version), follow it, and afterwards call `report_skill_outcome` for it (`helped`, `failed` naming the wrong step, or `not_applicable`). Only continue below when nothing fits or the skill failed.
+2. **Vault first.** Run `search_skills` 2-3 times with short English keyword sets (even if the user writes another language) — technology + action (`docker buildx multiarch`), the distinctive words of the error message (`database is locked`), and a synonym. `get_skill` every clear match. If one fits, say which (id and version), follow it, and afterwards call `report_skill_outcome` for it (`helped`, `failed` naming the wrong step, or `not_applicable`). Only continue below when nothing fits or the skill failed.
 3. **Look locally before looking outward.** The repository usually already knows how it does things:
    - existing code, scripts, CI workflows, and tests that do something similar (search by the tool's name or the API's symbols);
    - the project's README, docs, contributing guide, and `Makefile`/`package.json`/`Cargo.toml` scripts;

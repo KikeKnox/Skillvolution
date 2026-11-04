@@ -295,6 +295,59 @@ fn report_skill_outcome_records_it_for_a_visible_published_revision() {
 }
 
 #[test]
+fn get_skill_records_one_load_per_project_and_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    Draft::new("mine").scope("proja").publish(&mut vault);
+    drop(vault);
+
+    let mut proja = McpServer::spawn(&db, Some("proja"));
+    proja.initialize("2025-06-18");
+    for id in 2..5 {
+        let get = proja.call(id, "get_skill", json!({"id": "skill"}));
+        assert_eq!(get["result"]["isError"], false);
+    }
+    let mut projb = McpServer::spawn(&db, Some("projb"));
+    projb.initialize("2025-06-18");
+    assert_eq!(
+        projb.call(2, "get_skill", json!({"id": "skill"}))["result"]["isError"],
+        false
+    );
+    // A failed load (invisible to this project) records nothing.
+    assert_eq!(
+        projb.call(3, "get_skill", json!({"id": "mine"}))["result"]["isError"],
+        true
+    );
+    drop((proja, projb));
+
+    let vault = Vault::open(&db).unwrap();
+    let summaries = vault.outcome_summaries(false, false).unwrap();
+    let loaded = |id: &str| summaries.iter().find(|s| s.id == id).unwrap().loaded;
+    assert_eq!((loaded("skill"), loaded("mine")), (2, 0));
+}
+
+#[test]
+fn get_skill_still_succeeds_when_its_load_cannot_be_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    drop(vault);
+
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TABLE loads;")
+        .unwrap();
+    let get = server.call(2, "get_skill", json!({"id": "skill"}));
+    assert_eq!(get["result"]["isError"], false);
+    assert_eq!(text_of(&get)["version"], 1);
+}
+
+#[test]
 fn unknown_arguments_are_rejected_as_tool_errors() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");

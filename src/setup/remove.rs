@@ -171,15 +171,17 @@ fn print_dry_run(planned: &[Planned], claude_registered_globally: bool) -> Resul
 
 /// Prints a unified diff for each edit (`--- a/<path>` / `+++ b/<path>`; a deletion's diff
 /// removes its current content in full, a new file's diff adds its new content in full).
-/// Returns whether it printed anything.
+/// Returns whether it printed anything (an edit that leaves its file as is prints no
+/// diff).
 pub(crate) fn print_diffs(edits: &[Edit]) -> bool {
+    let mut printed = false;
     for edit in edits {
-        print_diff(edit);
+        printed |= print_diff(edit);
     }
-    !edits.is_empty()
+    printed
 }
 
-fn print_diff(edit: &Edit) {
+fn print_diff(edit: &Edit) -> bool {
     let path = edit.path();
     let old = fs_safe::read_optional(path)
         .unwrap_or_default()
@@ -196,6 +198,7 @@ fn print_diff(edit: &Edit) {
         )
         .to_string();
     print!("{diff}");
+    !diff.is_empty()
 }
 
 /// The one-line summary printed once a client's files are removed.

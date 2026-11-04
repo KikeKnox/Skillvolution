@@ -120,13 +120,15 @@ fn write_fake_claude(dir: &Path, log: &Path) {
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Unix-only, like its only caller: reads back the fake `claude`'s log (see
-/// `write_fake_claude`).
+/// Unix-only, like its only caller: reads back the `mcp add-json` calls from the fake
+/// `claude`'s log (see `write_fake_claude`), leaving out the `mcp get` check that
+/// precedes each registration.
 #[cfg(unix)]
 fn claude_log_lines(log: &Path) -> Vec<String> {
     fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
+        .filter(|line| line.starts_with("mcp add-json "))
         .map(str::to_owned)
         .collect()
 }

@@ -466,32 +466,6 @@ fn stale_bases_never_overwrite_a_publication() {
 }
 
 #[test]
-fn publishing_supersedes_legacy_drafts_sharing_its_base() {
-    // Databases from before proposals auto-published can still hold drafts;
-    // publishing over their shared base marks them superseded.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("skills.db");
-    let mut vault = Vault::open(&path).unwrap();
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "INSERT INTO skills (id) VALUES ('skill');
-         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
-         VALUES ('skill', 1, 'Legacy draft', '', 'body', 'evidence', 0, 'draft');
-         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
-         VALUES ('skill', 2, 'Rebased draft', '', 'body', 'evidence', 0, 'draft');",
-    )
-    .unwrap();
-    drop(conn);
-    let revision = Draft::new("skill").propose(&mut vault);
-    assert_eq!(revision.version, 3);
-    let superseded = vault.inspect("skill", 1).unwrap();
-    assert_eq!(superseded.status, "superseded");
-    assert!(superseded.review_note.unwrap().contains("superseded"));
-    assert!(superseded.reviewed_at.is_some());
-    assert_eq!(vault.inspect("skill", 2).unwrap().status, "superseded");
-}
-
-#[test]
 fn deprecate_hides_from_search_but_get_still_works() {
     let (_dir, mut vault) = open();
     Draft::new("skill").publish(&mut vault);
@@ -533,7 +507,7 @@ fn latest_version_is_the_highest_version_of_any_status() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
-         VALUES ('skill', 3, 'Rejected', '', 'body', 'evidence', 2, 'rejected');",
+         VALUES ('skill', 3, 'Superseded', '', 'body', 'evidence', 2, 'superseded');",
     )
     .unwrap();
     assert_eq!(vault.latest_version("skill").unwrap(), 3);
@@ -738,6 +712,22 @@ fn search_tokenizer_ignores_diacritics_prefix_and_case() {
     assert_eq!(vault.search("cafe", None, 20, 0).unwrap().total, 1);
     assert_eq!(vault.search("deploy", None, 20, 0).unwrap().total, 1);
     assert_eq!(vault.search("TESTS", None, 20, 0).unwrap().total, 1);
+    // Porter stems query and text alike: an inflection finds another one.
+    assert_eq!(vault.search("testing", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
+fn two_letter_search_terms_match_whole_words_only() {
+    let (_dir, mut vault) = open();
+    Draft::new("cloud-skill")
+        .description("Use when google services misbehave")
+        .publish(&mut vault);
+    Draft::new("lang-skill")
+        .description("Use when go builds fail")
+        .publish(&mut vault);
+    let hits = vault.search("go", None, 20, 0).unwrap();
+    assert_eq!(hits.total, 1);
+    assert_eq!(hits.skills[0].id, "lang-skill");
 }
 
 #[test]
@@ -765,6 +755,92 @@ fn empty_query_lists_the_full_catalog_ordered_by_score_then_id() {
             .map(|s| s.id.as_str())
             .collect::<Vec<_>>(),
         ["alpha", "beta"]
+    );
+}
+
+fn ids(page: &skillvolution::vault::SearchPage) -> Vec<&str> {
+    page.skills.iter().map(|s| s.id.as_str()).collect()
+}
+
+#[test]
+fn a_new_version_inherits_half_of_the_previous_versions_record_in_ranking() {
+    let (_dir, mut vault) = open();
+    // Identical text, so only the track record (then the id) orders them.
+    for id in ["alpha", "zeta"] {
+        Draft::new(id)
+            .description("Use when a widget breaks")
+            .content("widget body")
+            .publish(&mut vault);
+    }
+    for project in ["proja", "projb"] {
+        vault
+            .record_outcome("zeta", 1, "helped", "n", Some(project))
+            .unwrap();
+    }
+    assert_eq!(
+        ids(&vault.search("", None, 20, 0).unwrap()),
+        ["zeta", "alpha"]
+    );
+
+    // v2 starts fresh counts but keeps half of v1's net (+1), so it still
+    // outranks the unreported skill instead of falling back behind it by id.
+    Draft::new("zeta")
+        .description("Use when a widget breaks")
+        .content("widget body")
+        .expected_version(1)
+        .replaces_proven(true)
+        .publish(&mut vault);
+    for query in ["", "widget"] {
+        let page = vault.search(query, None, 20, 0).unwrap();
+        assert_eq!(ids(&page), ["zeta", "alpha"], "query {query:?}");
+        assert_eq!(
+            (
+                page.skills[0].version,
+                page.skills[0].helped,
+                page.skills[0].failed
+            ),
+            (2, 0, 0),
+            "displayed counts stay the current version's"
+        );
+    }
+
+    // Only the immediately preceding version counts: v3 inherits v2's empty record.
+    Draft::new("zeta")
+        .description("Use when a widget breaks")
+        .content("widget body")
+        .expected_version(2)
+        .publish(&mut vault);
+    for query in ["", "widget"] {
+        let page = vault.search(query, None, 20, 0).unwrap();
+        assert_eq!(ids(&page), ["alpha", "zeta"], "query {query:?}");
+    }
+}
+
+#[test]
+fn an_inherited_failure_record_demotes_the_new_version_at_half_weight() {
+    let (_dir, mut vault) = open();
+    for id in ["alpha", "zeta"] {
+        Draft::new(id)
+            .description("Use when a widget breaks")
+            .publish(&mut vault);
+    }
+    // alpha: one net failure on its only version (-1). zeta: four on v1,
+    // inherited by v2 as -2, so zeta still ranks last after its republish.
+    vault
+        .record_outcome("alpha", 1, "failed", "n", Some("proja"))
+        .unwrap();
+    for project in ["proja", "projb", "projc", "projd"] {
+        vault
+            .record_outcome("zeta", 1, "failed", "n", Some(project))
+            .unwrap();
+    }
+    Draft::new("zeta")
+        .description("Use when a widget breaks")
+        .expected_version(1)
+        .publish(&mut vault);
+    assert_eq!(
+        ids(&vault.search("", None, 20, 0).unwrap()),
+        ["alpha", "zeta"]
     );
 }
 
@@ -895,8 +971,8 @@ fn search_metadata_counts_reset_on_new_published_version_and_support_failing_fil
         .unwrap();
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!((page.skills[0].helped, page.skills[0].failed), (1, 1));
-    assert_eq!(vault.outcome_summaries(true).unwrap().len(), 1);
-    assert_eq!(vault.outcome_summaries(false).unwrap().len(), 1);
+    assert_eq!(vault.outcome_summaries(true, false).unwrap().len(), 1);
+    assert_eq!(vault.outcome_summaries(false, false).unwrap().len(), 1);
 
     let v2 = Draft::new("skill").expected_version(1).publish(&mut vault);
     let page = vault.search("", None, 20, 0).unwrap();
@@ -908,7 +984,7 @@ fn search_metadata_counts_reset_on_new_published_version_and_support_failing_fil
         ),
         (v2, 0, 0)
     );
-    assert!(vault.outcome_summaries(true).unwrap().is_empty());
+    assert!(vault.outcome_summaries(true, false).unwrap().is_empty());
 }
 
 #[test]
@@ -950,6 +1026,38 @@ fn same_day_reports_from_one_project_collapse_into_the_last_one() {
         (global.result.as_str(), global.note.as_str()),
         ("helped", "third")
     );
+}
+
+#[test]
+fn summaries_count_loads_once_per_project_and_day_and_flag_unreported_ones() {
+    let (_dir, mut vault) = open();
+    let v1 = Draft::new("skill").publish(&mut vault);
+    Draft::new("quiet").publish(&mut vault);
+    for project in [Some("proja"), Some("proja"), Some("projb"), None] {
+        vault.record_load("skill", v1, project).unwrap();
+    }
+    vault
+        .record_outcome("skill", v1, "helped", "n", Some("proja"))
+        .unwrap();
+
+    let summaries = vault.outcome_summaries(false, false).unwrap();
+    let skill = summaries.iter().find(|s| s.id == "skill").unwrap();
+    assert_eq!((skill.loaded, skill.unreported), (3, 2));
+    let quiet = summaries.iter().find(|s| s.id == "quiet").unwrap();
+    assert_eq!((quiet.loaded, quiet.unreported), (0, 0));
+
+    let unreported = vault.outcome_summaries(false, true).unwrap();
+    assert_eq!(
+        unreported.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        ["skill"]
+    );
+
+    // Loads are per version: a new version starts with none.
+    Draft::new("skill")
+        .expected_version(v1)
+        .replaces_proven(true)
+        .publish(&mut vault);
+    assert!(vault.outcome_summaries(false, true).unwrap().is_empty());
 }
 
 #[test]
@@ -1139,16 +1247,25 @@ fn new_databases_are_stamped_with_the_version_and_application_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "user_version"), 5);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 }
 
 #[test]
-fn migrates_a_v1_database_to_v3() {
+fn migrates_a_v1_database_to_v5() {
     let (_dir, path) = legacy_database(1);
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "user_version"), 5);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
+    // v1 defaulted new revisions to draft; the v5 rebuild drops that too.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let revisions_sql = schema_sql(&conn, "revisions");
+    assert!(!revisions_sql.contains("draft"), "{revisions_sql}");
+    // v5 also rebuilds the search index with the porter stemmer, so an inflection
+    // finds the indexed form ("tested" -> "testing").
+    let fts_sql = schema_sql(&conn, "skills_fts");
+    assert!(fts_sql.contains("porter"), "{fts_sql}");
+    assert_eq!(vault.search("tested", None, 20, 0).unwrap().total, 1);
     vault.mark_devin_work("devin-session").unwrap();
     assert_eq!(
         vault.take_devin_hook_state("devin-session").unwrap(),
@@ -1158,10 +1275,10 @@ fn migrates_a_v1_database_to_v3() {
 }
 
 #[test]
-fn migrates_a_v2_database_to_v3_preserving_data() {
+fn migrates_a_v2_database_to_v5_preserving_data() {
     let (_dir, path) = legacy_database(2);
     let mut vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 3);
+    assert_eq!(pragma(&path, "user_version"), 5);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 
     // Revisions survive; the legacy draft is retired.
@@ -1206,6 +1323,143 @@ fn migrates_a_v2_database_to_v3_preserving_data() {
 }
 
 #[test]
+fn migrates_a_v3_database_to_v5_with_loads_and_inherited_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    Draft::new("alpha").publish(&mut vault);
+    Draft::new("zeta").publish(&mut vault);
+    for project in ["proja", "projb"] {
+        vault
+            .record_outcome("zeta", 1, "helped", "n", Some(project))
+            .unwrap();
+    }
+    Draft::new("zeta")
+        .expected_version(1)
+        .replaces_proven(true)
+        .publish(&mut vault);
+    drop(vault);
+
+    // Put the database back in its v3 shape: no loads table, and the view
+    // without prior counts (unchanged from v1 through v3).
+    let v3_view = &V1_SCHEMA[V1_SCHEMA.find("CREATE VIEW").unwrap()..];
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE loads; DROP VIEW current_skills;")
+        .unwrap();
+    conn.execute_batch(v3_view).unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
+    drop(conn);
+
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(pragma(&path, "user_version"), 5);
+    let page = vault.search("", None, 20, 0).unwrap();
+    assert_eq!(
+        ids(&page),
+        ["zeta", "alpha"],
+        "v2 inherits half of v1's record"
+    );
+    assert_eq!((page.skills[0].helped, page.skills[0].failed), (0, 0));
+    vault.record_load("zeta", 2, None).unwrap();
+    let summaries = vault.outcome_summaries(false, true).unwrap();
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|s| (s.id.as_str(), s.loaded, s.unreported))
+            .collect::<Vec<_>>(),
+        [("zeta", 1, 1)]
+    );
+}
+
+/// The `CREATE` statement sqlite_master stores for `name`.
+fn schema_sql(conn: &rusqlite::Connection, name: &str) -> String {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn migrates_a_v4_database_retiring_draft_and_rejected_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    vault
+        .record_outcome("skill", 1, "helped", "n", Some("proja"))
+        .unwrap();
+    vault.record_load("skill", 1, Some("proja")).unwrap();
+    drop(vault);
+
+    // Put revisions back in its v4 shape (draft and rejected still allowed),
+    // then add one of each, plus an outcome and a load on the draft.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let view = schema_sql(&conn, "current_skills");
+    let v4_revisions = schema_sql(&conn, "revisions")
+        .replace("CREATE TABLE revisions", "CREATE TABLE revisions_v4")
+        .replace(
+            "CHECK(status IN ('published', 'superseded'))",
+            "CHECK(status IN ('draft', 'published', 'rejected', 'superseded'))",
+        );
+    assert!(v4_revisions.contains("'rejected'"), "{v4_revisions}");
+    conn.execute_batch(&format!(
+        "PRAGMA foreign_keys = OFF;
+         DROP VIEW current_skills;
+         {v4_revisions};
+         INSERT INTO revisions_v4 SELECT * FROM revisions;
+         DROP TABLE revisions;
+         ALTER TABLE revisions_v4 RENAME TO revisions;
+         {view};
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+         VALUES ('skill', 2, 'Draft', '', 'body', 'evidence', 1, 'draft');
+         INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status, review_note)
+         VALUES ('skill', 3, 'Rejected', '', 'body', 'evidence', 1, 'rejected', 'too vague');
+         INSERT INTO outcomes (id, version, result, note) VALUES ('skill', 2, 'failed', 'on draft');
+         INSERT INTO loads (id, version) VALUES ('skill', 2);"
+    ))
+    .unwrap();
+    conn.pragma_update(None, "user_version", 4).unwrap();
+    drop(conn);
+
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(pragma(&path, "user_version"), 5);
+    let draft = vault.inspect("skill", 2).unwrap();
+    assert_eq!(draft.status, "superseded");
+    assert_eq!(draft.review_note.as_deref(), Some("legacy draft"));
+    let rejected = vault.inspect("skill", 3).unwrap();
+    assert_eq!(rejected.status, "superseded");
+    assert_eq!(
+        rejected.review_note.as_deref(),
+        Some("legacy rejected: too vague")
+    );
+    assert_eq!(vault.inspect("skill", 1).unwrap().status, "published");
+    assert_eq!(vault.get("skill", None, None).unwrap().version, 1);
+    let page = vault.search("", None, 20, 0).unwrap();
+    assert_eq!(ids(&page), ["skill"]);
+    assert_eq!(page.skills[0].helped, 1);
+    assert_eq!(vault.outcomes("skill").unwrap().len(), 2);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM loads"), 2);
+    assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+    let revisions_sql = schema_sql(&conn, "revisions");
+    assert!(!revisions_sql.contains("draft"), "{revisions_sql}");
+    assert!(
+        conn.execute(
+            "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status)
+             VALUES ('skill', 4, 'Draft', '', 'body', 'evidence', 1, 'draft')",
+            [],
+        )
+        .is_err()
+    );
+
+    // Foreign keys are back on for the vault's own connection.
+    assert!(vault.record_load("skill", 99, None).is_err());
+}
+
+#[test]
 fn refuses_a_newer_schema_version() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
@@ -1240,4 +1494,28 @@ fn refuses_to_migrate_a_pre_1_schema_database() {
     drop(conn);
     let error = open_error(&path);
     assert!(error.contains("pre-1 schema"), "{error}");
+}
+
+#[test]
+fn migration_tolerates_foreign_key_violations_already_in_the_vault() {
+    let (_dir, path) = legacy_database(2);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO outcomes (id, version, result, note) VALUES ('ghost', 9, 'helped', 'orphan');",
+    )
+    .unwrap();
+    drop(conn);
+
+    drop(Vault::open(&path).unwrap());
+    assert_eq!(pragma(&path, "user_version"), 5);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM outcomes WHERE id = 'ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 1);
 }

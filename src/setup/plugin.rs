@@ -45,11 +45,17 @@ pub fn check_owner(path: &Path) -> Result<()> {
     fs_safe::check_owner(path, OWNER_MARKER, "Skillvolution OpenCode plugin")
 }
 
+/// Whether the file at `path` is our plugin (carries our managed marker). A missing
+/// file is `false`.
+pub fn is_ours(path: &Path) -> Result<bool> {
+    fs_safe::is_marked(path, OWNER_MARKER)
+}
+
 /// The plugin file's removal at `path`: `Some` deletion when it carries our marker,
 /// `None` when there's nothing there. A file that exists but isn't ours is left alone,
 /// with a note so the user knows it was skipped rather than silently ignored.
 pub fn removal(path: &Path, notes: &mut Vec<String>) -> Result<Option<Edit>> {
-    if fs_safe::is_marked(path, OWNER_MARKER)? {
+    if is_ours(path)? {
         return Ok(Some(Edit::Delete(path.to_owned())));
     }
     if fs_safe::read_optional(path)?.is_some() {

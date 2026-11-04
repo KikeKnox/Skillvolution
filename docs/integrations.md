@@ -18,7 +18,10 @@ client by its executable on `PATH` or an existing config directory;
 undetected clients are skipped. Project setup defaults to all clients.
 Every hook command has the form `'BIN' --db 'DB' hook <subcommand>` with a
 10-second timeout; project setups add `--project 'KEY'` to `session-start` and
-`prompt` (the two retrieval hooks) only.
+`prompt` (the two retrieval hooks) only. A rerun recognizes its own entries by that
+command text and rewrites them in their existing slot; a hook group that removing
+ours leaves empty is dropped, while any other group — including a foreign one that
+was already empty — is kept as is.
 
 Every client also gets three managed skills, each at `skills/<name>/SKILL.md`
 under its config directory (`.claude/skills/…`, `.codex/skills/…` and so on in a
@@ -79,6 +82,13 @@ SQLite WAL needs local storage.
 claude mcp add-json --scope user skillvolution \
   '{"type":"stdio","command":"BIN","args":["--db","DB","serve"]}'
 ```
+
+  Setup first reads `claude mcp get skillvolution`: a user-scope stdio registration
+  whose `Command:` is `BIN` and whose `Args:` are `--db DB serve` is left as is
+  (setup prints `skillvolution is already registered with Claude Code; unchanged.`,
+  and `--dry-run` shows no `add-json` line). Anything else — missing, another
+  scope, command or args, or output in a shape it doesn't recognize — is
+  (re-)registered: `add-json`, and on "already exists" `remove` then `add-json`.
 
 **Project** (`<dir>`): `.mcp.json` gets the same server entry (with
 `"--project", "KEY"` in `args`), `.claude/settings.local.json` gets the

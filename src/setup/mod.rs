@@ -18,8 +18,8 @@ mod remove;
 
 pub(crate) use client::{ClientKind, Clients, Scope};
 pub(crate) use inspect::{
-    claude_mcp_registered, configured_bin, double_install_warning, missing_configured_bin,
-    skill_marker_version,
+    claude_mcp_registered, configured_bin, double_install_warning, is_configured,
+    missing_configured_bin, skill_marker_version,
 };
 pub(crate) use remove::Edit;
 
@@ -194,8 +194,9 @@ fn dry_run_install(args: &SetupArgs, bin: &Path, db: &Path) -> Result<()> {
 }
 
 /// Prints the diffs `clients` would write for `scope`, plus the `claude mcp add-json`
-/// command a global Claude Code install would run. Prints "No changes." if there's
-/// nothing to show.
+/// command a global Claude Code install would run, unless the registration it would
+/// make already exists as is (see `claude::planned_registration`). Prints "No changes."
+/// if there's nothing to show.
 fn print_install_diff(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Result<()> {
     let mut changes = Vec::new();
     for kind in clients.iter() {
@@ -206,8 +207,11 @@ fn print_install_diff(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> 
         .map(|(path, content)| Edit::Write(path, content))
         .collect();
     let mut printed = remove::print_diffs(&edits);
-    if matches!(scope, Scope::Global) && clients.contains(ClientKind::ClaudeCode) {
-        println!("Would run: {}", claude_cli::add_json_command(bin, db));
+    if matches!(scope, Scope::Global)
+        && clients.contains(ClientKind::ClaudeCode)
+        && let Some(line) = claude::planned_registration(bin, db)?
+    {
+        println!("{line}");
         printed = true;
     }
     if !printed {
