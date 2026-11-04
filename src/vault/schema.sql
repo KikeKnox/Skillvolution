@@ -15,7 +15,7 @@ CREATE TABLE revisions (
     content TEXT NOT NULL,
     evidence TEXT NOT NULL,
     expected_version INTEGER NOT NULL CHECK(expected_version >= 0),
-    status TEXT NOT NULL DEFAULT 'published' CHECK(status IN ('draft', 'published', 'rejected', 'superseded')),
+    status TEXT NOT NULL DEFAULT 'published' CHECK(status IN ('published', 'superseded')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     reviewed_at TEXT,
     review_note TEXT,
@@ -38,6 +38,20 @@ CREATE INDEX outcomes_by_revision ON outcomes(id, version, result);
 -- inflate a skill's score. COALESCE because NULLs never collide in an index.
 CREATE UNIQUE INDEX outcomes_once_per_day
     ON outcomes(id, version, COALESCE(project, ''), substr(created_at, 1, 10));
+
+-- Successful get_skill calls, one per revision, project and UTC day (same
+-- shape as outcomes_once_per_day), so `outcomes --unreported` can find loads
+-- that never got a report. Local telemetry: not exported or imported.
+CREATE TABLE loads (
+    id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    project TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY (id, version) REFERENCES revisions(id, version)
+);
+
+CREATE UNIQUE INDEX loads_once_per_day
+    ON loads(id, version, COALESCE(project, ''), substr(created_at, 1, 10));
 
 CREATE TABLE hook_state (
     session_id TEXT PRIMARY KEY,
@@ -68,16 +82,27 @@ BEGIN
     WHERE session_id = NEW.session_id;
 END;
 
+-- porter stems English words ("restarts", "restarting" -> "restart") on both the
+-- indexed text and the query, so inflections match each other.
 CREATE VIRTUAL TABLE skills_fts USING fts5(
     id, description, tags, content,
-    tokenize = 'unicode61 remove_diacritics 2'
+    tokenize = 'porter unicode61 remove_diacritics 2'
 );
 
+-- prior_helped/prior_failed are the counts of the immediately preceding
+-- published version, so search can carry part of a skill's track record
+-- across a republish instead of resetting it to zero.
 CREATE VIEW current_skills AS
 SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated,
     (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
     (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
-    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable,
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'helped'
+        AND o.version = (SELECT MAX(p.version) FROM revisions p
+            WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_helped,
+    (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'failed'
+        AND o.version = (SELECT MAX(p.version) FROM revisions p
+            WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_failed
 FROM skills s
 JOIN revisions r ON r.id = s.id
 WHERE r.status = 'published'

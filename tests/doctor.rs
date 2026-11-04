@@ -498,3 +498,224 @@ fn a_relocated_default_vault_warns_that_the_cli_still_uses_the_default() {
     assert!(stdout.contains("SKILLVOLUTION_DB"), "{stdout}");
     assert!(!default_db.exists());
 }
+
+/// Breaks the search index of a vault holding `a` and `b`: `a`'s row is deleted,
+/// `b`'s `fts_rowid` is nulled (leaving its row orphaned).
+fn break_search_index(db: &Path) {
+    publish(db, "a");
+    publish(db, "b");
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "DELETE FROM skills_fts WHERE rowid = (SELECT fts_rowid FROM skills WHERE id = 'a')",
+        [],
+    )
+    .unwrap();
+    conn.execute("UPDATE skills SET fts_rowid = NULL WHERE id = 'b'", [])
+        .unwrap();
+}
+
+/// Drops the UserPromptSubmit hook from what `setup --client claude-code` wrote:
+/// a configured client that differs from what setup would write today.
+fn outdate_claude_settings(env: &Env) -> PathBuf {
+    let settings_path = env.home.path().join(".claude").join("settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    settings["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("UserPromptSubmit")
+        .unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    settings_path
+}
+
+#[test]
+fn fix_rebuilds_a_broken_search_index() {
+    let env = Env::new();
+    break_search_index(&env.db);
+    let output = env.doctor().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "[fail] vault: search index: 2 skill(s) missing from the index, 1 orphaned row(s)"
+        ),
+        "{stdout}"
+    );
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[fixed] vault: search index: rebuilt, 2 skill(s) indexed"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[ok] vault: search index: 2 skill(s) indexed, no orphans"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("[fail]"), "{stdout}");
+    let page = skillvolution::vault::Vault::open(&env.db)
+        .unwrap()
+        .search("test", None, 10, 0)
+        .unwrap();
+    assert_eq!(page.total, 2);
+}
+
+#[test]
+fn fix_reapplies_an_outdated_configured_client_with_a_backup() {
+    let env = Env::new();
+    assert_success(
+        &env.setup()
+            .args(["--client", "claude-code"])
+            .output()
+            .unwrap(),
+    );
+    let settings_path = outdate_claude_settings(&env);
+    let outdated = fs::read(&settings_path).unwrap();
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .contains("[fixed] Claude Code: re-applied `skillvolution setup --client claude-code`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[ok] Claude Code: configured, up to date"),
+        "{stdout}"
+    );
+    let backup = settings_path.with_file_name("settings.json.skillvolution.bak");
+    assert_eq!(fs::read(backup).unwrap(), outdated);
+}
+
+#[test]
+fn fix_repoints_a_missing_configured_binary_at_the_current_one() {
+    let env = Env::new();
+    assert_success(
+        &env.setup_with_bin(&env.bin)
+            .args(["--client", "claude-code"])
+            .output()
+            .unwrap(),
+    );
+    fs::remove_file(&env.bin).unwrap();
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[fixed] Claude Code: "), "{stdout}");
+    assert!(
+        stdout.contains("[ok] Claude Code: configured, up to date"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("[fail]"), "{stdout}");
+}
+
+#[test]
+fn fix_leaves_an_installed_but_unconfigured_client_untouched() {
+    let env = Env::new();
+    assert_success(
+        &env.setup()
+            .args(["--client", "claude-code"])
+            .output()
+            .unwrap(),
+    );
+    outdate_claude_settings(&env);
+    let gemini_dir = env.home.path().join(".gemini");
+    fs::create_dir_all(&gemini_dir).unwrap();
+    fs::write(gemini_dir.join("settings.json"), r#"{"theme": "dark"}"#).unwrap();
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[fixed] Claude Code: "), "{stdout}");
+    assert!(!stdout.contains("Gemini CLI: re-applied"), "{stdout}");
+    assert!(
+        stdout.contains("[ok] Gemini CLI: installed but not configured"),
+        "{stdout}"
+    );
+    let entries: Vec<_> = fs::read_dir(&gemini_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["settings.json"]);
+    assert_eq!(
+        fs::read_to_string(gemini_dir.join("settings.json")).unwrap(),
+        r#"{"theme": "dark"}"#
+    );
+}
+
+#[test]
+fn a_config_that_merely_mentions_skillvolution_is_not_configured_and_fix_leaves_it_alone() {
+    let env = Env::new();
+    let claude_dir = env.home.path().join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let settings_path = claude_dir.join("settings.json");
+    // Only a permission grant (and a model name) mention skillvolution: nothing setup
+    // owns, so this Claude Code was never configured by setup.
+    let original = r#"{"permissions": {"allow": ["mcp__skillvolution__search_skills"]}, "model": "skillvolution-test"}"#;
+    fs::write(&settings_path, original).unwrap();
+
+    let output = env.doctor().output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] Claude Code: installed but not configured"),
+        "{stdout}"
+    );
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("[fixed] Claude Code"), "{stdout}");
+    assert!(
+        stdout.contains("[ok] Claude Code: installed but not configured"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+    let entries: Vec<_> = fs::read_dir(&claude_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["settings.json"], "no skill, no backup");
+}
+
+#[test]
+fn without_fix_nothing_is_written() {
+    let env = Env::new();
+    assert_success(
+        &env.setup()
+            .args(["--client", "claude-code"])
+            .output()
+            .unwrap(),
+    );
+    let settings_path = outdate_claude_settings(&env);
+    break_search_index(&env.db);
+    let claude_dir = settings_path.parent().unwrap().to_owned();
+    let snapshot = || {
+        let file = |path: &Path| {
+            (
+                fs::read(path).unwrap(),
+                fs::metadata(path).unwrap().modified().unwrap(),
+            )
+        };
+        let mut names: Vec<_> = fs::read_dir(&claude_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        (file(&env.db), file(&settings_path), names)
+    };
+    let before = snapshot();
+
+    let output = env.doctor().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("[fixed]"), "{stdout}");
+    assert!(before == snapshot(), "doctor without --fix must not write");
+}

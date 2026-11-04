@@ -22,9 +22,25 @@ pub struct OutcomeSummary {
     pub helped: i64,
     pub failed: i64,
     pub not_applicable: i64,
+    /// Distinct (project, UTC day) pairs in which `get_skill` loaded this version.
+    pub loaded: i64,
+    /// Those load pairs with no outcome report for this version from the same
+    /// project and day.
+    pub unreported: i64,
 }
 
 impl Vault {
+    /// Records that `get_skill` returned `id` v`version` to `project`, at most
+    /// once per revision, project and UTC day (later loads that day are
+    /// ignored). Local telemetry for `outcomes`; never exported.
+    pub fn record_load(&self, id: &str, version: i64, project: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO loads (id, version, project) VALUES (?1, ?2, ?3)",
+            params![id, version, project],
+        )?;
+        Ok(())
+    }
+
     /// Records an outcome in one statement: the INSERT only fires when the
     /// revision is published and visible to `project`, so `changed == 1` is
     /// both the write and the visibility check.
@@ -68,14 +84,34 @@ impl Vault {
         Ok(())
     }
 
-    pub fn outcome_summaries(&self, failing_only: bool) -> Result<Vec<OutcomeSummary>> {
+    /// One summary per current skill. `failing_only` keeps skills whose
+    /// current version has failures, `unreported_only` those with loads that
+    /// were never reported (both may be combined).
+    pub fn outcome_summaries(
+        &self,
+        failing_only: bool,
+        unreported_only: bool,
+    ) -> Result<Vec<OutcomeSummary>> {
         let mut statement = self.conn.prepare(
-            "SELECT id, version, scope, helped, failed, not_applicable FROM current_skills
-             WHERE ?1 = 0 OR failed > 0
+            "SELECT id, version, scope, helped, failed, not_applicable, loaded, unreported FROM (
+                 SELECT c.id, c.version, c.scope, c.helped, c.failed, c.not_applicable,
+                     (SELECT COUNT(*) FROM loads l
+                      WHERE l.id = c.id AND l.version = c.version) AS loaded,
+                     (SELECT COUNT(*) FROM loads l
+                      WHERE l.id = c.id AND l.version = c.version
+                        AND NOT EXISTS (
+                            SELECT 1 FROM outcomes o
+                            WHERE o.id = l.id AND o.version = l.version
+                              AND COALESCE(o.project, '') = COALESCE(l.project, '')
+                              AND substr(o.created_at, 1, 10) = substr(l.created_at, 1, 10)
+                        )) AS unreported
+                 FROM current_skills c
+             )
+             WHERE (?1 = 0 OR failed > 0) AND (?2 = 0 OR unreported > 0)
              ORDER BY failed DESC, helped DESC, id",
         )?;
         Ok(statement
-            .query_map([failing_only], |row| {
+            .query_map(params![failing_only, unreported_only], |row| {
                 Ok(OutcomeSummary {
                     id: row.get(0)?,
                     version: row.get(1)?,
@@ -83,6 +119,8 @@ impl Vault {
                     helped: row.get(3)?,
                     failed: row.get(4)?,
                     not_applicable: row.get(5)?,
+                    loaded: row.get(6)?,
+                    unreported: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)

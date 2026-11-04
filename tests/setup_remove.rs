@@ -367,6 +367,7 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
     assert_eq!(
         log_lines,
         vec![
+            "mcp get skillvolution".to_owned(),
             format!(
                 "mcp add-json --scope user skillvolution {}",
                 json!({"type": "stdio", "command": bin, "args": ["--db", &db, "serve"]})

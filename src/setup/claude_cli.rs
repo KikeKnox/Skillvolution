@@ -137,6 +137,52 @@ pub(crate) fn mcp_registered(claude: &Path) -> Result<bool> {
         .success())
 }
 
+/// How the current `skillvolution` registration compares to the one `register` would
+/// make for a `bin`/`db` pair.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Registration {
+    /// `claude mcp get skillvolution` finds nothing.
+    Missing,
+    /// A user-scope stdio server with exactly our command and args.
+    Same,
+    /// Anything else: another scope, command or args, or output we can't read.
+    Different,
+}
+
+/// Reads `claude mcp get skillvolution` back and compares it with what `register` would
+/// add for `bin`/`db`. The CLI prints a stdio server's `Command:` and its `Args:`
+/// space-joined; setup's own args are always `--db <db> serve`, so for a registration
+/// setup made that comparison is exact. Output in any other shape (a different CLI
+/// version, another scope shadowing ours) is `Different`, so setup refreshes rather
+/// than wrongly skipping.
+pub(crate) fn registration(claude: &Path, bin: &Path, db: &Path) -> Result<Registration> {
+    let output = run(claude, &["mcp", "get", "skillvolution"])?;
+    if !output.status.success() {
+        return Ok(Registration::Missing);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let field = |name: &str| {
+        stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name))
+            .map(str::trim)
+    };
+    let server_args = common::server_args(db, None);
+    let args: Vec<&str> = server_args
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let same = field("Scope:").is_some_and(|scope| scope.starts_with("User"))
+        && field("Type:") == Some("stdio")
+        && field("Command:") == bin.to_str()
+        && field("Args:") == Some(args.join(" ").as_str());
+    Ok(if same {
+        Registration::Same
+    } else {
+        Registration::Different
+    })
+}
+
 fn add_json(claude: &Path, json: &str) -> Result<AddOutcome> {
     let output = run(
         claude,

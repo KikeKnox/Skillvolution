@@ -2,7 +2,7 @@
 name: evolution
 description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills matching this request" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
 ---
-<!-- skillvolution-managed:evolution:v10 -->
+<!-- skillvolution-managed:evolution:v11 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
@@ -13,7 +13,7 @@ Two companion skills handle the parts of the loop that need more depth:
 
 ## 1. Retrieve (before non-trivial work)
 
-1. If the context holds a "Skillvolution: vault skills matching this request" suggestion, start there: it was matched against the request's own words. Otherwise scan the session catalog, and run `search_skills` 1-3 times with short keyword sets: technology + action + symptom (e.g. `sqlite migration locked`, `cargo cross-compile linker`). Skip trivial tasks.
+1. If the context holds a "Skillvolution: vault skills matching this request" suggestion, start there: it was matched against the request's own words. Otherwise scan the session catalog, and run `search_skills` 1-3 times with 2-5 English keywords (even if the user writes another language): technology + action + symptom, including the key words of any error message (e.g. `sqlite migration locked`, `cargo cross-compile linker`). If nothing fits, retry once or twice with a reformulation (synonyms, the tool's name, the error's distinctive words) before concluding none matched. Skip trivial tasks.
 2. Call `get_skill` for clear matches — reading the body is cheap, and a skill only improves if someone applies it and reports back. Prefer skills with more helped than failed outcomes.
 3. State in one line which skill (id and version) you are applying, or that none matched.
 4. Mid-task, when you hit something you don't know how to do, switch to the `skill-acquisition` skill instead of guessing; it searches the vault again with the specific gap.
@@ -111,6 +111,12 @@ Call `publish_skill` with id, description, tags, content, scope, `evidence`, `ex
 - On a stale-version error, `get_skill` the new version, merge its changes with your lesson, and evaluate the merged candidate again. Do not retry blindly.
 - If `publish_skill` rejects the publication because the base version is **proven** (it has more `helped` than `failed` reports), do not just retry with `replaces_proven: true`: merge your new lesson into the existing content instead of rewriting it, then republish with `replaces_proven: true` — or, if the lesson is genuinely a different one, publish it under a new id. Only set `replaces_proven: true` when you are consciously replacing a version that was working.
 - Tell the user the published id and version; they can hide it later with `skillvolution deprecate`.
+
+## The `skillvolution` CLI
+
+- Never run `skillvolution publish` yourself to put a lesson in the vault: it skips the fresh evaluator. Agent lessons go through step 5 and `publish_skill`. The only exception is when the user explicitly asks you to publish a specific SKILL.md they wrote or approved.
+- When the user wants to add or edit a skill by hand, point them to `skillvolution get <id>`, edit the file, then `skillvolution publish <file> --replace`; `skillvolution publish <dir>` imports a whole directory of skills at once.
+- `skillvolution outcomes --unreported` lists skills that were loaded without an outcome report; use it when the user asks about vault health.
 
 ## Boundaries
 

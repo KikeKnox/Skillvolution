@@ -65,29 +65,33 @@ client hooks.
 
 | Module | Role |
 |---|---|
-| `doctor.rs` | Read-only health checks (vault + client configuration) |
+| `doctor.rs` | Health checks (vault + client configuration); read-only unless `--fix` |
 | `relocate.rs` | Move the vault file and repoint client configs |
 | `project.rs` | Derive the project key from the enclosing git repository |
 
 ## Data model
 
-From `src/vault/schema.sql` (current schema v3):
+From `src/vault/schema.sql` (current schema v5):
 
 | Table / view | Purpose |
 |---|---|
 | `skills` | One row per skill `id`; `scope` (`global`/`project`, fixed at first publish), `deprecated` flag, `fts_rowid` |
-| `revisions` | Every published version: `id`, `version`, `description`, `tags` (JSON), `content`, `evidence`, `expected_version`, `status`, timestamps and review fields |
+| `revisions` | Every published version: `id`, `version`, `description`, `tags` (JSON), `content`, `evidence`, `expected_version`, `status` (`published`, or `superseded` for a legacy draft/rejected revision), timestamps and review fields |
 | `outcomes` | Agent reports: `id`, `version`, `result` (`helped`/`failed`/`not_applicable`), `note`, `project`, `created_at` |
+| `loads` | Successful MCP `get_skill` calls: `id`, `version`, `project`, `created_at`; at most one row per revision, project and UTC day. Local telemetry: not exported or imported |
 | `hook_state` | Claude Code transcript offsets (incremental Stop scan) |
 | `devin_hook_state` | Per-session `worked`/`reviewed` flags; used by every flag-tracked client (Devin, Codex, Gemini, Cursor) |
-| `skills_fts` | FTS5 index over id/description/tags/content, `unicode61 remove_diacritics 2` |
-| `current_skills` | View: each skill's latest published revision plus helped/failed outcome counts |
+| `skills_fts` | FTS5 index over id/description/tags/content, `porter unicode61 remove_diacritics 2` (English stemming on text and queries alike) |
+| `current_skills` | View: each skill's latest published revision plus its helped/failed/not_applicable counts, and `prior_helped`/`prior_failed` from the immediately preceding published version (0 if none) |
 
 ## Schema versioning and migrations
 
-- Current version: **v3**. Ordered `MIGRATIONS` chain in `src/vault/mod.rs`:
+- Current version: **v5**. Ordered `MIGRATIONS` chain in `src/vault/mod.rs`:
   - v1 → v2: add `devin_hook_state`.
   - v2 → v3: FTS rows addressed by `rowid`; one outcome per skill/version/project/UTC day; legacy drafts retired; hook-state timestamp columns and pruning support.
+  - v3 → v4: `loads` table; `current_skills` recreated with `prior_helped`/`prior_failed`.
+  - v4 → v5: `revisions` rebuilt with `status IN ('published', 'superseded')`; any remaining `draft`/`rejected` row becomes `superseded` with its `review_note` prefixed `legacy <status>` (`legacy <status>: <old note>`); `current_skills` recreated unchanged; `skills_fts` dropped and recreated with the `porter` tokenizer, repopulated from `current_skills` keyed by `skills.rowid`, and `fts_rowid` reset (as v3 did).
+- Migrations run in one IMMEDIATE transaction with foreign keys switched off around it (a table rebuild needs that); the `PRAGMA foreign_key_check` violation count is taken before the steps run and must not be higher afterwards (violations already in the vault are left as they are).
 - `PRAGMA application_id` is `SKV1`; a non-empty database with a different `application_id` is refused as foreign.
 - A database with a newer schema version is refused.
 - When the schema is already current the vault opens without taking a write lock, so concurrent read-only opens don't serialize.
@@ -98,15 +102,26 @@ From `src/vault/schema.sql` (current schema v3):
 From `src/vault/search.rs`:
 
 - FTS5 `bm25` column weights: **id 4.0, description 3.0, tags 2.0, content 1.0**. The raw `bm25` score is sign-inverted and clamped at zero so higher is better.
+- Query: each word becomes a quoted prefix term (`"word"*`), OR-joined; words under 3 characters match whole words only (`go` never matches `google`). The porter tokenizer stems query terms like indexed text (`restarts` searches `restart*`, finding `restarting`). Since porter turns a final `y` into `i` (`deploy` → `deploi`) but keeps it inside longer words (`deployment` → `deploy`), a term ending in `y` also searches its stem without the `y`.
+- Track record: the current version's net plus half of the immediately preceding
+  published version's, so republishing a skill keeps part of what it earned instead of
+  starting from zero (and a fix of a failing version starts half-demoted):
+
+  ```text
+  net = (helped - failed) + 0.5 * (prior_helped - prior_failed)
+  ```
+
 - Outcome multiplier applied to the text score:
 
   ```text
-  1 + (helped - failed) / (ABS(helped - failed) + 2.0)
+  1 + net / (ABS(net) + 2.0)
   ```
 
   The factor is in `(0, 2)`; `not_applicable` outcomes do not affect it.
-- Ranked ordering: score after multiplier, then `helped - failed` descending, then `id` ascending.
-- Empty query (catalog): `helped - failed` descending, then `id` ascending.
+- Ranked ordering: score after multiplier, then `net` descending, then `id` ascending.
+- Empty query (catalog): `net` descending, then `id` ascending.
+- The `helped`/`failed`/`not_applicable` counts returned with each hit are the current
+  version's only.
 - Limits: `limit` 1–100, `offset` >= 0, query at most 512 UTF-8 bytes with no NUL.
 
 ## Publishing rules
@@ -127,7 +142,9 @@ Enforced in `src/vault/revisions.rs` (and `mcp.rs` for tool-level checks):
 ## Outcomes
 
 - Unique key: `(id, version, project, UTC day)`. A second report on the same day replaces the first — last write wins.
-- `helped`/`failed` feed the search multiplier and the proven-version check; `not_applicable` only records a note.
+- `helped`/`failed` feed the search multiplier (current version plus half of the previous one) and the proven-version check (current version only).
+- `not_applicable` never affects search ranking; it only keeps a skill out of prompt-time suggestions (see the prompt hook gate).
+- `loads`: a successful MCP `get_skill` records `(id, version, project)` with `INSERT OR IGNORE` under a unique index on `(id, version, project, UTC day)`. Recording is best effort: a failure is logged to stderr and `get_skill` still returns the skill. `skillvolution outcomes` shows `loaded` (load pairs on the current version) and `unreported` (load pairs with no outcome report on that version from the same project and UTC day; a report made after midnight UTC counts against the next day). Loads are local telemetry: `export` leaves them out and `purge` deletes them.
 
 ## Concurrency
 
@@ -167,17 +184,43 @@ field and runs, in `hook.rs`:
 1. **Keywords** — split on non-alphanumerics, lowercase and fold Latin diacritics (the
    same folding FTS5's `remove_diacritics 2` does), then drop English and Spanish
    stopwords (including `use` and `when`, which start every skill description), tokens
-   shorter than 3 characters or longer than 30 bytes (hashes, paths), and repeats.
+   shorter than 3 characters (except 2-letter tech terms such as `ci`, `go`, `js`, `ui`, `db`, which match whole words only) or longer than 30 bytes (hashes, paths), and repeats.
    First-seen order, capped at 16 keywords.
 2. **Minimum** — fewer than 2 keywords means no search and no output.
-3. **Search** — the keywords go through the normal `search` (project-scoped, outcome
-   ranked); the top 5 hits are candidates.
-4. **Gate** — bm25 depends on the whole corpus, so a hit is re-checked against its own
-   metadata with the same prefix semantics FTS uses: it must match one keyword in its id
-   or tags, or two distinct keywords across id, description, and tags. A body-only match
-   fails. A skill whose current version has net failures (`failed - helped`) of 2 or
-   more is never suggested. At most 3 hits are kept, in search order.
-5. **Output** — `Skillvolution: vault skills matching this request:` followed by one
+3. **Translation** — a keyword found in `ES_EN`, a const Spanish→English table of about
+   470 developer words (`contenedor` → container, `despliegue` → deploy, `colgado` →
+   hang), is replaced by its English translations, so Spanish prompts reach the
+   (English) skills and a Spanish word stops prefix-matching unrelated English
+   (`genera` → generation). Inflected forms are looked up by stripping a Spanish ending
+   (`ES_INFLECTIONS`: `fallan` → `fallar`, `contenedores` → `contenedor`, `vieja` →
+   `viejo`); a word with no entry is never altered. Spanish words that are common
+   English words (`red`, `once`, `come`, `pie`, `sin`) are not keys, and English words
+   an ending rule would misread (`cargo` as a form of `carga`) are pinned untranslated.
+4. **Search** — the keywords (translations in place of their Spanish words) go through
+   the normal `search` (project-scoped, outcome ranked); the top 5 hits are candidates.
+5. **Cutoff** — a candidate scoring below half the top candidate's ranked score is
+   dropped: it matched a word or two where the top hit matched the gist, and such hits
+   are what crowded suggestions with same-domain skills. The score rides along on
+   `SkillMetadata` (`#[serde(skip)]`, never serialized).
+6. **Gate** — bm25 depends on the whole corpus, so a hit is re-checked against its own
+   metadata: at least 2 distinct non-generic keywords must match its id, tags, or
+   description, in at least 2 different *places*. A place is the whole id, one whole
+   tag, or one distinct whitespace-separated description token, deduplicated, so
+   "docker compose" matching only the tag `docker-compose` (or a hyphenated id, or
+   `ipfs-http-client` in a tag and the description) counts once. Prompt words match as
+   FTS does (a prefix, or the whole word under 3 characters); translations must be the
+   whole word, give or take a plural or -ing/-ed ending, and a Spanish word with two
+   translations is still one keyword, as are two forms of one word (equal up to that
+   ending, or one a 5+ character prefix of the other: "deploy deployment"). Generic developer words (`GENERIC`: add, app,
+   build, change, code, create, error, file, fix, issue, problem, run, script, set,
+   test, update, work, write and their inflections) still go to search but never count:
+   they say nothing about which procedure applies. A body-only match fails. A skill
+   whose current version has net failures (`failed - helped`) of 2 or
+   more, or net not-applicable reports (`not_applicable - helped`) of 2 or more (its
+   description triggers on tasks it doesn't fit), is never suggested. Both use the
+   current version's counts only, so a republished version gets a fresh chance; an
+   explicit `search_skills` still finds the skill. At most 3 hits are kept, in search order.
+7. **Output** — `Skillvolution: vault skills matching this request:` followed by one
    `- id vN: description [helped H, failed F]` line per skill and an instruction to call
    `get_skill` for the best match, say in one line which skill is applied (or that none
    fits), and call `report_skill_outcome` afterwards. Printed as
@@ -208,7 +251,7 @@ fresh subagent following `skill-evaluation`.
 
 | Skill | Purpose |
 |---|---|
-| `evolution` (v10) | The vault loop: search and apply, report outcomes, reflect, dispatch the evaluator, publish |
+| `evolution` (v11) | The vault loop: search and apply, report outcomes, reflect, dispatch the evaluator, publish |
 | `skill-evaluation` | The evaluator subagent's rubric: hard gates, 16-point rubric (keep at 11+), verdict format `publish_skill` expects |
 | `skill-acquisition` | What an agent follows on noticing it lacks know-how: vault first, then local and authoritative sources, a small experiment, stop-loss, capture |
 
@@ -235,9 +278,10 @@ have the evaluator follow `skill-evaluation`.
 
 ## Transfer
 
-- `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes in an `IMMEDIATE` transaction with `secure_delete` on. Deletes the row(s) immediately, then compacts the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on disk. Compaction can't complete while another connection (an AI client's MCP server) holds the vault open; then it prints a warning and the content may linger until a later purge compacts it.
-- `export [-o FILE]` — dumps all skills, revisions and outcomes as JSON, format `skillvolution-export` version 1.
-- `import FILE` — merges an export: identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key, and aborts if a revision's or outcome's id differs from the skill it is listed under.
+- `publish PATH`, `search`, `list`, `get` — the human counterparts of `publish_skill`, `search_skills` and `get_skill`. `publish` preflights the SKILL.md (`vault::skill_problems`, built on `section_problems`), then calls `propose` with the user as evaluator (`keep global`/`keep project`, `expected_version` = current version, `replaces_proven` with `--replace`). `get` prints a round-trippable SKILL.md and records no outcome.
+- `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes and loads in an `IMMEDIATE` transaction with `secure_delete` on. Deletes the row(s) immediately, then compacts the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on disk. Compaction can't complete while another connection (an AI client's MCP server) holds the vault open; then it prints a warning and the content may linger until a later purge compacts it.
+- `export [-o FILE]` — dumps all skills, revisions and outcomes as JSON, format `skillvolution-export` version 1. Loads and hook state are per-machine telemetry and are not exported (so `import` never brings any).
+- `import FILE` — merges an export: identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key, `draft`/`rejected` revisions from pre-v5 exports are stored as `superseded` (same note prefix as the v5 migration), and aborts if a revision's or outcome's id differs from the skill it is listed under.
 - `backup PATH` — `VACUUM INTO` a path that must not exist; creates parent directories.
 
 ## Doctor
@@ -247,7 +291,10 @@ version, `PRAGMA quick_check`, FTS orphan check, stats) and diffs each
 detected client's files against what `setup` would write — stale skill
 versions (each managed skill checked separately), missing configured binaries, Claude MCP registration status, and
 legacy installs. `--json` emits the same checks as data; the command exits
-non-zero on failures.
+non-zero on failures. `--fix` attaches a repair to each fixable check, applies
+them (schema migration via `Vault::open`, `Vault::rebuild_search_index`, global
+setup re-applied per configured client through `write_all`, Claude MCP
+re-registration), then re-runs every check; see [cli.md](cli.md#doctor).
 
 ## Relocate
 

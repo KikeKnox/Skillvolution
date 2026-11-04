@@ -83,7 +83,8 @@ fn current_version(conn: &Connection, id: &str) -> Result<i64> {
 }
 
 /// The helped/failed reports recorded against `version` — the history a
-/// wholesale replacement resets, since outcome counts are per revision.
+/// wholesale replacement mostly gives up: outcome counts are per revision, and
+/// the next version inherits only half of this net record in ranking.
 fn outcome_score(conn: &Connection, id: &str, version: i64) -> Result<(i64, i64)> {
     Ok(conn.query_row(
         "SELECT COALESCE(SUM(result = 'helped'), 0), COALESCE(SUM(result = 'failed'), 0)
@@ -226,7 +227,7 @@ impl Vault {
         let (helped, failed) = outcome_score(&tx, id, expected_version)?;
         ensure!(
             replaces_proven || helped <= failed,
-            "version {expected_version} of {id} is proven (helped {helped}, failed {failed}) and publishing over it resets those counts; \
+            "version {expected_version} of {id} is proven (helped {helped}, failed {failed}); publishing over it starts fresh counts and carries this record into ranking at only half weight; \
              merge it into your lesson instead of rewriting it and set replaces_proven true, or publish the new lesson under its own id"
         );
         let version: i64 = tx.query_row(
@@ -258,20 +259,6 @@ impl Vault {
                     review_note: row.get(7)?,
                 })
             },
-        )?;
-        // Drafts can no longer be created, but a database from before that
-        // change may still hold some; publishing over their shared base
-        // supersedes them so they never linger as publishable candidates.
-        tx.execute(
-            &format!(
-                "UPDATE revisions SET status = 'superseded', reviewed_at = {NOW}, review_note = ?2
-                 WHERE id = ?1 AND status = 'draft' AND expected_version = ?3"
-            ),
-            params![
-                id,
-                format!("superseded by published version {version}"),
-                expected_version
-            ],
         )?;
         replace_fts_row(
             &tx,
@@ -316,6 +303,12 @@ impl Vault {
 
     pub fn inspect(&self, id: &str, version: i64) -> Result<Revision> {
         load(&self.conn, id, version)
+    }
+
+    /// The current published version of `id`, or 0 when it has none.
+    pub fn published_version(&self, id: &str) -> Result<i64> {
+        validate_id(id)?;
+        current_version(&self.conn, id)
     }
 
     /// The highest version of `id` in any status, so `show` can default to the

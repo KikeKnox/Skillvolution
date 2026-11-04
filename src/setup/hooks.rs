@@ -5,7 +5,10 @@
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 // POSIX single-quoting, used for every client's hook command. On Windows, Claude Code
 // runs hook commands through Git Bash, so this quoting is still correct there; Devin's
@@ -128,7 +131,9 @@ pub(crate) fn owned_bin(config: &Value) -> Option<PathBuf> {
     shell_words(command).into_iter().next().map(PathBuf::from)
 }
 
-/// Whether `config["hooks"]` holds a Skillvolution-owned command under any event.
+/// Whether `config["hooks"]` holds a Skillvolution-owned command under any event, in
+/// either the nested `{event: [{hooks: [{command}]}]}` shape or Cursor's flat
+/// `{event: [{command}]}` one.
 pub fn has_owned(config: &Value) -> bool {
     let Some(hooks) = config.get("hooks").and_then(Value::as_object) else {
         return false;
@@ -137,26 +142,34 @@ pub fn has_owned(config: &Value) -> bool {
         .values()
         .filter_map(Value::as_array)
         .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
+        .flat_map(|group| {
+            let nested = group.get("hooks").and_then(Value::as_array);
+            std::iter::once(group).chain(nested.into_iter().flatten())
+        })
         .filter_map(|entry| entry.get("command").and_then(Value::as_str))
         .any(owned_command)
 }
 
-/// Removes our entries from `hooks[event]`, and any group they leave empty. Returns
-/// whether anything was removed.
-fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<bool> {
+/// Removes our entries from `hooks[event]`, and any group that removing them leaves
+/// empty (a foreign group that was already empty is kept as is). Returns `None` when
+/// nothing was removed, else the slot where our first group was, so a rerun can write
+/// its replacement back in place instead of reordering the event (which made setup and
+/// other tools appending hooks fight over the order).
+fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<Option<usize>> {
     let Some(value) = hooks.get_mut(event) else {
-        return Ok(false);
+        return Ok(None);
     };
     let groups = value
         .as_array_mut()
         .with_context(|| format!("hooks.{event} must be an array"))?;
-    let mut removed = false;
-    for group in groups.iter_mut() {
+    let mut first_owned = None;
+    // Per group: whether to keep it, i.e. it didn't become empty by losing ours.
+    let mut keep = Vec::with_capacity(groups.len());
+    for (index, group) in groups.iter_mut().enumerate() {
         let group = group
             .as_object_mut()
             .with_context(|| format!("hooks.{event} entries must be objects"))?;
+        let mut emptied = false;
         if let Some(entries) = group.get_mut("hooks") {
             let entries = entries
                 .as_array_mut()
@@ -168,11 +181,17 @@ fn strip_owned(hooks: &mut Map<String, Value>, event: &str) -> Result<bool> {
                     .and_then(Value::as_str)
                     .is_some_and(owned_command)
             });
-            removed |= entries.len() != count;
+            if entries.len() != count {
+                first_owned.get_or_insert(index);
+                emptied = entries.is_empty();
+            }
         }
+        keep.push(!emptied);
     }
-    groups.retain(|group| !matches!(group.get("hooks"), Some(Value::Array(e)) if e.is_empty()));
-    Ok(removed)
+    let mut keep_iter = keep.iter();
+    groups.retain(|_| *keep_iter.next().unwrap_or(&true));
+    // A group shared with foreign entries survives, so ours goes right after it.
+    Ok(first_owned.map(|index| keep[..=index].iter().filter(|kept| **kept).count()))
 }
 
 fn append_group(
@@ -180,6 +199,7 @@ fn append_group(
     event: &str,
     matcher: Option<&str>,
     command: String,
+    slot: Option<&mut usize>,
 ) -> Result<()> {
     let groups = hooks
         .entry(event)
@@ -190,7 +210,13 @@ fn append_group(
     if let Some(matcher) = matcher {
         group["matcher"] = json!(matcher);
     }
-    groups.push(group);
+    match slot {
+        Some(slot) => {
+            groups.insert((*slot).min(groups.len()), group);
+            *slot += 1;
+        }
+        None => groups.push(group),
+    }
     Ok(())
 }
 
@@ -214,9 +240,15 @@ fn merge_entries(
     hooks: &mut Map<String, Value>,
     entries: &[(&str, Option<String>, String)],
 ) -> Result<()> {
-    let (_, emptied) = strip_owned_from_all(hooks)?;
+    let (mut slots, emptied) = strip_owned_from_all(hooks)?;
     for (event, matcher, command) in entries {
-        append_group(hooks, event, matcher.as_deref(), command.clone())?;
+        append_group(
+            hooks,
+            event,
+            matcher.as_deref(),
+            command.clone(),
+            slots.get_mut(*event),
+        )?;
     }
     // Checked after appending, so an event we re-add keeps its place in the file.
     hooks.retain(|event, groups| {
@@ -225,21 +257,25 @@ fn merge_entries(
     Ok(())
 }
 
-/// Strips our commands from every event in `hooks`. Returns whether anything was
-/// removed, and which events that stripping alone left with an empty group array
-/// (before any new entries are appended back).
-fn strip_owned_from_all(hooks: &mut Map<String, Value>) -> Result<(bool, Vec<String>)> {
+/// Strips our commands from every event in `hooks`. Returns, per event we were removed
+/// from, the slot our first group occupied (see `strip_owned`), and which events that
+/// stripping alone left with an empty group array (before any new entries are
+/// appended back).
+fn strip_owned_from_all(
+    hooks: &mut Map<String, Value>,
+) -> Result<(HashMap<String, usize>, Vec<String>)> {
     let events: Vec<String> = hooks.keys().cloned().collect();
-    let mut removed_anything = false;
+    let mut slots = HashMap::new();
     let mut emptied = Vec::new();
     for event in events {
-        let removed = strip_owned(hooks, &event)?;
-        removed_anything |= removed;
-        if removed && hooks[&event].as_array().is_some_and(Vec::is_empty) {
-            emptied.push(event);
+        if let Some(slot) = strip_owned(hooks, &event)? {
+            if hooks[&event].as_array().is_some_and(Vec::is_empty) {
+                emptied.push(event.clone());
+            }
+            slots.insert(event, slot);
         }
     }
-    Ok((removed_anything, emptied))
+    Ok((slots, emptied))
 }
 
 /// The removal counterpart of `merge`: strips our commands from every event of
@@ -256,7 +292,8 @@ pub fn remove_owned(config: &mut Value) -> Result<bool> {
     let hooks = hooks_value
         .as_object_mut()
         .context("hooks must be an object")?;
-    let (removed, emptied) = strip_owned_from_all(hooks)?;
+    let (slots, emptied) = strip_owned_from_all(hooks)?;
+    let removed = !slots.is_empty();
     hooks.retain(|event, _| !emptied.contains(event));
     if hooks.is_empty() {
         root.remove("hooks");
@@ -357,6 +394,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_rewrites_our_hook_in_place_instead_of_moving_it_last() {
+        let foreign = json!({"hooks": [{"type": "command", "command": "codegraph prompt-hook"}]});
+        let mut config = json!({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "/old/skillvolution hook prompt"}]},
+            foreign.clone(),
+        ]}});
+        let entries = [(
+            "UserPromptSubmit",
+            None,
+            "/new/skillvolution hook prompt".to_owned(),
+        )];
+        merge(&mut config, &entries).unwrap();
+        let groups = config["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(
+            groups[0]["hooks"][0]["command"],
+            "/new/skillvolution hook prompt"
+        );
+        assert_eq!(groups[1], foreign);
+        let once = config.clone();
+        merge(&mut config, &entries).unwrap();
+        assert_eq!(config, once, "a rerun must not reorder anything");
+    }
+
+    #[test]
     fn merge_keeps_an_event_the_user_left_empty() {
         let mut config = json!({"hooks": {"Notification": []}});
         merge(
@@ -365,6 +426,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["hooks"]["Notification"], json!([]));
+    }
+
+    #[test]
+    fn has_owned_reads_nested_and_flat_hook_shapes() {
+        let ours = "/opt/skillvolution hook stop";
+        assert!(has_owned(
+            &json!({"hooks": {"Stop": [{"hooks": [{"command": ours}]}]}})
+        ));
+        assert!(has_owned(&json!({"hooks": {"stop": [{"command": ours}]}})));
+        assert!(!has_owned(
+            &json!({"hooks": {"stop": [{"command": "echo skillvolution"}]}})
+        ));
+    }
+
+    #[test]
+    fn merge_keeps_a_foreign_group_that_was_already_empty() {
+        let empty = json!({"matcher": "Bash", "hooks": []});
+        let mut config = json!({"hooks": {"Stop": [
+            empty.clone(),
+            {"hooks": [{"type": "command", "command": "/old/skillvolution hook stop"}]},
+        ]}});
+        let entries = [("Stop", None, "/new/skillvolution hook stop".to_owned())];
+        merge(&mut config, &entries).unwrap();
+        let groups = config["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(groups[0], empty);
+        assert_eq!(
+            groups[1]["hooks"][0]["command"], "/new/skillvolution hook stop",
+            "ours stays in its slot, after the empty group"
+        );
+
+        let mut config = json!({"hooks": {"Stop": [
+            empty.clone(),
+            {"hooks": [{"type": "command", "command": "/old/skillvolution hook stop"}]},
+        ]}});
+        assert!(remove_owned(&mut config).unwrap());
+        assert_eq!(config, json!({"hooks": {"Stop": [empty]}}));
     }
 
     #[test]

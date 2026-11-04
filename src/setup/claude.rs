@@ -5,7 +5,9 @@
 //! CLI globally (see `claude_cli`). Project setup also removes the legacy CLAUDE.md
 //! `@import` block.
 
-use super::{Change, Edit, Scope, claude_cli, common, fs_safe, hooks, permissions};
+use super::{
+    Change, Edit, Scope, claude_cli, claude_cli::Registration, common, fs_safe, hooks, permissions,
+};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -142,9 +144,19 @@ pub(super) fn warn_about_project_install() {
     }
 }
 
+/// The read-back is only an optimisation: when it fails (spawn error, timeout), warn
+/// and treat the registration as `Different` so it is simply redone.
+fn registration_or_different(claude: &Path, bin: &Path, db: &Path) -> Registration {
+    claude_cli::registration(claude, bin, db).unwrap_or_else(|e| {
+        eprintln!("warning: could not check the existing MCP registration ({e:#}); re-registering");
+        Registration::Different
+    })
+}
+
 /// Registers the MCP server at user scope via the `claude` CLI, run only after every
-/// file write has already succeeded. Returns a one-line summary: registered, or a note
-/// with the command to run manually when `claude` isn't on `PATH`.
+/// file write has already succeeded. A registration already identical to ours (see
+/// `claude_cli::registration`) is left alone. Returns a one-line summary: registered,
+/// unchanged, or a note with the command to run manually when `claude` isn't on `PATH`.
 pub(super) fn register_mcp(bin: &Path, db: &Path) -> Result<String> {
     let Some(claude) = claude_cli::resolve() else {
         return Ok(format!(
@@ -152,9 +164,30 @@ pub(super) fn register_mcp(bin: &Path, db: &Path) -> Result<String> {
             claude_cli::add_json_command(bin, db)
         ));
     };
+    if registration_or_different(&claude, bin, db) == Registration::Same {
+        return Ok("skillvolution is already registered with Claude Code; unchanged.".to_owned());
+    }
     claude_cli::register(&claude, bin, db)
         .context("register the MCP server with the claude CLI")?;
     Ok("Registered skillvolution with `claude mcp add-json --scope user`.".to_owned())
+}
+
+/// The line `setup --dry-run` prints for the MCP registration `register_mcp` would
+/// make, or `None` when it would leave an identical registration unchanged.
+pub(super) fn planned_registration(bin: &Path, db: &Path) -> Result<Option<String>> {
+    let command = claude_cli::add_json_command(bin, db);
+    let Some(claude) = claude_cli::resolve() else {
+        return Ok(Some(format!(
+            "Would print (claude CLI not found on PATH): {command}"
+        )));
+    };
+    Ok(match registration_or_different(&claude, bin, db) {
+        Registration::Same => None,
+        Registration::Missing => Some(format!("Would run: {command}")),
+        Registration::Different => Some(format!(
+            "Would run: {command} (replacing the existing skillvolution registration)"
+        )),
+    })
 }
 
 /// Removes the user-scope MCP registration via the `claude` CLI, run only after every

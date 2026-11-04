@@ -1,0 +1,442 @@
+[
+  {
+    "id": "rust-linker-oom-ci",
+    "description": "Use when a Rust release build in CI is killed during the final link step (signal 9, exit code 137, or \"ld terminated\") because the runner ran out of memory",
+    "tags": ["rust", "cargo", "linker", "ci"],
+    "when_to_use": "Large crates built with LTO and many codegen units can exhaust a small CI runner's RAM while linking, so the job dies without a compiler error.",
+    "procedure": [
+      "Confirm the kill in the job log: exit code 137 or SIGKILL right after the last crate compiles.",
+      "Use thin LTO (`CARGO_PROFILE_RELEASE_LTO=thin`) or raise `codegen-units` for CI builds.",
+      "Limit parallelism with `CARGO_BUILD_JOBS=2` so rustc and the linker do not compete for memory.",
+      "Switch to a leaner linker such as lld or mold via `-C link-arg=-fuse-ld=lld`."
+    ],
+    "pitfalls": [
+      "Full debug info for dependencies inflates link memory; set `debug = \"line-tables-only\"` in the release profile.",
+      "A bigger runner hides the problem until the binary grows again."
+    ],
+    "verification": "Re-run the job and compare peak memory in the runner metrics; the link step must finish with exit code 0."
+  },
+  {
+    "id": "cargo-feature-unification",
+    "description": "Use when a Rust crate compiles on its own but fails or behaves differently inside the workspace because Cargo unifies dependency features across members of the parent workspace",
+    "tags": ["rust", "cargo", "workspace", "features"],
+    "when_to_use": "`cargo build -p member` and `cargo build --workspace` disagree, or a dependency feature is enabled that the crate never requested.",
+    "procedure": [
+      "Run `cargo tree -e features -i <dependency>` to see which member turns the feature on.",
+      "Set `resolver = \"2\"` in the parent workspace `Cargo.toml` so build and dev dependency features stay separate.",
+      "Declare every feature a crate relies on explicitly instead of inheriting it from a sibling.",
+      "Check each member alone with `cargo check -p <member>` in CI."
+    ],
+    "pitfalls": [
+      "Edition 2021 crates default to resolver 2, but a virtual workspace manifest still needs it set explicitly.",
+      "`cargo hack --each-feature` is slow on large workspaces; run it nightly."
+    ],
+    "verification": "`cargo check -p <member>` and `cargo check --workspace` both succeed with the same feature set reported by `cargo tree`."
+  },
+  {
+    "id": "python-src-layout-editable-install",
+    "description": "Use when `pip install -e .` succeeds but importing the package fails with ModuleNotFoundError, typically in a src/ layout project with a misconfigured pyproject.toml",
+    "tags": ["python", "pip", "packaging", "pyproject"],
+    "when_to_use": "The package code lives under `src/`, the editable install reports success, and `import mypackage` still fails outside the repository root.",
+    "procedure": [
+      "Inspect `pyproject.toml` and confirm the build backend knows about the `src` directory (for setuptools: `[tool.setuptools.packages.find] where = [\"src\"]`).",
+      "Make sure the package directory contains an `__init__.py` or is configured as a namespace package.",
+      "Reinstall with `pip install -e . --no-build-isolation -v` and read which packages were discovered.",
+      "Run `python -c 'import mypackage, sys; print(mypackage.__file__)'` from a different directory."
+    ],
+    "pitfalls": [
+      "Running from the repository root can mask the problem because the current directory is on `sys.path`.",
+      "Old `.egg-link` files from previous installs shadow the new editable finder."
+    ],
+    "verification": "The import works from `/tmp` and `__file__` points into the `src/` tree."
+  },
+  {
+    "id": "python-venv-wrong-interpreter",
+    "description": "Use when a package is installed with pip but `python` still cannot import it because a different interpreter or virtual environment is active",
+    "tags": ["python", "venv", "pip"],
+    "when_to_use": "`pip install` reports success or \"Requirement already satisfied\" while `python` raises ModuleNotFoundError for the same package.",
+    "procedure": [
+      "Compare `which python`, `which pip`, and `python -m pip --version`.",
+      "Always install with `python -m pip install <package>` so pip matches the interpreter.",
+      "Activate the project virtual environment, or point the editor's interpreter setting at `.venv/bin/python`.",
+      "Recreate the environment if it was copied from another machine or Python version."
+    ],
+    "pitfalls": [
+      "Shell aliases and pyenv shims can make `pip` and `python` resolve to different installations.",
+      "IDEs cache the interpreter choice per workspace."
+    ],
+    "verification": "`python -m pip show <package>` lists a location inside the active environment and the import succeeds."
+  },
+  {
+    "id": "npm-ci-lockfile-mismatch",
+    "description": "Use when `npm ci` fails in CI saying package.json and package-lock.json are not in sync, or the lockfile was created by a different npm version",
+    "tags": ["node", "npm", "lockfile", "ci"],
+    "when_to_use": "The install step of a pipeline stops with `npm ci can only install packages when your package.json and package-lock.json are in sync`.",
+    "procedure": [
+      "Run `npm install` locally with the same npm major version the CI uses to regenerate the lockfile.",
+      "Commit `package-lock.json` together with the `package.json` change.",
+      "Pin the npm version in CI (for example with `corepack` or `actions/setup-node`) to match local development.",
+      "Re-run `npm ci` locally on a clean checkout before pushing."
+    ],
+    "pitfalls": [
+      "Switching CI to `npm install` hides the drift instead of fixing it.",
+      "Lockfile version 1 vs 3 differences come from npm 6 vs npm 7+."
+    ],
+    "verification": "`rm -rf node_modules && npm ci` succeeds locally and in the pipeline."
+  },
+  {
+    "id": "node-esm-require-error",
+    "description": "Use when Node.js throws ERR_REQUIRE_ESM or \"Cannot use import statement outside a module\" when mixing CommonJS and ES modules",
+    "tags": ["node", "esm", "commonjs", "javascript"],
+    "when_to_use": "A dependency upgrade turned a package ESM-only, or a file uses `import` syntax while Node treats it as CommonJS.",
+    "procedure": [
+      "Decide the project's module system: set `\"type\": \"module\"` in `package.json` or keep CommonJS.",
+      "In CommonJS code, load ESM-only packages with dynamic `await import()` instead of `require()`.",
+      "Rename files to `.mjs` or `.cjs` when a single file must differ from the package default.",
+      "Align the TypeScript `module` and `moduleResolution` settings with the chosen system."
+    ],
+    "pitfalls": [
+      "Pinning the dependency to its last CommonJS major only postpones the migration.",
+      "Jest needs its own ESM configuration even when Node runs the code fine."
+    ],
+    "verification": "`node` starts the entry point without module errors and the test runner passes."
+  },
+  {
+    "id": "postgres-slow-query-explain",
+    "description": "Use when a Postgres query is slow in production and you need to read EXPLAIN ANALYZE output to find a sequential scan and add the right index",
+    "tags": ["postgres", "sql", "performance", "index"],
+    "when_to_use": "A query's latency grew with table size and the plan is unknown.",
+    "procedure": [
+      "Run `EXPLAIN (ANALYZE, BUFFERS)` on the exact query with realistic parameters.",
+      "Look for `Seq Scan` nodes on large tables and big gaps between estimated and actual rows.",
+      "Create a matching index with `CREATE INDEX CONCURRENTLY` on the filtered and sorted columns.",
+      "Run `ANALYZE` on the table if estimates are far off."
+    ],
+    "pitfalls": [
+      "`EXPLAIN ANALYZE` executes the statement; wrap writes in a transaction and roll back.",
+      "An index on a low-selectivity column is often ignored by the planner."
+    ],
+    "verification": "The new plan uses an index scan and the measured execution time drops."
+  },
+  {
+    "id": "postgres-connection-pool-exhausted",
+    "description": "Use when the application fails with \"sorry, too many clients already\" or connection timeouts against Postgres under load",
+    "tags": ["postgres", "connection-pool", "pgbouncer"],
+    "when_to_use": "Errors appear only under traffic peaks or after scaling out application instances.",
+    "procedure": [
+      "Count connections per client with `SELECT usename, application_name, count(*) FROM pg_stat_activity GROUP BY 1, 2`.",
+      "Size each instance's pool so instances times pool size stays below `max_connections` minus a reserve.",
+      "Put PgBouncer in transaction pooling mode in front of the database for many short-lived clients.",
+      "Close leaked connections: look for long `idle in transaction` sessions."
+    ],
+    "pitfalls": [
+      "Raising `max_connections` costs memory per backend and usually moves the bottleneck.",
+      "Transaction pooling breaks session features such as prepared statements and advisory locks."
+    ],
+    "verification": "A load test at peak traffic runs without connection errors and `pg_stat_activity` stays below the limit."
+  },
+  {
+    "id": "k8s-crashloopbackoff",
+    "description": "Use when a Kubernetes pod is stuck in CrashLoopBackOff and you need the previous container's logs, exit code, and the reason it keeps restarting",
+    "tags": ["kubernetes", "kubectl", "pods", "debugging"],
+    "when_to_use": "`kubectl get pods` shows a growing restart count and the current logs are empty.",
+    "procedure": [
+      "Read the crashed container's output with `kubectl logs <pod> --previous`.",
+      "Check `kubectl describe pod <pod>` for the last state, exit code, and `OOMKilled` reason.",
+      "Verify the command, environment variables, and mounted secrets the container expects.",
+      "If the probe kills it, relax the liveness probe's `initialDelaySeconds`."
+    ],
+    "pitfalls": [
+      "Exit code 137 means the kernel killed the process, usually for exceeding its memory limit.",
+      "Events expire after an hour; capture them early."
+    ],
+    "verification": "The pod reaches `Running` and the restart count stops increasing."
+  },
+  {
+    "id": "k8s-image-pull-backoff",
+    "description": "Use when Kubernetes pods stay in ImagePullBackOff or ErrImagePull, usually a wrong image tag or missing credentials for a private registry",
+    "tags": ["kubernetes", "registry", "image-pull-secret"],
+    "when_to_use": "New pods never start and `kubectl describe pod` shows pull failures.",
+    "procedure": [
+      "Read the exact pull error in the pod events (`not found`, `unauthorized`, or a timeout).",
+      "Confirm the image reference and tag exist with `docker manifest inspect <image>`.",
+      "Create a docker-registry secret and reference it in `imagePullSecrets` or the service account.",
+      "Check node egress to the registry for timeouts."
+    ],
+    "pitfalls": [
+      "Secrets are namespaced; the pull secret must live in the pod's namespace.",
+      "The `latest` tag plus `IfNotPresent` can keep stale images on some nodes."
+    ],
+    "verification": "The pod events show `Successfully pulled image` and the pod starts."
+  },
+  {
+    "id": "terraform-state-lock",
+    "description": "Use when terraform plan or apply fails with \"Error acquiring the state lock\" after an interrupted run left a stale lock in the remote backend",
+    "tags": ["terraform", "state", "iac"],
+    "when_to_use": "A previous run was cancelled or crashed and every new run now waits on or fails at the lock.",
+    "procedure": [
+      "Confirm nobody else is running terraform against the same state (check CI and teammates).",
+      "Copy the lock ID from the error message.",
+      "Run `terraform force-unlock <LOCK_ID>` from the same working directory and backend configuration.",
+      "Re-run `terraform plan` and review it before applying."
+    ],
+    "pitfalls": [
+      "Force-unlocking while another apply is running can corrupt the state.",
+      "For DynamoDB-backed locks, deleting the item by hand skips the safety checks."
+    ],
+    "verification": "`terraform plan` acquires the lock and finishes without lock errors."
+  },
+  {
+    "id": "github-actions-cache-misses",
+    "description": "Use when a GitHub Actions workflow never restores its dependency cache and every run downloads and reinstalls everything from scratch",
+    "tags": ["github-actions", "ci", "cache"],
+    "when_to_use": "The cache step logs `Cache not found for input keys` on every run, including reruns of the same commit.",
+    "procedure": [
+      "Build the key from a hash of the lockfile: `key: ${{ runner.os }}-deps-${{ hashFiles('**/package-lock.json') }}`.",
+      "Add `restore-keys` with the key prefix so a partial match is restored.",
+      "Make sure the cached path is the real download directory of the package manager.",
+      "Remember caches are scoped to the branch and its base branch."
+    ],
+    "pitfalls": [
+      "Caches created on a pull request branch are not visible to other branches.",
+      "Including a timestamp or run number in the key guarantees a miss."
+    ],
+    "verification": "The second run of the workflow logs `Cache restored from key` and the install step is faster."
+  },
+  {
+    "id": "fix-ci-token-permissions",
+    "description": "Use when a GitHub Actions job gets 403 \"Resource not accessible by integration\" while pushing a tag, creating a release, or commenting on a pull request",
+    "tags": ["github-actions", "permissions", "github-token"],
+    "when_to_use": "A workflow step that writes to the repository fails with 403 although it works for maintainers locally.",
+    "procedure": [
+      "Add a `permissions:` block to the job granting only what it needs, such as `contents: write` or `pull-requests: write`.",
+      "Check the repository's default workflow permissions under Settings, Actions.",
+      "For pull requests from forks, use `pull_request_target` carefully or post results from a separate workflow.",
+      "Use a fine-grained token only when `GITHUB_TOKEN` cannot be granted the scope."
+    ],
+    "pitfalls": [
+      "A top-level `permissions:` block replaces all defaults, so unlisted scopes become `none`.",
+      "`pull_request_target` with a checkout of untrusted code is a security risk."
+    ],
+    "verification": "The job's step succeeds and the tag, release, or comment appears."
+  },
+  {
+    "id": "nginx-tls-certificate-chain",
+    "description": "Use when browsers accept the HTTPS site but curl, Java, or Android clients fail certificate verification because nginx serves an incomplete chain",
+    "tags": ["nginx", "tls", "certificates", "https"],
+    "when_to_use": "Desktop browsers work (they fetch missing intermediates themselves) while strict clients report `unable to get local issuer certificate`.",
+    "procedure": [
+      "Inspect the served chain with `openssl s_client -connect host:443 -servername host -showcerts`.",
+      "Point `ssl_certificate` at the full chain file (leaf followed by intermediates), not the leaf alone.",
+      "Reload nginx with `nginx -t && nginx -s reload`.",
+      "Re-test from a strict client."
+    ],
+    "pitfalls": [
+      "Do not include the root certificate; clients already have it.",
+      "Certificate order matters: leaf first."
+    ],
+    "verification": "`openssl s_client` reports `Verify return code: 0 (ok)` and curl succeeds without `-k`."
+  },
+  {
+    "id": "nginx-websocket-proxy",
+    "description": "Use when WebSocket connections behind an nginx reverse proxy fail the upgrade with 400 or drop after about 60 seconds",
+    "tags": ["nginx", "websocket", "reverse-proxy"],
+    "when_to_use": "Real-time features work against the app server directly but not through nginx.",
+    "procedure": [
+      "Set `proxy_http_version 1.1;` in the location block.",
+      "Forward the handshake headers: `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection \"upgrade\";`.",
+      "Raise `proxy_read_timeout` above the application's heartbeat interval.",
+      "Reload nginx and retest."
+    ],
+    "pitfalls": [
+      "A load balancer in front of nginx may have its own idle timeout.",
+      "Hard-coding `Connection upgrade` for every request breaks keepalive; use a `map` on `$http_upgrade`."
+    ],
+    "verification": "The browser's network tab shows `101 Switching Protocols` and the connection stays open past the old timeout."
+  },
+  {
+    "id": "go-private-modules",
+    "description": "Use when go get or go mod tidy fails for a private repository with 410 Gone, a checksum database error, or \"terminal prompts disabled\"",
+    "tags": ["go", "modules", "goprivate"],
+    "when_to_use": "Public modules download fine but an internal module path cannot be fetched.",
+    "procedure": [
+      "Set `GOPRIVATE=git.example.com/*` (go env -w) so the proxy and checksum database are skipped for those paths.",
+      "Configure git to use SSH or a credential helper for the host: `git config --global url.\"git@host:\".insteadOf https://host/`.",
+      "Run `go mod tidy` again.",
+      "Set the same variables in CI."
+    ],
+    "pitfalls": [
+      "`GONOSUMDB` alone still sends requests through the public proxy.",
+      "Module paths are case sensitive."
+    ],
+    "verification": "`go mod download` succeeds on a clean module cache."
+  },
+  {
+    "id": "react-build-env-undefined",
+    "description": "Use when environment variables are undefined in the generated production bundle of a React app built with Vite or Create React App, although they work in dev",
+    "tags": ["react", "vite", "env-vars", "frontend"],
+    "when_to_use": "Values read from `import.meta.env` or `process.env` are undefined only after a production build or deploy.",
+    "procedure": [
+      "Prefix exposed variables correctly: `VITE_` for Vite, `REACT_APP_` for Create React App.",
+      "Make sure the variables exist at build time in the CI job, not only at container runtime.",
+      "Rebuild; values are inlined into the bundle during the build.",
+      "For runtime configuration, serve a small `config.json` instead."
+    ],
+    "pitfalls": [
+      "Never expose secrets this way: everything inlined is public in the bundle.",
+      "Changing the variable in the hosting dashboard has no effect until the next build."
+    ],
+    "verification": "Search the built assets for the expected value or log it in the deployed app."
+  },
+  {
+    "id": "add-ssh-key-to-agent",
+    "description": "Use when git over SSH fails with \"Permission denied (publickey)\" or ssh asks for the key passphrase on every connection",
+    "tags": ["ssh", "ssh-agent", "keys"],
+    "when_to_use": "A key exists in `~/.ssh` but the SSH client does not offer it, or offers it without a running agent.",
+    "procedure": [
+      "Check what is offered with `ssh -vT git@github.com`.",
+      "Start the agent (`eval \"$(ssh-agent -s)\"`) and add the key with `ssh-add ~/.ssh/id_ed25519`.",
+      "Add a `Host` entry in `~/.ssh/config` with `IdentityFile` and `AddKeysToAgent yes`.",
+      "Make sure the public key is registered on the server or forge account."
+    ],
+    "pitfalls": [
+      "Private key files must have mode 600 or ssh ignores them.",
+      "Too many keys in the agent can exhaust the server's authentication attempts."
+    ],
+    "verification": "`ssh -T git@github.com` greets the user and `git fetch` works without a passphrase prompt."
+  },
+  {
+    "id": "macos-gatekeeper-quarantine",
+    "description": "Use when macOS refuses to open a downloaded command-line binary because the developer \"cannot be verified\" or the app \"is damaged\"",
+    "tags": ["macos", "gatekeeper", "quarantine"],
+    "when_to_use": "A binary downloaded through a browser is blocked by Gatekeeper on first run.",
+    "procedure": [
+      "Confirm the attribute with `xattr -l <binary>` (look for `com.apple.quarantine`).",
+      "Remove it for a trusted binary with `xattr -d com.apple.quarantine <binary>`.",
+      "Alternatively allow it once from System Settings, Privacy and Security.",
+      "Prefer installing through a package manager, which avoids the quarantine flag."
+    ],
+    "pitfalls": [
+      "Only do this for binaries from a source you trust and whose checksum you verified.",
+      "Apple silicon also requires the binary to be at least ad-hoc signed."
+    ],
+    "verification": "The binary runs and prints its version without a Gatekeeper dialog."
+  },
+  {
+    "id": "windows-crlf-shell-scripts",
+    "description": "Use when a shell script checked out on Windows fails in a Linux container with \"bad interpreter\" or \"$'\\r': command not found\" because of CRLF line endings in the file format",
+    "tags": ["windows", "line-endings", "gitattributes", "shell"],
+    "when_to_use": "A script that runs on Linux machines fails only when the repository was checked out on Windows, often as a container entrypoint.",
+    "procedure": [
+      "Confirm CRLF endings with `file script.sh` or `cat -A script.sh`.",
+      "Add `*.sh text eol=lf` to `.gitattributes` and renormalize with `git add --renormalize .`.",
+      "Convert existing files with `dos2unix` or the editor's line-ending setting.",
+      "Rebuild the image."
+    ],
+    "pitfalls": [
+      "`core.autocrlf=true` on Windows reintroduces CRLF on checkout unless `.gitattributes` overrides it.",
+      "The error can surface as `no such file or directory` for the shebang interpreter."
+    ],
+    "verification": "`file script.sh` no longer mentions CRLF and the container starts."
+  },
+  {
+    "id": "flaky-tests-shared-state",
+    "description": "Use when tests pass when run alone but fail intermittently in the full suite or in parallel because they share global state, ports, or files",
+    "tags": ["testing", "flaky-tests", "isolation"],
+    "when_to_use": "Failures depend on test order or concurrency rather than on the code under test.",
+    "procedure": [
+      "Reproduce by running the suite repeatedly with a fixed random order seed and with parallelism on and off.",
+      "Bisect to the pair of tests that interfere.",
+      "Give each test its own temporary directory, database, and ephemeral port.",
+      "Reset global singletons and environment variables in teardown."
+    ],
+    "pitfalls": [
+      "Retrying flaky tests automatically hides real races.",
+      "Fixed sleeps make tests slower and still flaky."
+    ],
+    "verification": "The suite passes 20 consecutive runs in parallel with randomized order."
+  },
+  {
+    "id": "pytest-fixture-scope-leak",
+    "description": "Use when pytest tests pass individually but fail when the whole file runs because a module- or session-scoped fixture leaks mutated state",
+    "tags": ["python", "pytest", "fixtures", "testing"],
+    "when_to_use": "A test fails only after another test in the same module or session modified a shared fixture object.",
+    "procedure": [
+      "List fixture scopes with `pytest --setup-show`.",
+      "Narrow the scope of the mutated fixture to `function`, or return a fresh copy each time.",
+      "Use `monkeypatch` and `tmp_path` instead of editing globals or shared directories.",
+      "Run with `pytest -p no:randomly` and then with random order to confirm the fix."
+    ],
+    "pitfalls": [
+      "A session-scoped database fixture needs a transaction rollback per test.",
+      "Autouse fixtures in `conftest.py` apply to more tests than expected."
+    ],
+    "verification": "The whole file passes in any order, including with `pytest-randomly`."
+  },
+  {
+    "id": "docker-compose-volume-permissions",
+    "description": "Use when a service started with docker compose gets \"permission denied\" writing to a bind-mounted volume, or leaves root-owned files on the host",
+    "tags": ["docker", "docker-compose", "volumes", "permissions"],
+    "when_to_use": "The container user and the host user have different UIDs and the service writes into a bind mount.",
+    "procedure": [
+      "Compare `id` on the host with `docker compose exec <service> id`.",
+      "Run the service as the host user with `user: \"${UID}:${GID}\"` in the compose file.",
+      "Or create the directory with the right owner in the image and use a named volume.",
+      "Fix files already owned by root with `sudo chown -R $USER .`."
+    ],
+    "pitfalls": [
+      "`UID` is a shell variable, not always exported; pass it via `.env` for compose.",
+      "SELinux hosts also need the `:z` mount suffix."
+    ],
+    "verification": "The service writes to the mount and new files on the host belong to the host user."
+  },
+  {
+    "id": "http-client-timeouts-retries",
+    "description": "Use when outbound HTTP requests hang forever or fail on transient 502/503 errors and the client needs explicit timeouts and retries with backoff",
+    "tags": ["http-client", "retries", "timeouts", "resilience"],
+    "when_to_use": "Calls to an external API block workers indefinitely or fail on short upstream outages.",
+    "procedure": [
+      "Set separate connect and read timeouts on the client; most libraries default to none.",
+      "Retry only idempotent requests on connection errors, 502, 503, and 504.",
+      "Use exponential backoff with jitter and a cap on attempts.",
+      "Honor `Retry-After` headers when the server sends them."
+    ],
+    "pitfalls": [
+      "Retrying non-idempotent POSTs can duplicate side effects; use idempotency keys.",
+      "Retries across several layers multiply the load during an outage."
+    ],
+    "verification": "A test against a stub server that delays or returns 503 finishes within the expected time budget."
+  },
+  {
+    "id": "app-config-env-precedence",
+    "description": "Use when an app ignores an environment variable you set because a .env file or config file value silently takes precedence over it",
+    "tags": ["config", "dotenv", "env-vars"],
+    "when_to_use": "Exporting a variable in the shell or deployment has no effect on the running application.",
+    "procedure": [
+      "Find where configuration is loaded and in what order (defaults, config file, `.env`, environment, flags).",
+      "Check whether the dotenv loader overrides existing variables (for example `override=True`).",
+      "Make the environment win over files, and document the precedence order.",
+      "Print the effective configuration at startup, with secrets masked."
+    ],
+    "pitfalls": [
+      "A `.env` file committed to the image overrides deployment settings silently.",
+      "Variable names may be prefixed or upper-cased by the config library."
+    ],
+    "verification": "Setting the variable changes the value in the startup configuration log."
+  },
+  {
+    "id": "npm-legacy-peer-deps",
+    "deprecated": true,
+    "description": "Use when npm install fails with ERESOLVE unable to resolve dependency tree because of conflicting peer dependencies",
+    "tags": ["npm", "node", "peer-dependencies"],
+    "when_to_use": "Deprecated: forcing `--legacy-peer-deps` hides real version conflicts.",
+    "procedure": [
+      "Run `npm install --legacy-peer-deps`.",
+      "Commit an `.npmrc` with `legacy-peer-deps=true`."
+    ],
+    "pitfalls": [
+      "Peer conflicts surface later as runtime errors."
+    ],
+    "verification": "`npm install` completes."
+  }
+]

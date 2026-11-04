@@ -7,6 +7,25 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
+### Fixed
+
+- `publish` ignores YAML-style trailing comments in frontmatter values
+  (`scope: project   # optional`), which used to be rejected or kept as part of the value.
+
+### Changed
+
+- Prompt-time suggestions are much more precise: a hit needs two distinct non-generic
+  keywords (fix, test, build, error and similar never count) matching its id, tags, or
+  description in two different places (a compound tag like `docker-compose` or a
+  hyphenated id is one place), the single whole-word id/tag path is gone, and hits
+  scoring under half the top hit's score are dropped. Spanish developer words are
+  translated to English through a built-in dictionary (inflections included), so
+  Spanish prompts find English skills and stop prefix-matching unrelated English words.
+- Two forms of one word in a prompt ("deploy deployment") count as one keyword toward
+  the two-keyword suggestion gate.
+- Search uses the porter stemmer (`restarts` finds `restarting`); the schema v5
+  migration rebuilds the search index with it.
+
 ## [v0.4.1]
 
 _2026-10-10_
@@ -38,7 +57,7 @@ Tagged but never published with binaries; see v0.4.1.
 
 - `setup` now installs three managed skills per client, each at
   `skills/<name>/SKILL.md` with its own `skillvolution-managed:<name>:vN` marker:
-  `evolution` (now v10), `skill-evaluation` (the evaluator subagent's rubric: hard
+  `evolution` (now v11), `skill-evaluation` (the evaluator subagent's rubric: hard
   gates, a 16-point rubric, and the verdict format `publish_skill` expects), and
   `skill-acquisition` (what an agent follows when it notices mid-task that it lacks
   the know-how). `doctor` checks each skill's version, `setup --remove` deletes each

@@ -52,6 +52,10 @@ enum Command {
         /// Only skills whose current version has failures.
         #[arg(long, conflicts_with = "id")]
         failing: bool,
+        /// Only skills whose current version was loaded with get_skill in a
+        /// project and day that never reported an outcome for it.
+        #[arg(long, conflicts_with = "id")]
+        unreported: bool,
         /// Print the outcome log as JSON instead of the readable summary.
         #[arg(long)]
         json: bool,
@@ -94,12 +98,416 @@ enum Command {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Repair what can be repaired safely, then check again.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Publish a SKILL.md file to the vault yourself (you are the evaluator).
+    Publish {
+        /// A SKILL.md file, a directory containing one, or a directory of skill directories
+        /// (every PATH/*/SKILL.md is published; e.g. ~/.claude/skills).
+        path: PathBuf,
+        /// Skill id; overrides the `name` in the frontmatter.
+        #[arg(long)]
+        id: Option<String>,
+        /// `global` or `project`; overrides the frontmatter `scope:` (default global).
+        #[arg(long, value_enum)]
+        scope: Option<PublishScope>,
+        /// Project key for `--scope project`; detected like `serve` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// Evidence recorded with the revision.
+        #[arg(
+            long,
+            default_value = "Published manually with `skillvolution publish` by the user."
+        )]
+        evidence: String,
+        /// Allow publishing a new version of an existing skill; also overrides the
+        /// proven-version guard (the replaced version keeps its record at half weight in ranking).
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Search the vault (like the MCP search_skills tool).
+    Search {
+        /// Keywords.
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+        /// Project key; detected like `serve` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the skills visible from the project.
+    List {
+        /// Project key; detected like `serve` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a skill as a SKILL.md that `publish --replace` accepts; records nothing.
+    Get {
+        /// Skill id.
+        id: String,
+        /// Version to print; defaults to the current one.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<i64>,
+        /// Project key; detected like `serve` when omitted.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Move the vault database to a new local path and repoint configured clients.
     Relocate {
         /// New database path.
         path: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PublishScope {
+    Global,
+    Project,
+}
+
+const SKILL_TEMPLATE: &str = "---
+name: my-skill-id
+description: Use when <situation or symptom an agent would search for>
+tags: [tool, topic]
+---
+## When to use
+...
+## Procedure
+1. ...
+## Pitfalls
+- ...
+## Verification
+...";
+
+/// The skill file's frontmatter fields and body.
+#[derive(Default)]
+struct SkillFile {
+    name: Option<String>,
+    description: Option<String>,
+    tags: Vec<String>,
+    scope: Option<PublishScope>,
+    content: String,
+    problems: Vec<String>,
+}
+
+fn unquote(value: &str) -> &str {
+    let v = value.trim();
+    for q in ['"', '\''] {
+        if let Some(inner) = v.strip_prefix(q).and_then(|v| v.strip_suffix(q))
+            && !inner.contains(q)
+        {
+            return inner;
+        }
+    }
+    v
+}
+
+/// `value` without a YAML-style trailing comment: a `#` at the start or after
+/// whitespace, outside a quoted value ("C#" and "a#b" keep theirs).
+fn strip_comment(value: &str) -> &str {
+    let v = value.trim();
+    // A leading quoted string can hold a " #" of its own: look past its closing quote.
+    let from = v
+        .strip_prefix(['"', '\''])
+        .and_then(|rest| rest.find(&v[..1]))
+        .map_or(0, |end| end + 2);
+    v.match_indices('#')
+        .find(|&(i, _)| i >= from && (i == 0 || v[..i].ends_with(char::is_whitespace)))
+        .map_or(v, |(i, _)| v[..i].trim_end())
+}
+
+fn parse_skill_file(text: &str) -> SkillFile {
+    let text = text.replace("\r\n", "\n");
+    let text = text.as_str();
+    let mut file = SkillFile::default();
+    let mut body = text;
+    let mut lines = text.lines();
+    if lines.next().is_some_and(|l| l.trim_end() == "---") {
+        let mut consumed = text.lines().next().unwrap().len() + 1;
+        let mut closed = false;
+        for line in lines {
+            consumed += line.len() + 1;
+            if line.trim_end() == "---" {
+                body = text.get(consumed..).unwrap_or("");
+                closed = true;
+                break;
+            }
+            if line.starts_with(char::is_whitespace) {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let (key, value) = (key.trim_end(), strip_comment(value));
+                if matches!(key, "name" | "description" | "tags")
+                    && matches!(value, "" | ">" | "|" | ">-" | "|-")
+                {
+                    file.problems.push(if key == "tags" {
+                        "tags: multi-line YAML values are not supported; write tags inline as [a, b]"
+                            .into()
+                    } else {
+                        format!("{key}: multi-line YAML values are not supported; write it on one line")
+                    });
+                    continue;
+                }
+                match key {
+                    "name" => file.name = Some(unquote(value).to_owned()),
+                    "description" => file.description = Some(unquote(value).to_owned()),
+                    "tags" => {
+                        file.tags = value
+                            .trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .split(',')
+                            .map(|t| unquote(t).to_owned())
+                            .filter(|t| !t.is_empty())
+                            .collect()
+                    }
+                    "scope" => match unquote(value) {
+                        "global" => file.scope = Some(PublishScope::Global),
+                        "project" => file.scope = Some(PublishScope::Project),
+                        other => file
+                            .problems
+                            .push(format!("scope: `{other}` is not global or project")),
+                    },
+                    _ => {}
+                }
+            }
+        }
+        if !closed {
+            file.problems
+                .push("frontmatter starts with --- but is never closed by a --- line".into());
+        }
+    }
+    file.content = body
+        .lines()
+        .filter(|l| !(l.trim_start().starts_with("<!-- skillvolution-managed:")))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start_matches('\n')
+        .to_owned();
+    file
+}
+
+/// The outcome of publishing one skill file.
+enum Published {
+    Done {
+        id: String,
+        version: i64,
+        scope: &'static str,
+    },
+    Skipped {
+        id: String,
+        version: i64,
+    },
+}
+
+/// How a skill file is published: the CLI flags shared by every file.
+struct PublishOptions<'a> {
+    scope: Option<PublishScope>,
+    project: &'a Option<String>,
+    evidence: &'a str,
+    replace: bool,
+    /// An existing id without `replace` is `Skipped` rather than an error.
+    skip_existing: bool,
+}
+
+/// Publishes the SKILL.md at `path`. `Err(problems)` lists everything wrong with the file.
+fn publish_file(
+    vault: &mut Vault,
+    path: &std::path::Path,
+    id: Option<String>,
+    opts: &PublishOptions,
+) -> Result<std::result::Result<Published, Vec<String>>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let file = parse_skill_file(&text);
+    // A file named SKILL.md without a `name` takes its directory's name.
+    let fallback = path
+        .file_name()
+        .is_some_and(|n| n == "SKILL.md")
+        .then(|| std::path::absolute(path).ok())
+        .flatten()
+        .and_then(|p| {
+            p.parent()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+        });
+    let id = id.or(file.name.clone()).or(fallback);
+    let mut problems = skillvolution::vault::skill_problems(
+        id.as_deref(),
+        file.description.as_deref(),
+        &file.tags,
+        &file.content,
+    );
+    problems.extend(file.problems.iter().cloned());
+    let scope = opts.scope.or(file.scope).unwrap_or(PublishScope::Global);
+    let project = if scope == PublishScope::Project {
+        let project = resolve_project(opts.project.clone())?;
+        if project.is_none() {
+            problems.push(
+                "scope project needs a project key: run inside a git repository or pass --project KEY"
+                    .into(),
+            );
+        }
+        project
+    } else {
+        None
+    };
+    if !problems.is_empty() {
+        return Ok(Err(problems));
+    }
+    let (id, description) = (id.unwrap(), file.description.unwrap());
+    let current = vault.published_version(&id)?;
+    if current > 0 && !opts.replace {
+        if opts.skip_existing {
+            return Ok(Ok(Published::Skipped {
+                id,
+                version: current,
+            }));
+        }
+        anyhow::bail!(
+            "skill {id} already exists at v{current}; pass --replace to publish v{}",
+            current + 1
+        );
+    }
+    let project_scope = project.as_deref();
+    let revision = vault.propose(&skillvolution::vault::Proposal {
+        id: &id,
+        description: &description,
+        tags: &file.tags,
+        content: &file.content,
+        evidence: opts.evidence,
+        expected_version: current,
+        scope: project_scope,
+        verdict: if project_scope.is_some() {
+            "keep project"
+        } else {
+            "keep global"
+        },
+        verdict_reason: "published manually from the CLI by the user",
+        replaces_proven: opts.replace,
+    })?;
+    Ok(Ok(Published::Done {
+        id: revision.id,
+        version: revision.version,
+        scope: project_scope.map_or("global", |_| "project"),
+    }))
+}
+
+fn publish(
+    db: &Option<PathBuf>,
+    path: PathBuf,
+    id: Option<String>,
+    scope: Option<PublishScope>,
+    project: Option<String>,
+    evidence: String,
+    replace: bool,
+) -> Result<()> {
+    validate_project(&project)?;
+    let template = format!(
+        "A SKILL.md looks like this:\n\n{SKILL_TEMPLATE}\n\nSee 'Publishing a skill manually' in README.md."
+    );
+    let mut opts = PublishOptions {
+        scope,
+        project: &project,
+        evidence: &evidence,
+        replace,
+        skip_existing: false,
+    };
+    if path.is_dir() && !path.join("SKILL.md").is_file() {
+        anyhow::ensure!(
+            id.is_none(),
+            "--id cannot be used when publishing a directory of skills"
+        );
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
+            .with_context(|| format!("read {}", path.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("SKILL.md"))
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        anyhow::ensure!(
+            !files.is_empty(),
+            "no SKILL.md in {} or in its subdirectories",
+            path.display()
+        );
+        opts.skip_existing = true;
+        let mut vault = open(db)?;
+        let (mut done, mut skipped, mut rejected) = (0, 0, 0);
+        for file in &files {
+            let result = publish_file(&mut vault, file, None, &opts)
+                .unwrap_or_else(|e| Err(vec![format!("{e:#}")]));
+            match result {
+                Ok(Published::Done { id, version, scope }) => {
+                    done += 1;
+                    println!("[published] {id} v{version} ({scope})");
+                }
+                Ok(Published::Skipped { id, version }) => {
+                    skipped += 1;
+                    println!("[skipped] {id}: already at v{version}; pass --replace");
+                }
+                Err(problems) => {
+                    rejected += 1;
+                    println!("[rejected] {}:", file.display());
+                    for problem in problems {
+                        println!("  - {problem}");
+                    }
+                }
+            }
+        }
+        if rejected > 0 {
+            println!("\n{template}");
+        }
+        println!("\n{done} published, {skipped} skipped, {rejected} rejected");
+        if rejected > 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    let path = if path.is_dir() {
+        path.join("SKILL.md")
+    } else {
+        path
+    };
+    let mut vault = open(db)?;
+    match publish_file(&mut vault, &path, id, &opts)? {
+        Ok(Published::Done { id, version, scope }) => {
+            println!("Published {id} v{version} ({scope}).")
+        }
+        Ok(Published::Skipped { .. }) => unreachable!("single-file publish never skips"),
+        Err(problems) => {
+            let list: String = problems.iter().map(|p| format!("- {p}\n")).collect();
+            anyhow::bail!(
+                "{} cannot be published:\n{list}\n{template}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_skills(page: &skillvolution::vault::SearchPage, json: bool) -> Result<()> {
+    if json {
+        return print_json(page);
+    }
+    for s in &page.skills {
+        println!(
+            "{} v{} [{}] (helped {}, failed {}): {}",
+            s.id,
+            s.version,
+            s.scope.as_deref().unwrap_or("global"),
+            s.helped,
+            s.failed,
+            s.description
+        );
+    }
+    if page.has_more {
+        println!("{} of {}", page.skills.len(), page.total);
+    }
+    Ok(())
 }
 
 /// The client emitting a hook payload: payloads and blocking conventions differ.
@@ -384,8 +792,8 @@ fn main() -> Result<()> {
             open(&cli.db)?.backup(&path)?;
             println!("Backed up to {}.", path.display());
         }
-        Command::Doctor { json } => {
-            if !skillvolution::doctor::run(&db_path(&cli.db)?, json)? {
+        Command::Doctor { json, fix } => {
+            if !skillvolution::doctor::run(&db_path(&cli.db)?, json, fix)? {
                 std::process::exit(1);
             }
         }
@@ -428,6 +836,52 @@ fn main() -> Result<()> {
                 println!("\n{}", vault.diff(&id, version)?);
             }
         }
+        Command::Publish {
+            path,
+            id,
+            scope,
+            project,
+            evidence,
+            replace,
+        } => publish(&cli.db, path, id, scope, project, evidence, replace)?,
+        Command::Search {
+            query,
+            limit,
+            project,
+            json,
+        } => {
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            let page = open(&cli.db)?.search(&query, project.as_deref(), limit, 0)?;
+            print_skills(&page, json)?;
+        }
+        Command::List { project, json } => {
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            let page = open(&cli.db)?.search("", project.as_deref(), 100, 0)?;
+            print_skills(&page, json)?;
+        }
+        Command::Get {
+            id,
+            version,
+            project,
+        } => {
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            let skill = open(&cli.db)?.get(&id, version, project.as_deref())?;
+            println!(
+                "---\nname: {}\ndescription: {}\ntags: [{}]\n{}---\n{}",
+                skill.id,
+                skill.description,
+                skill.tags.join(", "),
+                if skill.scope.is_some() {
+                    "scope: project\n"
+                } else {
+                    ""
+                },
+                skill.content.trim_end()
+            );
+        }
         Command::Deprecate { id } => open(&cli.db)?.set_deprecated(&id, true)?,
         Command::Undeprecate { id } => open(&cli.db)?.set_deprecated(&id, false)?,
         Command::Outcomes {
@@ -448,16 +902,23 @@ fn main() -> Result<()> {
         Command::Outcomes {
             id: None,
             failing,
+            unreported,
             json,
         } => {
-            let summaries = open(&cli.db)?.outcome_summaries(failing)?;
+            let summaries = open(&cli.db)?.outcome_summaries(failing, unreported)?;
             if json {
                 print_json(&summaries)?;
             } else {
                 for s in summaries {
                     println!(
-                        "{} v{}: helped {}, failed {}, not applicable {}",
-                        s.id, s.version, s.helped, s.failed, s.not_applicable
+                        "{} v{}: helped {}, failed {}, not applicable {}, loaded {}, unreported {}",
+                        s.id,
+                        s.version,
+                        s.helped,
+                        s.failed,
+                        s.not_applicable,
+                        s.loaded,
+                        s.unreported
                     );
                 }
             }

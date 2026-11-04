@@ -80,6 +80,94 @@ const MIGRATIONS: &[&str] = &[
         UPDATE devin_hook_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
         WHERE session_id = NEW.session_id;
     END;",
+    // v4: the current view carries the preceding version's helped/failed
+    // counts, and successful get_skill loads are recorded.
+    "CREATE TABLE loads (
+        id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        project TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        FOREIGN KEY (id, version) REFERENCES revisions(id, version)
+    );
+    CREATE UNIQUE INDEX loads_once_per_day
+        ON loads(id, version, COALESCE(project, ''), substr(created_at, 1, 10));
+
+    DROP VIEW current_skills;
+    CREATE VIEW current_skills AS
+    SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'helped'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'failed'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_failed
+    FROM skills s
+    JOIN revisions r ON r.id = s.id
+    WHERE r.status = 'published'
+        AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');",
+    // v5: revisions publish immediately, so the draft and rejected statuses are
+    // gone; any left over become superseded, keeping their note behind a
+    // `legacy <status>` prefix. A CHECK can't be altered, so the table is
+    // rebuilt (`migrate` runs this with foreign keys off) and the view reading
+    // it is recreated unchanged. The search index moves to the porter tokenizer:
+    // a tokenizer can't be altered either, so skills_fts is recreated and
+    // repopulated the way v3 did.
+    "DROP VIEW current_skills;
+    CREATE TABLE revisions_v5 (
+        id TEXT NOT NULL REFERENCES skills(id),
+        version INTEGER NOT NULL CHECK(version > 0),
+        description TEXT NOT NULL,
+        tags TEXT NOT NULL,
+        content TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        expected_version INTEGER NOT NULL CHECK(expected_version >= 0),
+        status TEXT NOT NULL DEFAULT 'published' CHECK(status IN ('published', 'superseded')),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        reviewed_at TEXT,
+        review_note TEXT,
+        PRIMARY KEY (id, version)
+    );
+    INSERT INTO revisions_v5 (rowid, id, version, description, tags, content, evidence,
+            expected_version, status, created_at, reviewed_at, review_note)
+        SELECT rowid, id, version, description, tags, content, evidence, expected_version,
+            CASE WHEN status IN ('draft', 'rejected') THEN 'superseded' ELSE status END,
+            created_at, reviewed_at,
+            CASE WHEN status IN ('draft', 'rejected')
+                THEN 'legacy ' || status || COALESCE(': ' || review_note, '')
+                ELSE review_note END
+        FROM revisions;
+    DROP TABLE revisions;
+    ALTER TABLE revisions_v5 RENAME TO revisions;
+
+    CREATE VIEW current_skills AS
+    SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'helped'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'failed'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_failed
+    FROM skills s
+    JOIN revisions r ON r.id = s.id
+    WHERE r.status = 'published'
+        AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
+
+    DROP TABLE skills_fts;
+    CREATE VIRTUAL TABLE skills_fts USING fts5(
+        id, description, tags, content,
+        tokenize = 'porter unicode61 remove_diacritics 2'
+    );
+    INSERT INTO skills_fts (rowid, id, description, tags, content)
+        SELECT s.rowid, c.id, c.description, c.tags, c.content
+        FROM current_skills c JOIN skills s ON s.id = c.id;
+    UPDATE skills SET fts_rowid = NULL;
+    UPDATE skills SET fts_rowid = rowid WHERE id IN (SELECT id FROM current_skills);",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
@@ -269,6 +357,17 @@ fn migrate(conn: &Connection) -> Result<()> {
     if schema_stamp(conn)? == (SCHEMA_VERSION, APPLICATION_ID) {
         return Ok(());
     }
+    // A step that rebuilds a referenced table (v5's revisions) must run with
+    // foreign keys off, and the pragma is a no-op inside a transaction, so it
+    // is switched off around the migration transaction; foreign_key_check
+    // verifies the result before commit.
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let migrated = migrate_locked(conn);
+    conn.pragma_update(None, "foreign_keys", true)?;
+    migrated
+}
+
+fn migrate_locked(conn: &Connection) -> Result<()> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     // Re-read under the lock: another process may have migrated meanwhile.
     let (version, application_id) = schema_stamp(&tx)?;
@@ -293,9 +392,21 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         tx.execute_batch(SCHEMA)?;
     } else {
+        let count_violations = || {
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        };
+        let before = count_violations()?;
         for migration in &MIGRATIONS[version as usize - 1..] {
             tx.execute_batch(migration)?;
         }
+        let violations = count_violations()?;
+        ensure!(
+            violations <= before,
+            "schema migration added {} broken foreign key references; database left unchanged",
+            violations - before
+        );
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
@@ -403,22 +514,80 @@ fn validate_tags(tags: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The four sections the evolution skill prescribes, in order. Extra `##`
-/// sections and prose before the first heading are fine; the order is enforced
-/// by advancing one heading iterator across all four searches.
+/// The required sections that are absent from `content`, or (when none is absent)
+/// the sections that appear out of order. Extra `##` sections and prose before the
+/// first heading are fine; the order is enforced by advancing one heading iterator
+/// across all four searches.
+pub fn section_problems(content: &str) -> Vec<&'static str> {
+    let headings = || {
+        content
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("## "))
+    };
+    let absent: Vec<&str> = CONTENT_SECTIONS
+        .into_iter()
+        .filter(|s| !headings().any(|h| h.eq_ignore_ascii_case(s)))
+        .collect();
+    if !absent.is_empty() {
+        return absent;
+    }
+    let mut it = headings();
+    CONTENT_SECTIONS
+        .into_iter()
+        .filter(|s| !it.any(|h| h.eq_ignore_ascii_case(s)))
+        .collect()
+}
+
 fn validate_sections(content: &str) -> Result<()> {
-    let mut headings = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("## "));
     ensure!(
-        CONTENT_SECTIONS
-            .iter()
-            .all(|section| headings.any(|heading| heading.eq_ignore_ascii_case(section))),
+        section_problems(content).is_empty(),
         "content must contain the headings {}, each on its own line and in that order",
         CONTENT_SECTIONS.join(", ")
     );
     Ok(())
+}
+
+/// Every problem `propose` would find in a manually written skill that doesn't
+/// need the vault, so a human sees all of them at once.
+pub fn skill_problems(
+    id: Option<&str>,
+    description: Option<&str>,
+    tags: &[String],
+    content: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    match id {
+        None => {
+            problems.push("missing id: add `name: <id>` to the frontmatter or pass --id".into())
+        }
+        Some(id) => {
+            if let Err(e) = validate_id(id) {
+                problems.push(format!("invalid id {id:?}: {e}"));
+            }
+        }
+    }
+    match description {
+        None => problems
+            .push("missing description: add a `description:` line to the frontmatter".into()),
+        Some(d) => {
+            if let Err(e) = validate_single_line("description", d, 280) {
+                problems.push(e.to_string());
+            }
+        }
+    }
+    if let Err(e) = validate_tags(tags) {
+        problems.push(e.to_string());
+    }
+    let sections = section_problems(content);
+    if !sections.is_empty() {
+        problems.push(format!(
+            "content must contain the headings {}, each on its own line and in that order; missing or out of order: {}",
+            CONTENT_SECTIONS.join(", "),
+            sections.join(", ")
+        ));
+    }
+    problems
 }
 
 /// Credential shapes with a fixed, high-signal prefix: (prefix, minimum body

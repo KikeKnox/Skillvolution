@@ -83,6 +83,26 @@ fn purge_whole_skill_removes_search_get_and_outcomes() {
 }
 
 #[test]
+fn purge_deletes_loads_and_export_leaves_them_out() {
+    let (_dir, mut vault) = open();
+    Draft::new("skill-c").propose(&mut vault);
+    vault.record_load("skill-c", 1, None).unwrap();
+    Draft::new("skill-c")
+        .expected_version(1)
+        .propose(&mut vault);
+    vault.record_load("skill-c", 2, Some("proja")).unwrap();
+
+    let export = vault.export_json().unwrap();
+    assert!(!export.contains("\"loads\""), "{export}");
+    assert!(!export.contains("proja"), "{export}");
+
+    vault.purge("skill-c", Some(2)).unwrap();
+    let summary = &vault.outcome_summaries(false, false).unwrap()[0];
+    assert_eq!((summary.version, summary.loaded), (1, 1));
+    assert!(vault.purge("skill-c", None).unwrap().skill_removed);
+}
+
+#[test]
 fn purge_and_vacuum_erase_the_purged_content_from_the_database_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
@@ -349,6 +369,54 @@ fn import_keeps_legacy_revisions_published_before_the_heading_rule() {
     vault.import_json(&document.to_string()).unwrap();
     assert_eq!(vault.get("legacy-skill", None, None).unwrap().version, 1);
     assert_eq!(vault.search("legacy", None, 20, 0).unwrap().total, 1);
+}
+
+#[test]
+fn import_maps_legacy_draft_and_rejected_revisions_to_superseded() {
+    let (_dir, mut vault) = open();
+    let revision = |version: i64, status: &str, note: Option<&str>| {
+        serde_json::json!({
+            "id": "skill", "version": version,
+            "description": "Use when importing an old export",
+            "tags": [],
+            "content": support::sectioned("body"),
+            "evidence": "Observed / Tried / Result",
+            "expected_version": version - 1,
+            "status": status,
+            "created_at": "2024-01-01T00:00:00Z",
+            "reviewed_at": null,
+            "review_note": note
+        })
+    };
+    let document = serde_json::json!({
+        "format": "skillvolution-export",
+        "version": 1,
+        "exported_at": "2024-01-01T00:00:00Z",
+        "skills": [{
+            "id": "skill",
+            "scope": null,
+            "deprecated": false,
+            "revisions": [
+                revision(1, "published", Some("keep global: reason")),
+                revision(2, "draft", None),
+                revision(3, "rejected", Some("too vague")),
+            ],
+            "outcomes": []
+        }]
+    });
+
+    let report = vault.import_json(&document.to_string()).unwrap();
+    assert_eq!(report.revisions_imported, 3);
+    let draft = vault.inspect("skill", 2).unwrap();
+    assert_eq!(draft.status, "superseded");
+    assert_eq!(draft.review_note.as_deref(), Some("legacy draft"));
+    let rejected = vault.inspect("skill", 3).unwrap();
+    assert_eq!(rejected.status, "superseded");
+    assert_eq!(
+        rejected.review_note.as_deref(),
+        Some("legacy rejected: too vague")
+    );
+    assert_eq!(vault.get("skill", None, None).unwrap().version, 1);
 }
 
 #[test]

@@ -5,9 +5,10 @@ Start with the health check:
 ```bash
 skillvolution doctor          # human-readable report
 skillvolution doctor --json   # {"healthy": bool, "checks": [...]}
+skillvolution doctor --fix    # repair what it can, then report again
 ```
 
-`doctor` is read-only. It verifies the database (`application_id`, `user_version`,
+`doctor` is read-only unless `--fix`. It verifies the database (`application_id`, `user_version`,
 `PRAGMA quick_check`, search index, row counts) and compares every detected client's
 on-disk config against what the current binary's `setup` would write — flagging stale
 skill files, differing configs, a configured binary path that no longer exists, a
@@ -15,12 +16,22 @@ missing Claude Code MCP registration, and a project-level install left in the cu
 repo next to the global one. It exits `0` when nothing fails (warnings are fine) and
 `1` when a check fails.
 
+`doctor --fix` repairs most of these in place: it migrates an older schema, rebuilds a
+broken search index, re-applies global setup (with backups) for each client that is
+configured but stale or points at a missing binary, and re-registers Claude Code's MCP
+server — then reports again. It never configures a client you haven't set up, and a
+failing integrity check is left to you (restore a `skillvolution backup`, or `export`
+and `import` into a fresh vault). See [cli.md](cli.md#doctor).
+
 ## The `skillvolution` MCP server isn't visible in my client
 
 - Confirm `setup` configured that client: `skillvolution doctor` shows
   `installed but not configured` vs `configured, up to date` vs `differs from what
-  … would write`. Run (or rerun) `skillvolution setup --client <name>` and restart the
-  client.
+  … would write`. Only entries setup owns count as configured (our hooks, the
+  `skillvolution` MCP server entry, the marker block, a managed skill file, the OpenCode
+  plugin); a config that merely mentions `skillvolution`, say in a permission rule, is
+  still "not configured", and `doctor --fix` won't touch it. Run (or rerun)
+  `skillvolution setup --client <name>` and restart the client.
 - Claude Code global setup registers the server through the `claude` CLI. If `claude`
   wasn't on `PATH`, setup printed the manual command — run it:
   `claude mcp add-json --scope user skillvolution '{"type":"stdio","command":"<bin>","args":["--db","<db>","serve"]}'`.
@@ -58,7 +69,8 @@ sanitized directory name differs (see
 ## The review reminder never fires
 
 - Run `skillvolution doctor` — a hook config that differs from the current binary's
-  output, or a missing configured binary, is the usual cause.
+  output, or a missing configured binary, is the usual cause; `doctor --fix` re-applies
+  setup for that client.
 - For Claude Code the Stop hook only blocks when the transcript contains an
   `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call or a successful `get_skill` after the
   last *successful* `publish_skill`/`report_skill_outcome` — `Bash` and other tools
@@ -77,18 +89,34 @@ sanitized directory name differs (see
 The `prompt` hook prints nothing unless a skill clears its gate, so silence is often
 correct. Check, in order:
 
-- **Too few keywords.** After English/Spanish filler words, words under 3 characters,
+- **Too few keywords.** After English/Spanish filler words, words under 3 characters (bar ci, go, js, ts, ui, db, os, ai and similar 2-letter tech terms),
   and repeats are dropped, the prompt needs at least 2 keywords. "hola, tests" leaves
-  one (`tests`), so it is never searched; name the tool or the error.
-- **No match in the skill's metadata.** A hit counts only when one keyword is in its
-  id or tags, or two distinct keywords are spread across id, description, and tags. A
-  body-only match is not suggested, and only the top 5 search hits are judged.
+  one (`tests`), so it is never searched; name the tool and the symptom.
+- **Not enough specific words in the skill's metadata.** A hit counts only when at
+  least two distinct keywords match its id, tags, or description, in two different
+  places: the whole id, one whole tag, and each description token are one place each,
+  so "docker compose" matching only the tag `docker-compose` (or only a hyphenated id)
+  counts once. Generic developer words (fix, test, build, error, file, script, run,
+  add, create, update, change, code, app, write, work, issue, problem, set) never
+  count. A body-only match is not suggested. Spanish words count through their English
+  translation when the built-in dictionary knows them, as whole words; an unknown
+  Spanish word still has to prefix a word of the skill. Name the tool and the symptom:
+  "docker container restart loop" clears the gate where "fix the docker error" doesn't.
+- **A stronger match crowded it out.** Only the top 5 search hits are judged, and a hit
+  scoring under half the top hit's score is dropped, so a skill sharing a word or two
+  with a much closer match is not suggested alongside it. `skillvolution search` with
+  the same words shows the ranking.
 - **The skill is failing.** A skill whose current version has two or more net
   failures (failed minus helped) is never suggested; `skillvolution outcomes --failing`
-  lists them. Deprecated skills and project skills from another project are not
-  visible either.
-- **The hook isn't installed.** Run `skillvolution doctor` and rerun
-  `skillvolution setup`: configs written by an older binary have no `UserPromptSubmit`
+  lists them.
+- **The skill keeps not applying.** A skill whose current version has two or more net
+  `not_applicable` reports (not applicable minus helped) is never suggested: its
+  description triggers on tasks it doesn't fit. `skillvolution outcomes` shows the
+  counts; narrow the description and republish, since both checks use only the current
+  version's counts. An explicit `search_skills` still finds it either way. Deprecated
+  skills and project skills from another project are not visible either.
+- **The hook isn't installed.** Run `skillvolution doctor --fix` (or rerun
+  `skillvolution setup`): configs written by an older binary have no `UserPromptSubmit`
   (`BeforeAgent` for Gemini CLI) entry or plugin `chat.message` hook. Cursor never has
   one, because `beforeSubmitPrompt` can't inject context. Subagent sessions in OpenCode
   get no suggestions either.
@@ -147,9 +175,10 @@ The rejection message names the check. In order of likelihood:
 - **stale base** — `stale base: expected N, current published version is M` means
   someone published first: `get_skill` the new version, merge your lesson into it, and
   evaluate the merged candidate again with `expected_version` set to `M`.
-- **proven base** — `version N of ID is proven (helped H, failed F) …`: merge the
-  base's content rather than rewriting it and set `replaces_proven: true`, or publish
-  the lesson under a new id.
+- **proven base** — `version N of ID is proven (helped H, failed F) …`: the new version
+  starts fresh counts and carries the old record into ranking at only half weight, so
+  merge the base's content rather than rewriting it and set `replaces_proven: true`, or
+  publish the lesson under a new id.
 
 Outcome notes are scanned for the same credential shapes, and `report_skill_outcome`
 fails with `no published revision ID version N visible to this project` when the
@@ -200,7 +229,8 @@ claude CLI not found on PATH; register the MCP server manually: claude mcp add-j
 
 Run that command once `claude` is installed (or on PATH). `setup --remove` prints the
 matching `claude mcp remove --scope user skillvolution` when it can't reach the CLI.
-`doctor` also warns when the registration is missing.
+`doctor` also warns when the registration is missing, and `doctor --fix` re-registers it
+once `claude` is on `PATH`.
 
 ## Where are my backups?
 
