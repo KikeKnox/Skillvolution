@@ -7,10 +7,38 @@ release tooling uses the heading as the GitHub release title.
 
 ## [Unreleased]
 
-### Fixed
+## [v0.5.0]
 
-- `publish` ignores YAML-style trailing comments in frontmatter values
-  (`scope: project   # optional`), which used to be rejected or kept as part of the value.
+_2026-11-04_
+
+Sharper prompt-time suggestions (Spanish prompts included), manual publishing and
+editing of skills from the CLI, `doctor --fix`, and accountability for loaded skills.
+The vault migrates to schema v5 on first use: run `skillvolution backup <path>` before
+upgrading, then rerun `skillvolution setup` (or `skillvolution doctor --fix`) to install
+the `evolution` v11 and `skill-acquisition` v2 skills.
+
+### Added
+
+- `skillvolution publish PATH` publishes a `SKILL.md` yourself (you are the evaluator,
+  so no verdict is needed), or every `PATH/*/SKILL.md` of a directory such as
+  `~/.claude/skills`, with one `[published]/[skipped]/[rejected]` line per file. The
+  frontmatter supplies `name`, `description`, `tags` and `scope`; every problem is
+  reported at once with a template; `--replace` publishes a new version. All other
+  validation, including the credential scan, still applies. The `evolution` skill
+  forbids agents from running it unless the user asks for a specific file.
+- `skillvolution search`, `list` and `get`: `get` prints a skill as a `SKILL.md` that
+  `publish --replace` accepts, so a skill can be fetched, edited and republished.
+- `get_skill` loads are recorded (once per version, project and UTC day; schema v4).
+  `skillvolution outcomes` shows `loaded` and `unreported` counts, and `--unreported`
+  lists skills loaded without an outcome report. Loads are local telemetry: not
+  exported or imported, and deleted by `purge`.
+- `skillvolution doctor --fix` migrates the vault, rebuilds a broken search index,
+  re-applies setup to clients that are configured but stale, and re-registers the
+  Claude Code MCP server. It never configures a client you haven't set up and never
+  touches a vault failing `quick_check`.
+- A retrieval benchmark (`cargo test --test retrieval_eval -- --nocapture`): a fixed
+  generic vault queried with English and Spanish prompts, with regression floors for
+  search and prompt-time suggestions.
 
 ### Changed
 
@@ -25,6 +53,26 @@ release tooling uses the heading as the GitHub release title.
   the two-keyword suggestion gate.
 - Search uses the porter stemmer (`restarts` finds `restarting`); the schema v5
   migration rebuilds the search index with it.
+- Prompt keywords keep 2-letter technical terms (ci, go, js, db, ...) as whole words,
+  and a skill whose current version has 2 or more net `not_applicable` reports is no
+  longer suggested.
+- Ranking: a republished skill carries half of its previous version's
+  `helped - failed` record, so replacing a proven version no longer resets it to zero.
+- Schema v5: a revision is only `published` or `superseded`. Legacy `draft` and
+  `rejected` rows, and those in imported pre-v5 exports, become `superseded` with a
+  `legacy <status>` note prefix.
+- `setup` rewrites its own hook entries in their existing slot, never reorders foreign
+  hooks, and keeps foreign hook groups that were already empty. It skips
+  `claude mcp add-json` when the existing registration is identical, so a fully set-up
+  client previews as `No changes.`. `doctor` counts a client as configured only when a
+  file carries something setup owns, not a mere mention of `skillvolution`.
+- `skill-acquisition` v2 searches the vault with English keywords even when the user
+  writes another language.
+
+### Fixed
+
+- `publish` ignores YAML-style trailing comments in frontmatter values
+  (`scope: project   # optional`), which used to be rejected or kept as part of the value.
 
 ## [v0.4.1]
 

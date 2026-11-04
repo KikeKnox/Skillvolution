@@ -4,3 +4,4 @@
 *.db-wal
 
 **/**/CLAUDE.md
+.codegraph/
