@@ -4,6 +4,7 @@ mod support;
 use skillvolution::vault::Vault;
 use std::{
     fs,
+    path::Path,
     process::{Command, Output},
 };
 use support::Draft;
@@ -461,7 +462,8 @@ fn bulk_publish_reports_each_file_and_a_summary() {
         "{text}"
     );
     assert!(text.contains("[rejected] "), "{text}");
-    assert!(text.contains("b-bad/SKILL.md:\n  - "), "{text}");
+    let rejected = format!("{}:\n  - ", Path::new("b-bad").join("SKILL.md").display());
+    assert!(text.contains(&rejected), "{text}");
     assert!(
         text.contains("1 published, 1 skipped, 1 rejected"),
         "{text}"
@@ -718,7 +720,11 @@ fn bulk_publish_turns_a_propose_error_into_a_rejection_and_continues() {
     let text = stdout(&out);
     assert!(text.contains("[published] a-first v1"), "{text}");
     assert!(text.contains("[published] c-last v1"), "{text}");
-    assert!(text.contains("b-secret/SKILL.md:\n  - "), "{text}");
+    let rejected = format!(
+        "{}:\n  - ",
+        Path::new("b-secret").join("SKILL.md").display()
+    );
+    assert!(text.contains(&rejected), "{text}");
     assert!(
         text.contains("2 published, 0 skipped, 1 rejected"),
         "{text}"
