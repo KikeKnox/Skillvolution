@@ -125,7 +125,7 @@ command updates the binary, and setup is idempotent.
 
 | Variable | Effect |
 |---|---|
-| `SKILLVOLUTION_VERSION=0.4.1` | Pin a release (`0.4.1` or `v0.4.1`); default is the latest |
+| `SKILLVOLUTION_VERSION=0.6.0` | Pin a release (`0.6.0` or `v0.6.0`); default is the latest |
 | `SKILLVOLUTION_NO_SETUP=1` | Install only; skip `skillvolution setup` |
 | `SKILLVOLUTION_NO_INPUT=1` | No questions: configure every detected client and keep the default database path |
 | `SKILLVOLUTION_INSTALL_DIR=DIR` | Install somewhere other than `~/.local/bin` |
@@ -204,13 +204,20 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 ## Subagents
 
 The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`) that
-`skillvolution agents add` generates for Claude Code and OpenCode (built-in `sv-high`,
-`sv-mid` and `sv-low` ship with the binary; `agents models set` maps each tier to a model per
-client). `agents sync` is a dry run until `--apply`, hand-edited files are never overwritten
-without `--force` (after a backup), listed skills are pinned to the version seen when the file
-was generated (`agents sync` flags newer ones), a restricted agent cannot delegate to other
-subagents, and nothing is generated automatically. See
-[docs/cli.md#agents](docs/cli.md#agents) and [docs/architecture.md#agents](docs/architecture.md#agents).
+`skillvolution agents add` generates for Claude Code and OpenCode.
+
+- **Tiers and models.** Built-in `sv-high`, `sv-mid`, and `sv-low` ship with the binary;
+  `agents models set` maps each tier to a model per client.
+- **Nothing automatic.** Agent files are generated only on request, and `agents sync` is a
+  dry run until `--apply`.
+- **Your edits are safe.** Hand-edited files are never overwritten without `--force`, and
+  then only after a backup.
+- **Pinned skills.** Listed skills are pinned to the version seen when the file was
+  generated; `agents sync` flags newer ones.
+- **No nesting.** A restricted agent cannot delegate to other subagents.
+
+See [docs/cli.md#agents](docs/cli.md#agents) and
+[docs/architecture.md#agents](docs/architecture.md#agents).
 
 ## Publishing a skill manually
 
@@ -254,7 +261,7 @@ finds at once, together with the template.
 ```bash
 skillvolution publish ./SKILL.md                      # new global skill
 skillvolution publish ./my-skill --scope project      # PATH may be a directory holding SKILL.md
-skillvolution publish ~/.claude/skills                # bulk: every */SKILL.md one level down
+skillvolution publish ~/.claude/skills                # bulk: every */SKILL.md and */AGENT.md one level down
 skillvolution get my-skill-id > SKILL.md              # fetch an existing skill, edit it...
 skillvolution publish ./SKILL.md --replace            # ...and publish the next version
 ```
@@ -264,7 +271,8 @@ skillvolution publish ./SKILL.md --replace            # ...and publish the next 
   proven version (one with more helped than failed reports). The replaced version keeps
   half its record in ranking.
 - **Bulk import.** `publish DIR` on a directory with no `SKILL.md` of its own publishes
-  every `DIR/*/SKILL.md` independently. A file without a `name` takes its directory's
+  every `DIR/*/SKILL.md` and `DIR/*/AGENT.md` independently
+  ([agent files](docs/cli.md#publishing-an-agentmd)). A file without a `name` takes its directory's
   name, and existing ids are skipped unless you pass `--replace`. It prints one
   `[published]`/`[skipped]`/`[rejected]` line per file and ends with a summary. The exit
   code is 1 if any file was rejected. `--id` isn't allowed in bulk mode.
@@ -565,8 +573,10 @@ It deliberately keeps:
 
 No, that's the review reminder working. `hook stop` scans the session transcript from
 the offset recorded for that session. It looks for the last piece of work: a file-edit
-tool call (`Edit`, `Write`, `MultiEdit`, or `NotebookEdit`; `Bash` doesn't count) or a
-successful `get_skill`, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker). When that work comes after the last *successful*
+tool call (`Edit`, `Write`, `MultiEdit`, or `NotebookEdit`; `Bash` doesn't count), a
+successful `get_skill`, or a delegation to a managed vault agent (Claude Code
+`Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the
+skillvolution marker). When that work comes after the last *successful*
 `publish_skill`/`report_skill_outcome` call, the hook asks for a report on every loaded
 skill. A rejected review call doesn't count, and neither does a failed `get_skill`.
 
