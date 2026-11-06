@@ -6,6 +6,7 @@ mod common;
 mod cursor;
 mod devin;
 mod fs_safe;
+pub(crate) use fs_safe::MANAGED_MARKER;
 mod gemini;
 mod global;
 mod hooks;
@@ -220,6 +221,41 @@ fn print_install_diff(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> 
     Ok(())
 }
 
+/// Whether `kind` is configured globally or, with `project`, in that project too (the
+/// global scope alone when `None`). Only paths matter to `is_configured`, so fixed
+/// placeholders stand in for the binary and database. When `changes` can't even be
+/// computed (an unparsable client config), falls back to the managed `evolution` skill
+/// file, so a broken config doesn't read as "not configured".
+pub(crate) fn client_configured(kind: ClientKind, project: Option<&Path>) -> bool {
+    let (bin, db) = (Path::new("/skillvolution"), Path::new("/skillvolution.db"));
+    let project_scope = project.map(|dir| Scope::Project {
+        dir,
+        key: "project",
+    });
+    [Some(Scope::Global), project_scope]
+        .into_iter()
+        .flatten()
+        .any(|scope| match kind.changes(scope, bin, db) {
+            Ok(changes) => is_configured(&changes),
+            Err(_) => {
+                let dir = match (kind, scope) {
+                    (_, Scope::Global) => kind.global_dir().ok(),
+                    (ClientKind::ClaudeCode, Scope::Project { dir, .. }) => {
+                        Some(dir.join(".claude"))
+                    }
+                    (ClientKind::OpenCode, Scope::Project { dir, .. }) => {
+                        Some(dir.join(".opencode"))
+                    }
+                    _ => None,
+                };
+                dir.is_some_and(|dir| {
+                    let skill = dir.join("skills").join("evolution").join("SKILL.md");
+                    fs_safe::is_our_skill(&skill, "evolution").unwrap_or(false)
+                })
+            }
+        })
+}
+
 /// Makes `bin` absolute without resolving symlinks: package managers (Homebrew, Nix,
 /// mise) expose a stable symlink into a versioned store path, and recording the
 /// resolved target would break every config on the next upgrade.
@@ -293,11 +329,26 @@ fn write_clients(clients: Clients, scope: Scope, bin: &Path, db: &Path) -> Resul
     write_all(edits)
 }
 
+/// Saves the current content of `path` as the newest numbered `.skillvolution.bak`
+/// backup (a no-op when the file does not exist).
+pub(crate) fn backup_file(path: &Path) -> Result<()> {
+    match fs_safe::read_optional_bytes(path)? {
+        Some(old) => fs_safe::backup(path, &old),
+        None => Ok(()),
+    }
+}
+
 /// Validates every write target before touching any of them, so a bad target further
 /// down the list leaves everything already-checked untouched. If an edit still fails,
 /// the edits applied before it are put back as they were (see `roll_back`).
 pub(crate) fn write_all(edits: Vec<Edit>) -> Result<()> {
-    for edit in &edits {
+    validate_edits(&edits)?;
+    write_validated(edits)
+}
+
+/// The checks `write_all` makes before touching anything.
+pub(crate) fn validate_edits(edits: &[Edit]) -> Result<()> {
+    for edit in edits {
         let path = edit.path();
         fs_safe::check_target(path)?;
         fs_safe::check_backups(path)?;
@@ -307,6 +358,10 @@ pub(crate) fn write_all(edits: Vec<Edit>) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn write_validated(edits: Vec<Edit>) -> Result<()> {
     // Each edited path with its previous content (`None`: it didn't exist).
     let mut written: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
     for edit in edits {

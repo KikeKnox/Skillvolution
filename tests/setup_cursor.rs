@@ -3,6 +3,9 @@
 //! run the built binary as a subprocess (like `tests/setup_global.rs`), since HOME and
 //! stdin are process-global/process-local inputs an in-process call can't isolate.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use skillvolution::setup;
 
 use clap::Parser;
@@ -323,7 +326,7 @@ impl GlobalEnv {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::cli();
         cmd.arg("--db")
             .arg(&self.db)
             .arg("setup")
@@ -396,7 +399,7 @@ fn global_cursor_writes_expected_files_without_a_rule_file() {
 
 /// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
 fn run_hook(db: &Path, args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let mut child = support::cli()
         .arg("--db")
         .arg(db)
         .arg("hook")

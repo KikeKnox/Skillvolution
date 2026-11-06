@@ -2,7 +2,10 @@ use super::{Vault, split_tags};
 use anyhow::{Result, ensure};
 use rusqlite::named_params;
 
-const VISIBLE: &str = "c.deprecated = 0 AND (c.scope IS NULL OR c.scope = :project)";
+/// Visible from `:project`, of `:kind` (`skill` or `agent`): agents never show
+/// up in skill search, the catalog, or prompt suggestions.
+const VISIBLE: &str =
+    "c.kind = :kind AND c.deprecated = 0 AND (c.scope IS NULL OR c.scope = :project)";
 /// Text relevance as a nonnegative number: `bm25` scores are negative (more
 /// negative = better match), so the sign is flipped once, here, and every
 /// query below reads "larger strength is a better match". The clamp makes the
@@ -106,10 +109,25 @@ fn match_expression(query: &str) -> Option<String> {
 }
 
 impl Vault {
+    /// Searches skills only; see `search_kind`.
     pub fn search(
         &self,
         query: &str,
         project: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SearchPage> {
+        self.search_kind(query, project, "skill", limit, offset)
+    }
+
+    /// Searches the entries of `kind` (`skill` or `agent`). Agents are not in the FTS index,
+    /// so a non-empty query for `agent` returns nothing; only the empty-query listing
+    /// (which reads `current_skills`) works for them, and no caller needs more.
+    pub fn search_kind(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        kind: &str,
         limit: i64,
         offset: i64,
     ) -> Result<SearchPage> {
@@ -131,7 +149,7 @@ impl Vault {
                      LIMIT :limit OFFSET :offset"
                 ))?
                 .query_map(
-                    named_params! {":project": project, ":limit": limit, ":offset": offset},
+                    named_params! {":project": project, ":kind": kind, ":limit": limit, ":offset": offset},
                     metadata_row,
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -139,7 +157,7 @@ impl Vault {
             if skills.is_empty() && offset > 0 {
                 let total = self.conn.query_row(
                     &format!("SELECT COUNT(*) FROM current_skills c WHERE {VISIBLE}"),
-                    named_params! {":project": project},
+                    named_params! {":project": project, ":kind": kind},
                     |row| row.get(0),
                 )?;
                 (skills, total)
@@ -165,6 +183,7 @@ impl Vault {
                 .query_map(
                     named_params! {
                         ":project": project,
+                        ":kind": kind,
                         ":expression": expression,
                         ":limit": limit,
                         ":offset": offset,
@@ -183,7 +202,7 @@ impl Vault {
                          SELECT COUNT(*) FROM hits h JOIN current_skills c ON c.id = h.id
                          WHERE {VISIBLE}"
                     ),
-                    named_params! {":project": project, ":expression": expression},
+                    named_params! {":project": project, ":kind": kind, ":expression": expression},
                     |row| row.get(0),
                 )?;
                 (skills, total)

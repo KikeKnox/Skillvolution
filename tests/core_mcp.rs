@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     path::Path,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
 };
 use support::{Draft, git_repo};
 
@@ -34,7 +34,7 @@ impl McpServer {
     }
 
     fn spawn_in(db: &Path, project: Option<&str>, cwd: &Path, env: &[(&str, &str)]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut command = support::cli();
         command
             .args(["--db", db.to_str().unwrap(), "serve"])
             .env_remove("CLAUDE_PROJECT_DIR")
@@ -292,6 +292,65 @@ fn report_skill_outcome_records_it_for_a_visible_published_revision() {
     let vault = Vault::open(&db).unwrap();
     let log = vault.outcomes("skill").unwrap();
     assert_eq!(log[0].note, "worked well");
+}
+
+#[test]
+fn get_skill_refuses_agents_and_records_no_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    drop(vault);
+
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let get = server.call(2, "get_skill", json!({"id": "reviewer"}));
+    assert_eq!(get["result"]["isError"], true);
+    let text = get["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "reviewer is an agent, not a skill; delegate to it as a subagent instead \
+             (the user installs it with `skillvolution agents add reviewer`)."
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn publish_skill_refuses_an_id_that_is_an_agent_and_leaves_it_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("skills.db");
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    let before = vault.inspect("reviewer", 1).unwrap();
+    drop(vault);
+
+    let mut server = McpServer::spawn(&db, None);
+    server.initialize("2025-06-18");
+    let publish = server.call(
+        2,
+        "publish_skill",
+        json!({
+            "id": "reviewer",
+            "description": "Use when reviewing",
+            "content": support::sectioned("Overwrite attempt"),
+            "evidence": "Observed / Tried / Result",
+            "expected_version": 1,
+            "verdict": "keep global",
+            "verdict_reason": "Verified and reusable"
+        }),
+    );
+    assert_eq!(publish["result"]["isError"], true);
+    let text = publish["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("already exists as an agent"), "{text}");
+    drop(server);
+
+    let vault = Vault::open(&db).unwrap();
+    assert_eq!(vault.latest_version("reviewer").unwrap(), 1);
+    let after = vault.inspect("reviewer", 1).unwrap();
+    assert_eq!(after.content, before.content);
+    assert_eq!(after.description, before.description);
+    assert!(vault.inspect("reviewer", 2).is_err());
 }
 
 #[test]

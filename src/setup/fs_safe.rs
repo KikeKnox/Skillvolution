@@ -21,7 +21,7 @@ fn skill_owner_prefix(name: &str) -> String {
 /// Shared prefix of every managed-file marker (the Evolution skill's, the OpenCode
 /// plugin's). A file whose old and new content both carry it is entirely ours, so
 /// replacing it needs no backup.
-const MANAGED_MARKER: &str = "skillvolution-managed:";
+pub(crate) const MANAGED_MARKER: &str = "skillvolution-managed:";
 
 /// Backups kept per file: `.skillvolution.bak` (newest), `.bak.1`, `.bak.2` (oldest).
 const KEPT_BACKUPS: usize = 3;
@@ -422,7 +422,7 @@ pub fn check_backups(path: &Path) -> Result<()> {
 /// Saves `old` (the current content of `path`) as the newest backup, shifting the older
 /// ones down a slot and dropping the oldest. The backup is created with `path`'s mode,
 /// so a private file's copy is never readable by others, even briefly.
-fn backup(path: &Path, old: &[u8]) -> Result<()> {
+pub fn backup(path: &Path, old: &[u8]) -> Result<()> {
     check_backups(path)?;
     let slots = backup_paths(path);
     for index in (1..slots.len()).rev() {

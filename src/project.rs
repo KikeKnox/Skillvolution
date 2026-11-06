@@ -9,6 +9,14 @@ pub fn detect(dir: &Path) -> Option<String> {
     key_from_dir(&git_root(ancestor))
 }
 
+/// The nearest ancestor of `dir` (itself included) holding a `.git` entry. A worktree
+/// stays the worktree, unlike the vault key's `detect`, which resolves to the main repo.
+pub fn repo_dir(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 /// Resolves `dir` (which contains a `.git` entry) to the actual project root.
 ///
 /// A plain `.git` directory means `dir` is the root. A `.git` *file* (used by

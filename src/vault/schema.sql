@@ -4,7 +4,10 @@ CREATE TABLE skills (
     deprecated INTEGER NOT NULL DEFAULT 0 CHECK(deprecated IN (0, 1)),
     -- rowid of this skill's skills_fts entry, so republishing replaces it by
     -- rowid instead of scanning the whole index for the id.
-    fts_rowid INTEGER
+    fts_rowid INTEGER,
+    -- 'agent' entries are subagent definitions generated as native files, never
+    -- served as skills; fixed at first publication, like scope.
+    kind TEXT NOT NULL DEFAULT 'skill' CHECK(kind IN ('skill', 'agent'))
 );
 
 CREATE TABLE revisions (
@@ -19,6 +22,8 @@ CREATE TABLE revisions (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     reviewed_at TEXT,
     review_note TEXT,
+    -- Agent revisions: JSON {role, tier, effort?, tools?, skills?}; NULL for skills.
+    meta TEXT,
     PRIMARY KEY (id, version)
 );
 
@@ -93,7 +98,7 @@ CREATE VIRTUAL TABLE skills_fts USING fts5(
 -- published version, so search can carry part of a skill's track record
 -- across a republish instead of resetting it to zero.
 CREATE VIEW current_skills AS
-SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated,
+SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated, s.kind, r.meta,
     (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
     (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
     (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable,
@@ -107,3 +112,13 @@ FROM skills s
 JOIN revisions r ON r.id = s.id
 WHERE r.status = 'published'
     AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
+
+-- Which model each agent tier maps to, per client. Machine-local configuration
+-- (model availability depends on the machine): not exported or imported.
+CREATE TABLE agent_models (
+    client TEXT NOT NULL,
+    tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+    model TEXT NOT NULL,
+    effort TEXT,
+    PRIMARY KEY (client, tier)
+);

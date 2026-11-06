@@ -72,7 +72,7 @@ sanitized directory name differs (see
   output, or a missing configured binary, is the usual cause; `doctor --fix` re-applies
   setup for that client.
 - For Claude Code the Stop hook only blocks when the transcript contains an
-  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call or a successful `get_skill` after the
+  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call, a successful `get_skill`, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker) after the
   last *successful* `publish_skill`/`report_skill_outcome` — `Bash` and other tools
   don't count as work, a `get_skill` that returned an error (unknown id) doesn't count
   as a load, and a review call that returned an error doesn't count as a review.

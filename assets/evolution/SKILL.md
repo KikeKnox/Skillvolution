@@ -2,7 +2,7 @@
 name: evolution
 description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills matching this request" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
 ---
-<!-- skillvolution-managed:evolution:v11 -->
+<!-- skillvolution-managed:evolution:v13 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
@@ -25,6 +25,8 @@ Call `report_skill_outcome` once for every skill you loaded with `get_skill`, wi
 - `helped`: it worked as written. Note what it saved you.
 - `failed`: name the specific wrong or missing step and what actually worked. This is the most valuable signal in the vault.
 - `not_applicable`: loaded, but irrelevant to the task. Note why it looked relevant.
+
+After delegating to a subagent whose file (`.claude/agents/<id>.md` or `.opencode/agents/<id>.md` in the project, or `~/.claude/agents/<id>.md` or `~/.config/opencode/agents/<id>.md` per user) carries `<!-- skillvolution-managed:agent:<id>:v<N>:... -->`, also call `report_skill_outcome` with that id and version `N` read from the marker, with the same three results. Skip the built-in workers `sv-high`, `sv-mid` and `sv-low`: they have no vault row.
 
 ## 3. Reflect (after the work is done)
 
@@ -116,6 +118,7 @@ Call `publish_skill` with id, description, tags, content, scope, `evidence`, `ex
 
 - Never run `skillvolution publish` yourself to put a lesson in the vault: it skips the fresh evaluator. Agent lessons go through step 5 and `publish_skill`. The only exception is when the user explicitly asks you to publish a specific SKILL.md they wrote or approved.
 - When the user wants to add or edit a skill by hand, point them to `skillvolution get <id>`, edit the file, then `skillvolution publish <file> --replace`; `skillvolution publish <dir>` imports a whole directory of skills at once.
+- Never run `skillvolution agents add`, `agents remove` or `agents sync --apply` yourself unless the user explicitly asks; subagent files are installed and updated by the user. Agents cannot be published with `publish_skill` (yet): only the user publishes an `AGENT.md`, with `skillvolution publish`. Never publish an agent prompt as a skill.
 - `skillvolution outcomes --unreported` lists skills that were loaded without an outcome report; use it when the user asks about vault health.
 
 ## Boundaries

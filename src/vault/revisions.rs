@@ -1,17 +1,23 @@
+use super::agent::{AgentMeta, parse_meta, skill_unavailable, validate_agent};
 use super::{
     Vault, join_tags, split_tags, validate_id, validate_no_secrets, validate_sections,
     validate_single_line, validate_tags, validate_text,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const REVISION_SELECT: &str = "SELECT r.id, r.version, s.scope, r.description, r.tags, r.content,
-    r.evidence, r.expected_version, r.status, r.created_at, r.reviewed_at, r.review_note
+    r.evidence, r.expected_version, r.status, r.created_at, r.reviewed_at, r.review_note,
+    s.kind, r.meta
     FROM revisions r JOIN skills s ON s.id = r.id";
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 /// The only evaluator verdicts that may be published; `discard` and anything
 /// else is refused.
 const KEEP_VERDICTS: [&str; 2] = ["keep global", "keep project"];
+
+fn is_skill(kind: &str) -> bool {
+    kind == "skill"
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Revision {
@@ -27,6 +33,11 @@ pub struct Revision {
     pub created_at: String,
     pub reviewed_at: Option<String>,
     pub review_note: Option<String>,
+    /// `skill` or `agent`; left out of JSON for skills.
+    #[serde(skip_serializing_if = "is_skill")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AgentMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -38,6 +49,11 @@ pub struct SkillView {
     pub description: String,
     pub tags: Vec<String>,
     pub content: String,
+    /// `skill` or `agent`; left out of JSON for skills.
+    #[serde(skip_serializing_if = "is_skill")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AgentMeta>,
 }
 
 pub struct Proposal<'a> {
@@ -71,6 +87,8 @@ fn revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Revision> {
         created_at: row.get(9)?,
         reviewed_at: row.get(10)?,
         review_note: row.get(11)?,
+        kind: row.get(12)?,
+        meta: parse_meta(row.get(13)?)?,
     })
 }
 
@@ -150,14 +168,42 @@ fn render(revision: &Revision) -> String {
         revision.tags.join(", "),
         revision.content
     );
+    if let Some(meta) = &revision.meta {
+        // serde_json can't fail on this plain struct.
+        text = format!(
+            "meta: {}\n{text}",
+            serde_json::to_string(meta).unwrap_or_default()
+        );
+    }
     if !text.ends_with('\n') {
         text.push('\n');
     }
     text
 }
 
+/// The error for reusing an id whose stored entry is of another kind.
+pub fn kind_conflict(id: &str, stored_kind: &str) -> String {
+    let article = if stored_kind == "agent" { "an" } else { "a" };
+    format!("{id} already exists as {article} {stored_kind}; choose a different id")
+}
+
 impl Vault {
     pub fn propose(&mut self, proposal: &Proposal<'_>) -> Result<Revision> {
+        self.propose_entry(proposal, None)
+    }
+
+    /// Publishes an agent: `content` needs `## Output contract` instead of the
+    /// skill sections, and `meta` is validated and stored with the revision. An
+    /// id is a skill or an agent for good, fixed at its first publication.
+    pub fn propose_agent(&mut self, proposal: &Proposal<'_>, meta: &AgentMeta) -> Result<Revision> {
+        self.propose_entry(proposal, Some(meta))
+    }
+
+    fn propose_entry(
+        &mut self,
+        proposal: &Proposal<'_>,
+        meta: Option<&AgentMeta>,
+    ) -> Result<Revision> {
         let Proposal {
             id,
             description,
@@ -171,10 +217,20 @@ impl Vault {
             replaces_proven,
         } = *proposal;
         validate_id(id)?;
+        if meta.is_some()
+            && let Some(reason) = super::reserved_agent_id(id)
+        {
+            bail!("agent id {id} is reserved: {reason}");
+        }
         validate_single_line("description", description, 280)?;
         validate_tags(tags)?;
         validate_text("content", content, 65_536)?;
-        validate_sections(content)?;
+        match meta {
+            Some(meta) => validate_agent(content, meta)?,
+            None => validate_sections(content)?,
+        }
+        let kind = if meta.is_some() { "agent" } else { "skill" };
+        let meta_json = meta.map(serde_json::to_string).transpose()?;
         validate_text("evidence", evidence, 16_384)?;
         validate_single_line("verdict_reason", verdict_reason, 280)?;
         let verdict = verdict.trim().to_ascii_lowercase();
@@ -207,18 +263,42 @@ impl Vault {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT OR IGNORE INTO skills (id, scope) VALUES (?1, ?2)",
-            params![id, scope],
+            "INSERT OR IGNORE INTO skills (id, scope, kind) VALUES (?1, ?2, ?3)",
+            params![id, scope, kind],
         )?;
-        let stored_scope: Option<String> =
-            tx.query_row("SELECT scope FROM skills WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })?;
+        let (stored_scope, stored_kind): (Option<String>, String) = tx.query_row(
+            "SELECT scope, kind FROM skills WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(stored_kind == kind, "{}", kind_conflict(id, &stored_kind));
         ensure!(
             stored_scope.as_deref() == scope,
-            "skill {id} already exists with scope {}; choose a different id",
+            "{kind} {id} already exists with scope {}; choose a different id",
             stored_scope.as_deref().unwrap_or("global")
         );
+        if let Some(meta) = meta {
+            let (mut bad, mut global) = (Vec::new(), Vec::new());
+            for skill in &meta.skills {
+                match skill_unavailable(&tx, skill, scope)? {
+                    Some(reason) if reason.starts_with("project-scoped;") => {
+                        global.push(format!("skills: `{skill}` is {reason}"));
+                    }
+                    Some(reason) => bad.push(format!("{skill} ({reason})")),
+                    None => {}
+                }
+            }
+            if !bad.is_empty() {
+                global.insert(
+                    0,
+                    format!(
+                        "skills: must be published skills visible from the agent's scope; not available: {}",
+                        bad.join(", ")
+                    ),
+                );
+            }
+            ensure!(global.is_empty(), "{}", global.join("; "));
+        }
         let current = current_version(&tx, id)?;
         ensure!(
             current == expected_version,
@@ -238,11 +318,11 @@ impl Vault {
         let review_note = format!("{verdict}: {verdict_reason}");
         let revision = tx.query_row(
             &format!(
-                "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status, reviewed_at, review_note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'published', {NOW}, ?8)
+                "INSERT INTO revisions (id, version, description, tags, content, evidence, expected_version, status, reviewed_at, review_note, meta)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'published', {NOW}, ?8, ?9)
                  RETURNING description, tags, content, evidence, status, created_at, reviewed_at, review_note"
             ),
-            params![id, version, description, join_tags(tags), content, evidence, expected_version, review_note],
+            params![id, version, description, join_tags(tags), content, evidence, expected_version, review_note, meta_json],
             |row| {
                 Ok(Revision {
                     id: id.to_owned(),
@@ -257,16 +337,21 @@ impl Vault {
                     created_at: row.get(5)?,
                     reviewed_at: row.get(6)?,
                     review_note: row.get(7)?,
+                    kind: kind.to_owned(),
+                    meta: meta.cloned(),
                 })
             },
         )?;
-        replace_fts_row(
-            &tx,
-            id,
-            &revision.description,
-            &revision.tags.join(" "),
-            &revision.content,
-        )?;
+        // Agents are never indexed: they would skew the skills' bm25 statistics.
+        if meta.is_none() {
+            replace_fts_row(
+                &tx,
+                id,
+                &revision.description,
+                &revision.tags.join(" "),
+                &revision.content,
+            )?;
+        }
         tx.commit()?;
         Ok(revision)
     }
@@ -280,7 +365,8 @@ impl Vault {
         };
         self.conn
             .query_row(
-                "SELECT r.id, r.version, s.scope, s.deprecated, r.description, r.tags, r.content
+                "SELECT r.id, r.version, s.scope, s.deprecated, r.description, r.tags, r.content,
+                        s.kind, r.meta
                  FROM revisions r JOIN skills s ON s.id = r.id
                  WHERE r.id = ?1 AND r.version = ?2 AND r.status = 'published'
                    AND (s.scope IS NULL OR s.scope = ?3)",
@@ -294,6 +380,8 @@ impl Vault {
                         description: row.get(4)?,
                         tags: split_tags(&row.get::<_, String>(5)?),
                         content: row.get(6)?,
+                        kind: row.get(7)?,
+                        meta: parse_meta(row.get(8)?)?,
                     })
                 },
             )
@@ -309,6 +397,17 @@ impl Vault {
     pub fn published_version(&self, id: &str) -> Result<i64> {
         validate_id(id)?;
         current_version(&self.conn, id)
+    }
+
+    /// The stored kind (`skill` or `agent`) of `id`, or `None` when unknown.
+    pub fn kind(&self, id: &str) -> Result<Option<String>> {
+        validate_id(id)?;
+        Ok(self
+            .conn
+            .query_row("SELECT kind FROM skills WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?)
     }
 
     /// The highest version of `id` in any status, so `show` can default to the

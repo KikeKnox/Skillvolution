@@ -3,6 +3,9 @@
 //! a subprocess with a fake `claude` on PATH (like `tests/setup_global.rs`), since HOME
 //! and PATH are process-global.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use skillvolution::setup;
 
 use clap::Parser;
@@ -318,9 +321,8 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
     }));
     fs::write(claude_dir.join("settings.json"), &claude_settings).unwrap();
 
-    use std::process::Command;
     let command = |args: &[&str]| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::cli();
         cmd.arg("--db")
             .arg(&db)
             .arg("setup")

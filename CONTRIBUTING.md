@@ -50,6 +50,8 @@ Tests run on Linux, macOS, and Windows in CI; fmt/clippy run on Linux only.
 | `setup_global.rs` | Global setup via the built binary with `HOME`/`XDG_CONFIG_HOME`/`CLAUDE_CONFIG_DIR`/`PATH` pinned |
 | `setup_remove.rs` | `setup --remove` and `setup --dry-run` |
 | `setup_codex.rs`, `setup_gemini.rs`, `setup_cursor.rs` | Per-client setup: project scope in-process, global scope via the binary |
+| `agents_cli.rs` | `agents` subcommands, `list --kind`, `get`/`publish` of agents, via the built binary |
+| `agents_generate.rs` | Agent file rendering (Claude Code, OpenCode), markers, `add`/`sync`/`remove` against fixtures in `tests/fixtures/agents/` |
 | `plugin.rs` | OpenCode plugin: project-key propagation and syntax sanity |
 | `doctor.rs` | `doctor` checks via the built binary |
 | `location.rs` | `SKILLVOLUTION_DB` precedence and `relocate`, via the built binary |
@@ -68,6 +70,7 @@ binary.
   (`skillvolution-managed:evolution:vN`); bump `N` whenever the file
   changes — it's what `setup` uses to recognize and refresh its own
   installed copies.
+- Bump `BUILTIN_VERSION` (`src/agents.rs`) whenever `assets/agents/*/AGENT.md` changes.
 - `CLAUDE.md` is gitignored — don't commit it.
 - Client configs are written atomically with backup + rollback; preserve
   that property (see `setup/fs_safe.rs`, `setup/mod.rs::write_all`).

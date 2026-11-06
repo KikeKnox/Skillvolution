@@ -5,7 +5,7 @@
 mod support;
 
 use skillvolution::vault::Vault;
-use std::process::{Command, Output};
+use std::process::Output;
 use support::Draft;
 
 fn open() -> (tempfile::TempDir, Vault) {
@@ -35,7 +35,13 @@ fn purge_unknown_skill_or_version_errors() {
             .contains("unknown skill: missing")
     );
     Draft::new("skill-known").propose(&mut vault);
-    assert!(vault.purge("skill-known", Some(2)).is_err());
+    assert!(
+        vault
+            .purge("skill-known", Some(2))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown version: skill-known v2")
+    );
 }
 
 #[test]
@@ -77,8 +83,20 @@ fn purge_whole_skill_removes_search_get_and_outcomes() {
     assert_eq!(report.revisions, 1);
     assert_eq!(report.outcomes, 1);
 
-    assert!(vault.get("skill-b", None, None).is_err());
-    assert!(vault.outcomes("skill-b").is_err());
+    assert!(
+        vault
+            .get("skill-b", None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("no published skill skill-b")
+    );
+    assert!(
+        vault
+            .outcomes("skill-b")
+            .unwrap_err()
+            .to_string()
+            .contains("unknown skill: skill-b")
+    );
     assert_eq!(vault.search("skill-b", None, 20, 0).unwrap().total, 0);
 }
 
@@ -149,7 +167,13 @@ fn purge_succeeds_uncompacted_while_another_connection_reads() {
     let report = vault.purge("busy-skill", None).unwrap();
     assert!(report.skill_removed);
     assert!(!report.compacted);
-    assert!(vault.get("busy-skill", None, None).is_err());
+    assert!(
+        vault
+            .get("busy-skill", None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("no published skill busy-skill")
+    );
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -300,7 +324,13 @@ fn conflicting_revision_aborts_the_whole_import_with_no_partial_writes() {
         .to_string();
     assert!(error.contains("skill-f"), "{error}");
     assert!(error.contains("v1"), "{error}");
-    assert!(vault.get("skill-h", None, None).is_err());
+    assert!(
+        vault
+            .get("skill-h", None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("no published skill skill-h")
+    );
 }
 
 #[test]
@@ -495,11 +525,39 @@ fn import_rejects_an_unsupported_document_version() {
     let (_dir, mut vault) = open();
     let document = serde_json::json!({
         "format": "skillvolution-export",
-        "version": 2,
+        "version": 3,
         "exported_at": "2024-01-01T00:00:00Z",
         "skills": []
     });
-    assert!(vault.import_json(&document.to_string()).is_err());
+    let error = vault
+        .import_json(&document.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unsupported export document"), "{error}");
+}
+
+#[test]
+fn import_rejects_an_entry_whose_kind_differs_from_the_existing_one() {
+    let (_dir, mut skills) = open();
+    Draft::new("shared-id").propose(&mut skills);
+    let (_agent_dir, mut agents) = open();
+    Draft::new("shared-id").publish_agent(&mut agents);
+
+    let skill_doc = skills.export_json().unwrap();
+    let agent_doc = agents.export_json().unwrap();
+    for (target, document, existing, incoming) in [
+        (&mut skills, agent_doc, "a skill", "an agent"),
+        (&mut agents, skill_doc, "an agent", "a skill"),
+    ] {
+        let before = without_exported_at(&target.export_json().unwrap());
+        let error = target.import_json(&document).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("shared-id already exists as {existing};"))
+                && error.contains(&format!("the import file has it as {incoming}")),
+            "{error}"
+        );
+        assert_eq!(without_exported_at(&target.export_json().unwrap()), before);
+    }
 }
 
 // --- backup ----------------------------------------------------------------
@@ -527,7 +585,7 @@ fn backup_produces_an_openable_copy_with_the_same_content() {
 // --- CLI ---------------------------------------------------------------
 
 fn run(db: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    support::cli()
         .arg("--db")
         .arg(db)
         .args(args)
@@ -611,4 +669,86 @@ fn cli_export_then_import_roundtrips_through_files() {
 
     let target = Vault::open(&target_db).unwrap();
     assert!(target.get("cli-export", None, None).is_ok());
+}
+
+#[test]
+fn import_refuses_reserved_agent_ids_but_not_skills_with_those_ids() {
+    let (_dir, mut vault) = open();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    Draft::new("explore").publish(&mut vault);
+    let json = vault.export_json().unwrap();
+    let (_other_dir, mut target) = open();
+    for id in ["sv-mid", "plan"] {
+        let renamed = json.replace("\"reviewer\"", &format!("\"{id}\""));
+        let error = target.import_json(&renamed).unwrap_err().to_string();
+        assert!(error.contains("reserved"), "{id}: {error}");
+    }
+    target.import_json(&json).unwrap();
+}
+
+#[test]
+fn purge_refuses_a_skill_listed_by_an_agent_unless_forced() {
+    let (_dir, mut vault) = open();
+    Draft::new("used-skill").publish(&mut vault);
+    let meta = skillvolution::vault::AgentMeta {
+        role: "subagent".into(),
+        tier: "mid".into(),
+        effort: None,
+        tools: None,
+        skills: vec!["used-skill".into()],
+    };
+    let draft = Draft::new("user-agent").raw_content("## Output contract\nFindings.\n");
+    vault.propose_agent(&draft.proposal(), &meta).unwrap();
+    let error = vault.purge("used-skill", None).unwrap_err().to_string();
+    assert!(
+        error.contains("user-agent") && error.contains("--force"),
+        "{error}"
+    );
+    assert!(
+        vault
+            .purge_forced("used-skill", None)
+            .unwrap()
+            .skill_removed
+    );
+}
+
+#[test]
+fn purge_version_checks_for_a_remaining_published_revision() {
+    let (dir, mut vault) = open();
+    Draft::new("used-skill").publish(&mut vault);
+    Draft::new("used-skill")
+        .expected_version(1)
+        .propose(&mut vault);
+    let meta = skillvolution::vault::AgentMeta {
+        role: "subagent".into(),
+        tier: "mid".into(),
+        effort: None,
+        tools: None,
+        skills: vec!["used-skill".into()],
+    };
+    let draft = Draft::new("user-agent").raw_content("## Output contract\nFindings.\n");
+    vault.propose_agent(&draft.proposal(), &meta).unwrap();
+    // A legacy superseded v1 beside the published v2.
+    rusqlite::Connection::open(dir.path().join("skills.db"))
+        .unwrap()
+        .execute(
+            "UPDATE revisions SET status = 'superseded' WHERE id = 'used-skill' AND version = 1",
+            [],
+        )
+        .unwrap();
+    let error = vault.purge("used-skill", Some(2)).unwrap_err().to_string();
+    assert!(error.contains("user-agent"), "{error}");
+    vault.purge("used-skill", Some(1)).unwrap();
+}
+
+#[test]
+fn import_rejects_agent_entries_with_bad_sections() {
+    let (_dir, mut vault) = open();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    let json = vault.export_json().unwrap();
+    let broken = json.replace("## Output contract", "## Result");
+    let (_other_dir, mut target) = open();
+    let error = target.import_json(&broken).unwrap_err().to_string();
+    assert!(error.contains("## Output contract"), "{error}");
+    target.import_json(&json).unwrap();
 }

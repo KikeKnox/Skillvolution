@@ -49,7 +49,7 @@ fn tools() -> Value {
         },
         {
             "name": "report_skill_outcome",
-            "description": "After applying a skill loaded with get_skill, record whether it helped. Failures with a concrete note are the most valuable signal for improving skills.",
+            "description": "After applying a skill loaded with get_skill, record whether it helped. Failures with a concrete note are the most valuable signal for improving skills. Also takes a vault agent id, after delegating to that agent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -333,6 +333,15 @@ impl Server {
             "get_skill" => {
                 let args: GetArgs = serde_json::from_value(arguments).map_err(parse_error)?;
                 let skill = self.vault.get(&args.id, args.version, project)?;
+                if skill.kind == "agent" {
+                    return Err(anyhow::anyhow!(
+                        "{} is an agent, not a skill; delegate to it as a subagent instead \
+                         (the user installs it with `skillvolution agents add {}`).",
+                        skill.id,
+                        skill.id
+                    )
+                    .into());
+                }
                 // Best effort: load telemetry must never fail the load itself.
                 if let Err(error) = self.vault.record_load(&skill.id, skill.version, project) {
                     eprintln!(
@@ -376,6 +385,13 @@ impl Server {
                         .into());
                     }
                 };
+                if self.vault.kind(&args.id)?.as_deref() == Some("agent") {
+                    return Err(anyhow::anyhow!(
+                        "{}; agents are published only by the user with `skillvolution publish`",
+                        crate::vault::kind_conflict(&args.id, "agent")
+                    )
+                    .into());
+                }
                 let revision = self.vault.propose(&Proposal {
                     id: &args.id,
                     description: &args.description,

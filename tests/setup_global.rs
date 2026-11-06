@@ -3,6 +3,9 @@
 //! subprocess, since these are process-global environment variables that an in-process
 //! call to `setup::run` could not isolate between tests.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -52,7 +55,7 @@ impl Env {
     /// this sandbox and no `claude` on PATH. Callers add `--client` and override PATH to
     /// add a fake `claude` when needed.
     fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::cli();
         cmd.arg("--db")
             .arg(&self.db)
             .arg("setup")
@@ -669,7 +672,7 @@ fn non_utf8_db_path_fails_cleanly_before_any_write() {
     db_name.extend_from_slice(b".sqlite3");
     let db = workspace.path().join(OsStr::from_bytes(&db_name));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .arg("--db")
         .arg(&db)
         .arg("setup")
@@ -717,7 +720,7 @@ fn non_utf8_db_path_is_an_error_not_a_panic_in_every_mode() {
         &[OsStr::new("--project"), project.as_os_str()],
     ];
     for mode in modes {
-        let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        let output = support::cli()
             .arg("--db")
             .arg(&db)
             .arg("setup")

@@ -5,7 +5,89 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
-## [Unreleased]
+## [v0.6.0]
+
+_2026-11-06_
+
+Subagents: the vault can now hold agent definitions next to skills and generate client
+files from them. The vault migrates to schema v6 on first use: run
+`skillvolution backup <path>` before upgrading (an older binary can't open it), then rerun
+`skillvolution setup` (or `skillvolution doctor --fix`) to install the `evolution` v13 skill.
+
+### Added
+
+- A second kind of vault entry, `agent` (`AGENT.md`: `tier` high|mid|low, optional `effort`,
+  `tools`, `skills`, `scope`), fixed on an id's first publish. Agents are excluded from
+  search, the catalog and suggestions. `publish` accepts `AGENT.md` files and
+  `PATH/*/AGENT.md`; `list --kind agent` shows the tier (`no agents` when empty); `get`
+  prints an agent as `AGENT.md`, and also the built-ins; `show` displays kind, tier, tools
+  and skills.
+- `skillvolution agents models [set CLIENT TIER MODEL [--effort E] | unset CLIENT TIER]`,
+  `add ID... [--global | --project KEY] [--force]`, `remove ID... [--global]`,
+  `sync [--apply [--force]] [--global | --project KEY]` and `import PATH [-o DIR]` generate
+  Claude Code and OpenCode agent files, with marker and hash ownership. Sync is a dry run
+  without `--apply` and never automatic; `--force` overwrites foreign or hand-edited files
+  after a backup. OpenCode files carry an explicit `permission:` map, and a same id at both
+  project and user level is warned about.
+- Built-in agents `sv-high`, `sv-mid` and `sv-low`, available without a vault row.
+- Generated agent files pin each skill as `id vN (#hash)`, a content digest, so new text under
+  the same version number rewrites the file; `agents sync` flags it (`! skill X vN content
+  changed`) and says which pin changed instead of "rendering changed". Skills that are not
+  available are left out of the file (`! skill X dropped (not available)`), and deprecated
+  ones get a `[warning] agent X: skill Y is deprecated` from `add`, `sync` and `doctor`.
+- `purge ID --version N` of a skill's current version is refused when agents list it, like a
+  full purge (`--force` overrides).
+- Claude Code agents that deny `edit` also deny `MultiEdit`.
+- `agents import` of a generated project-scoped agent keeps `scope: project` and its tags;
+  `import` of an export with unknown agent `meta` keys is rejected with a clear message.
+- `purge` refuses a skill that an agent lists in `skills:` unless `--force`.
+- Agent validation: `tier` is required, `tools: []` is rejected (omit it for all tools),
+  `skills:` must be published skills visible from the agent's scope (at most 8, needs `mcp`
+  in `tools`), and `sv-*` plus client built-in and managed-skill names are reserved ids.
+- `doctor` agent checks (warn-only): hand-edited, outdated, missing, deprecated or non-agent
+  files, same id at both levels, no model for a tier, unavailable `skills:`, catalog size.
+- The Stop hook and the OpenCode plugin count a delegation to a managed vault agent as work
+  that needs an outcome report (`report_skill_outcome` accepts the agent id with the
+  version from the file's marker).
+
+### Changed
+
+- Agent skill availability is
+  checked against the agent's own scope; importing an edited managed agent file notes the
+  edits it does not import and an older marker version; `purge` warns about skills an agent's
+  newly current revision lists that are unavailable, and its skill warning points to
+  `agents sync --apply` when a published version remains; `export` keeps unknown agent meta
+  keys verbatim; the agent-id conflict message mentions `skillvolution publish` only over MCP.
+- The vault opens with `synchronous=NORMAL` when WAL actually took effect: commits no longer
+  fsync one by one, so concurrent writers stop timing out on a busy disk. An OS crash or power
+  loss can lose the last commits; the vault is never corrupted.
+- `export` writes format version 2 when agents are present; older binaries refuse it.
+- `get_skill` refuses an agent id and tells the model to delegate to it.
+- `evolution` v13 covers reporting on delegated agents.
+- The review reminder ends with `Delegated vault agents to report: <id> v<N>, ...` when the span
+  delegated to managed vault agents (Claude Code hook and OpenCode plugin). The OpenCode plugin
+  ignores a subagent session's own loads and reports (only its file edits count toward the
+  parent) and finds project agents under the plugin's `worktree`.
+- `agents add --force` backs up a foreign file containing the managed marker, takes backups
+  only after validation and handles repeated ids once; `agents remove` exits 1 when only a
+  foreign or edited file exists; `agents import DIR` reports `[rejected]` files and continues;
+  symlinked `$HOME` is recognised; `purge --force` names every agent still listing the skill;
+  `doctor` advice for user-level agent files says `--global`.
+- Agent files deny delegation when restricted (Claude Code `Agent, Task`, OpenCode `task: deny`;
+  `task: allow` otherwise), Claude's `shell` covers `Bash, PowerShell, Monitor`, and listed vault
+  skills are pinned as `id vN` (`agents sync` flags `skill ID vA -> vB`; `add` notes the pinning
+  for agents with shell or edit). The hash ignores only the marker line at its position.
+  `agents import` notes widened or dropped settings, and sends `[rejected]` lines to stderr
+  without `-o`. `import` (vault) lists imported agents and says to review with `agents sync`.
+  Agent metadata rejects unknown fields.
+- The Claude Code Stop hook gets `--project KEY` in project installs (re-run `setup` to refresh).
+
+### Fixed
+
+- `agents add --force` backs up a non-UTF-8 foreign file; `purge --force` warns about agents when
+  the last published revision goes but superseded rows remain.
+- Descriptions containing `#` or escaped quotes survive a `get` then `publish --replace`
+  round trip, and a UTF-8 BOM at the start of a `SKILL.md`/`AGENT.md` is handled.
 
 ## [v0.5.0]
 

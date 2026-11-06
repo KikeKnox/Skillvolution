@@ -7,10 +7,11 @@
 //! `Vault::rebuild_search_index`, setup's `write_all` and MCP registration),
 //! then every check runs again.
 
+use crate::agents::{self, FileState, Target};
 use crate::setup::{self, Change, ClientKind, Edit, Scope};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::{
     cmp::Ordering,
@@ -141,7 +142,248 @@ fn all_checks(db: &Path) -> Result<Vec<Check>> {
     if let Some(detail) = setup::double_install_warning(&globally_configured) {
         checks.push(Check::warn("legacy install", detail));
     }
+    checks.extend(agent_checks(db));
     Ok(checks)
+}
+
+/// The `agents sync --apply` command for level `at` (0 is the per-user directory).
+fn sync_command(at: usize) -> &'static str {
+    if at == 0 {
+        "skillvolution agents sync --apply --global"
+    } else {
+        "skillvolution agents sync --apply"
+    }
+}
+
+/// Warn-only checks of the generated agent files in the per-user directories and the
+/// current project's. Reads the vault only when it is already at the current schema
+/// (never `Vault::open`, which migrates); says nothing when no managed file exists.
+fn agent_checks(db: &Path) -> Vec<Check> {
+    let cwd = std::env::current_dir().ok();
+    let project_dir = cwd.as_deref().and_then(crate::project::repo_dir);
+    let key = cwd.as_deref().and_then(crate::project::detect);
+    let conn = db
+        .is_file()
+        .then(|| open_readonly(db).ok())
+        .flatten()
+        .filter(|conn| {
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .is_ok_and(|v| v == vault::schema_version())
+        });
+    let (mut checks, mut seen) = (Vec::new(), Vec::new());
+    let mut catalog = Vec::new();
+    for target in Target::ALL {
+        let name = format!("agents: {}", target.display_name());
+        let mut no_model: Vec<(usize, String, Vec<String>)> = Vec::new();
+        let mut user_ids: Vec<String> = Vec::new();
+        let mut project_ids: Vec<String> = Vec::new();
+        let dirs = [
+            target.dir(None).ok(),
+            project_dir
+                .as_deref()
+                .and_then(|d| target.dir(Some(d)).ok()),
+        ];
+        let (mut count, mut tokens) = (0, 0);
+        for (at, dir) in dirs.into_iter().enumerate() {
+            let Some(dir) = dir else { continue };
+            if seen.contains(&dir) {
+                continue;
+            }
+            seen.push(dir.clone());
+            for (path, state) in agents::managed_files(&dir) {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let file = crate::skill_file::parse(&text);
+                count += 1;
+                tokens += file.description.as_deref().map_or(0, str::len) / 4;
+                let (FileState::Managed(marker) | FileState::Edited(marker)) = &state else {
+                    continue;
+                };
+                let (id, shown) = (&marker.id, path.display());
+                if at == 0 {
+                    user_ids.push(id.clone());
+                } else {
+                    project_ids.push(id.clone());
+                }
+                if matches!(state, FileState::Edited(_)) {
+                    let (advice, manual) = if agents::builtin(id).is_some() {
+                        (
+                            format!(
+                                "delete the file and re-run `skillvolution agents add {id}` \
+                                 (built-in ids are reserved, so it cannot be published)"
+                            ),
+                            "delete the file, then `skillvolution agents add <id>`",
+                        )
+                    } else {
+                        (
+                            "run `skillvolution agents import` on it and `skillvolution publish` \
+                             the result, or delete it"
+                                .to_owned(),
+                            "`skillvolution agents import <file> -o <dir>`, then `skillvolution publish <dir>`",
+                        )
+                    };
+                    checks.push(
+                        Check::warn(
+                            &name,
+                            format!(
+                                "{id} ({shown}) was edited by hand and is skipped by `agents sync`; {advice}"
+                            ),
+                        )
+                        .with_fix(Some(Fix::Manual(manual))),
+                    );
+                    continue;
+                }
+                let builtin = agents::builtin(id);
+                // One lookup of the current published row visible from this project:
+                // (version, kind, deprecated, meta). Outer `None`: no readable vault.
+                let found = conn.as_ref().and_then(|conn| {
+                    conn.query_row(
+                        "SELECT version, kind, deprecated, meta FROM current_skills \
+                         WHERE id = ?1 AND (scope IS NULL OR scope = ?2)",
+                        rusqlite::params![id, key],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, bool>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .ok()
+                });
+                let meta = match &builtin {
+                    Some(agent) => Some(agent.meta.clone()),
+                    None => found.clone().flatten().and_then(|(_, _, _, meta)| {
+                        serde_json::from_str::<vault::AgentMeta>(&meta?).ok()
+                    }),
+                };
+                if file.model.is_none() {
+                    let tier = meta
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_owned(), |m| m.tier.clone());
+                    match no_model
+                        .iter_mut()
+                        .find(|(level, t, _)| *level == at && *t == tier)
+                    {
+                        Some((_, _, ids)) => ids.push(id.clone()),
+                        None => no_model.push((at, tier, vec![id.clone()])),
+                    }
+                }
+                let is_agent = found
+                    .as_ref()
+                    .and_then(|row| row.as_ref())
+                    .is_some_and(|(_, kind, _, _)| kind == "agent");
+                let current = if builtin.is_some() {
+                    Some((agents::BUILTIN_VERSION, true))
+                } else {
+                    found.map(|row| match row {
+                        Some((version, kind, deprecated, _)) => {
+                            (version, kind == "agent" && !deprecated)
+                        }
+                        None => (0, false),
+                    })
+                };
+                if matches!(current, Some((_, true)))
+                    && let (Some(conn), Some(meta)) = (&conn, &meta)
+                {
+                    for skill in &meta.skills {
+                        if let Ok(Some(reason)) =
+                            vault::skill_unavailable(conn, skill, key.as_deref())
+                        {
+                            checks.push(Check::warn(
+                                &name,
+                                format!("agent {id}: skill {skill} is not available ({reason})"),
+                            ));
+                        } else if vault::skill_deprecated(conn, skill).unwrap_or(false) {
+                            checks.push(Check::warn(
+                                &name,
+                                format!("agent {id}: skill {skill} is deprecated"),
+                            ));
+                        }
+                    }
+                }
+                match current {
+                    Some((version, false)) => {
+                        let why = if version == 0 {
+                            "is missing from the vault (or scoped to another project)"
+                        } else if is_agent {
+                            "is deprecated in the vault"
+                        } else {
+                            "is a skill in the vault, not an agent"
+                        };
+                        checks.push(Check::warn(&name, format!("{id} ({shown}) {why}")))
+                    }
+                    Some((version, true)) if marker.version < version => {
+                        let sync = sync_command(at);
+                        checks.push(
+                            Check::warn(
+                                &name,
+                                format!(
+                                    "{id} ({shown}) is outdated (v{} vs v{version} in the vault); \
+                                 run `{sync}`",
+                                    marker.version
+                                ),
+                            )
+                            .with_fix(Some(Fix::Manual(if at == 0 {
+                                "run `skillvolution agents sync --apply --global`"
+                            } else {
+                                "run `skillvolution agents sync --apply`"
+                            }))),
+                        )
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (at, tier, ids) in &no_model {
+            let level = if *at == 0 { "user-level" } else { "project" };
+            let sync = sync_command(*at);
+            let (tier_text, set_tier) = if tier == "unknown" {
+                ("an unknown tier".to_owned(), "<tier>")
+            } else {
+                (format!("tier {tier}"), tier.as_str())
+            };
+            checks.push(Check::warn(
+                &name,
+                format!(
+                    "no model for {tier_text} ({}) in {} {level} files; the client inherits its own. \
+                     Set one with `skillvolution agents models set {} {set_tier} <model>`, then \
+                     `{sync}`",
+                    ids.join(", "),
+                    target.display_name(),
+                    target.token()
+                ),
+            ));
+        }
+        let both: Vec<&str> = project_ids
+            .iter()
+            .filter(|id| user_ids.contains(id))
+            .map(String::as_str)
+            .collect();
+        if !both.is_empty() {
+            checks.push(Check::warn(
+                &name,
+                format!(
+                    "{} installed at both project and user level; {} merges the two files, so \
+                     the project one may inherit settings from the user one. Keep one \
+                     (`skillvolution agents remove <id>` or with `--global`)",
+                    both.join(", "),
+                    target.display_name()
+                ),
+            ));
+        }
+        if count > 0 {
+            catalog.push(format!(
+                "{}: {count} agent(s), ~{tokens} tokens",
+                target.token()
+            ));
+        }
+    }
+    if !catalog.is_empty() {
+        checks.push(Check::ok("agents: catalog", catalog.join("; ")));
+    }
+    checks
 }
 
 /// Applies every check's `Fix`, returning one line per repair. A failed repair is
@@ -276,10 +518,11 @@ fn vault_checks(db: &Path) -> Result<Vec<Check>> {
     Ok(checks)
 }
 
-/// Every skill with a published revision, by id. Deprecated skills included:
+/// Every skill (not agent: agents are never indexed) with a published revision, by id. Deprecated skills included:
 /// deprecating keeps the search row and `search` hides it at query time.
 const INDEXABLE_SKILLS: &str = "SELECT s.id FROM skills s \
-    WHERE EXISTS (SELECT 1 FROM revisions r WHERE r.id = s.id AND r.status = 'published')";
+    WHERE s.kind = 'skill' \
+    AND EXISTS (SELECT 1 FROM revisions r WHERE r.id = s.id AND r.status = 'published')";
 
 /// Checks that `skills_fts` has exactly one row per indexable skill, addressed
 /// by that skill's `fts_rowid`, and no orphan rows left over from a purge or a

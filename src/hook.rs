@@ -2,6 +2,7 @@ use crate::vault::{SkillMetadata, Vault};
 use anyhow::Result;
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fmt::Write as _,
     fs::File,
@@ -28,8 +29,8 @@ pub const CURSOR_WORK_TOOLS: &[&str] = &["Write"];
 
 // Keep in sync with REVIEW_REMINDER in assets/opencode/skillvolution.js (a test in
 // setup/plugin.rs checks it).
-pub const STOP_REASON: &str = "Skillvolution review: you edited files or loaded vault skills since the last review. \
-Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill \
+pub const STOP_REASON: &str = "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. \
+Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) \
 (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, \
 dispatch a fresh subagent that follows the skill-evaluation skill now \
 — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
@@ -572,7 +573,12 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
 /// Returns a reason to block the stop when the transcript shows work not
 /// followed by an outcome report or proposal. Each transcript span is judged
 /// once, and a stop already continued by this hook is never blocked.
-pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
+pub fn stop(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    agent_dirs: &[std::path::PathBuf],
+) -> Result<Option<Cow<'static, str>>> {
     let input: Value = serde_json::from_str(input)?;
     let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
     let (Some(session), Some(path)) = (
@@ -602,17 +608,49 @@ pub fn stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
     if stop_hook_active {
         return Ok(None);
     }
-    Ok(has_unreviewed_work(&bytes[..complete]).then_some(STOP_REASON))
+    let Some(delegated) = has_unreviewed_work(&bytes[..complete], |id| {
+        if !matches!(vault.get(id, None, project), Ok(view) if view.kind == "agent") {
+            return None;
+        }
+        crate::agents::managed_agent_version(agent_dirs, id)
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(reason_with_delegations(&delegated)))
+}
+
+/// `STOP_REASON`, followed by a line naming the vault agents delegated to (so the
+/// report is not misattributed to a built-in). The same format as the OpenCode plugin.
+fn reason_with_delegations(delegated: &[(String, i64)]) -> Cow<'static, str> {
+    if delegated.is_empty() {
+        return Cow::Borrowed(STOP_REASON);
+    }
+    let names: Vec<String> = delegated
+        .iter()
+        .map(|(id, version)| format!("{id} v{version}"))
+        .collect();
+    Cow::Owned(format!(
+        "{STOP_REASON}\nDelegated vault agents to report: {}.",
+        names.join(", ")
+    ))
 }
 
 /// Whether the transcript lines in `span` contain a work tool call after the
-/// last review tool call. Work is a file edit or a skill load (`get_skill`), whose
-/// outcome is owed. A review or load whose tool_result is an error (a rejected
+/// last review tool call. Work is a file edit, a skill load (`get_skill`) or a
+/// delegation (`Agent`/`Task`) to a vault agent that has a generated file
+/// (`is_vault_agent`), whose outcome is owed. A review or load whose tool_result is an error (a rejected
 /// publish, an unknown skill id) did nothing, so it does not count.
-fn has_unreviewed_work(span: &[u8]) -> bool {
+///
+/// `None` when nothing is owed; otherwise the vault agents (id, installed version, in
+/// order of first delegation) delegated to since the last review.
+fn has_unreviewed_work(
+    span: &[u8],
+    vault_agent_version: impl Fn(&str) -> Option<i64>,
+) -> Option<Vec<(String, i64)>> {
     let mut position = 0;
     let mut last_edit = None;
     let mut loads = Vec::new();
+    let mut delegations: Vec<(usize, String, String, i64)> = Vec::new();
     let mut reviews = Vec::new();
     let mut failed = HashSet::new();
     for line in span.split(|b| *b == b'\n') {
@@ -628,6 +666,13 @@ fn has_unreviewed_work(span: &[u8]) -> bool {
                     last_edit = Some(position);
                 } else if is_load_tool(name) {
                     loads.push((position, id.to_owned()));
+                } else if let Some((agent, version)) = matches!(name, "Agent" | "Task")
+                    .then(|| object["input"]["subagent_type"].as_str())
+                    .flatten()
+                    .and_then(|agent| Some((agent, vault_agent_version(agent)?)))
+                {
+                    loads.push((position, id.to_owned()));
+                    delegations.push((position, id.to_owned(), agent.to_owned(), version));
                 } else if is_review_tool(name) {
                     reviews.push((position, id.to_owned()));
                 }
@@ -651,7 +696,20 @@ fn has_unreviewed_work(span: &[u8]) -> bool {
     let last_review = last_success(reviews);
     // None orders below any Some, so no work never blocks and work with no
     // successful review always does.
-    last_work > last_review
+    if last_work <= last_review {
+        return None;
+    }
+    let mut delegated: Vec<(String, i64)> = Vec::new();
+    for (position, id, agent, version) in delegations {
+        if failed.contains(&id)
+            || last_review.is_some_and(|review| position < review)
+            || delegated.iter().any(|(seen, _)| *seen == agent)
+        {
+            continue;
+        }
+        delegated.push((agent, version));
+    }
+    Some(delegated)
 }
 
 fn is_review_tool(name: &str) -> bool {

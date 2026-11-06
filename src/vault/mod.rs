@@ -1,12 +1,18 @@
+mod agent;
 mod location;
 mod outcomes;
 mod revisions;
 mod search;
 mod transfer;
 
+pub use agent::{
+    AGENT_SECTIONS, AgentMeta, AgentModel, EFFORTS, MODEL_CLIENTS, TIERS, TOOLS,
+    agent_content_problems, agent_meta_problems, agent_section_problems, reserved_agent_id,
+    skill_deprecated, skill_unavailable,
+};
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
-pub use revisions::{Proposal, Revision, SkillView};
+pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
 pub use search::{SearchPage, SkillMetadata};
 pub use transfer::{ImportReport, PurgeReport};
 
@@ -168,6 +174,34 @@ const MIGRATIONS: &[&str] = &[
         FROM current_skills c JOIN skills s ON s.id = c.id;
     UPDATE skills SET fts_rowid = NULL;
     UPDATE skills SET fts_rowid = rowid WHERE id IN (SELECT id FROM current_skills);",
+    // v6: agents share the vault with skills. `kind` is fixed at first
+    // publication, an agent revision's tier/tools/skills live in `meta`, and
+    // `agent_models` maps tiers to each client's models on this machine.
+    "ALTER TABLE skills ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill' CHECK(kind IN ('skill', 'agent'));
+    ALTER TABLE revisions ADD COLUMN meta TEXT;
+    DROP VIEW current_skills;
+    CREATE VIEW current_skills AS
+    SELECT r.id, r.version, r.description, r.tags, r.content, s.scope, s.deprecated, s.kind, r.meta,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'helped') AS helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'failed') AS failed,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.version = r.version AND o.result = 'not_applicable') AS not_applicable,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'helped'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_helped,
+        (SELECT COUNT(*) FROM outcomes o WHERE o.id = r.id AND o.result = 'failed'
+            AND o.version = (SELECT MAX(p.version) FROM revisions p
+                WHERE p.id = r.id AND p.status = 'published' AND p.version < r.version)) AS prior_failed
+    FROM skills s
+    JOIN revisions r ON r.id = s.id
+    WHERE r.status = 'published'
+        AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
+    CREATE TABLE agent_models (
+        client TEXT NOT NULL,
+        tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+        model TEXT NOT NULL,
+        effort TEXT,
+        PRIMARY KEY (client, tier)
+    );",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
@@ -212,7 +246,14 @@ impl Vault {
         // busy_timeout doesn't cover this window (the WAL pragma and the first
         // migration transaction can still see SQLITE_BUSY/LOCKED here), so retry.
         retry_on_busy(|| {
-            conn.pragma_update(None, "journal_mode", "WAL")?;
+            let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+            // WAL + NORMAL: fsync at checkpoints, not on every commit. A slow disk
+            // otherwise stalls each commit past the busy timeout of other writers;
+            // an OS crash or power loss may drop the last commits (never corrupts).
+            // Only when WAL actually took effect: otherwise keep SQLite's default FULL.
+            if mode.eq_ignore_ascii_case("wal") {
+                conn.pragma_update(None, "synchronous", "NORMAL")?;
+            }
             migrate(&conn)
         })?;
         let vault = Self { conn };
@@ -556,6 +597,27 @@ pub fn skill_problems(
     tags: &[String],
     content: &str,
 ) -> Vec<String> {
+    entry_problems(id, description, tags, content, None)
+}
+
+/// `skill_problems` for an agent: its sections and metadata instead of a skill's.
+pub fn agent_problems(
+    id: Option<&str>,
+    description: Option<&str>,
+    tags: &[String],
+    content: &str,
+    meta: &AgentMeta,
+) -> Vec<String> {
+    entry_problems(id, description, tags, content, Some(meta))
+}
+
+fn entry_problems(
+    id: Option<&str>,
+    description: Option<&str>,
+    tags: &[String],
+    content: &str,
+    agent: Option<&AgentMeta>,
+) -> Vec<String> {
     let mut problems = Vec::new();
     match id {
         None => {
@@ -578,6 +640,10 @@ pub fn skill_problems(
     }
     if let Err(e) = validate_tags(tags) {
         problems.push(e.to_string());
+    }
+    if let Some(meta) = agent {
+        problems.extend(agent_content_problems(content, meta));
+        return problems;
     }
     let sections = section_problems(content);
     if !sections.is_empty() {

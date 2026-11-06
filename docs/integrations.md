@@ -67,7 +67,7 @@ SQLite WAL needs local storage.
     "UserPromptSubmit": [{"hooks": [{"type": "command",
       "command": "'BIN' --db 'DB' hook prompt", "timeout": 10}]}],
     "Stop": [{"hooks": [{"type": "command",
-      "command": "'BIN' --db 'DB' hook stop", "timeout": 10}]}]
+      "command": "'BIN' --db 'DB' hook stop --project 'KEY'", "timeout": 10}]}]
   },
   "permissions": {"allow": ["Agent", "Task", "mcp__skillvolution"]}
 }
@@ -94,14 +94,15 @@ claude mcp add-json --scope user skillvolution \
 `"--project", "KEY"` in `args`), `.claude/settings.local.json` gets the
 hooks and permissions, and the three skills are installed under
 `.claude/skills/<name>/SKILL.md`. SessionStart and UserPromptSubmit carry
-`--project 'KEY'`; Stop does not (it infers nothing — it only scans the transcript).
+`--project 'KEY'`, and so does Stop (project-scoped installs only; the global one passes none), which uses it to tell
+vault agents visible from the project apart from foreign ones when a delegation is scanned.
 
 Legacy cleanup: a Skillvolution-managed block in `CLAUDE.md` is removed.
 
 **Reminder behavior** (verified live): `SessionStart` prints the catalog as
 `hookSpecificOutput.additionalContext` JSON; plain stdout reaches the model only
 as a "hook success" status line. `Stop` scans the session transcript JSONL from the stored offset;
-work = `Edit`/`Write`/`MultiEdit`/`NotebookEdit` or a successful `get_skill`, a review
+work = `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, a successful `get_skill`, or a delegation to a managed vault agent visible from the current project (Claude Code `Agent`/`Task`; not `sv-*`; the generated file must carry the skillvolution marker), a review
 counts only when `publish_skill` or `report_skill_outcome` succeeds. If the latest work is
 newer than the latest successful review, the hook prints
 `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":...}}`
@@ -153,9 +154,10 @@ never recreated.
 
 **Reminder behavior** (plugin, not hooks): the plugin injects the catalog
 into the system prompt, tracks work (`edit`, `write`, `multiedit`, `patch`,
-`apply_patch`, or a tool ending in `get_skill`) and review tools (any tool containing
-`publish_skill` or `report_skill_outcome`) per top-level session — subagent sessions
-count toward the parent — and appends a reminder to the next turn after unreviewed
+`apply_patch`, a tool ending in `get_skill`, or a `task` delegation to a managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)) and review tools (any tool containing
+`publish_skill` or `report_skill_outcome`) per top-level session — a subagent session's
+file edits count toward the parent, but its own `get_skill` loads and reports do not (it reports
+its skills itself) — and appends a reminder to the next turn after unreviewed
 work. For each new user message, the `chat.message` hook runs `hook prompt` (the
 message's non-synthetic text parts as `{"prompt": ...}` on stdin, `--project KEY` in
 project setups, a 15-second timeout) and the plugin appends the suggestions to that
@@ -338,6 +340,37 @@ Retrieval relies on the SessionStart catalog, the skills, and the rule file.
 against a live Cursor session; the `MCP:skillvolution_*` tool naming and the
 `Mcp(skillvolution:*)` permission string follow Cursor's documented
 conventions.
+
+## Subagent files (`agents`)
+
+`skillvolution agents add` writes subagent files for clients `setup` configured, Claude Code
+and OpenCode only; `setup` itself does not write them and never syncs them (see
+[cli.md](cli.md#agents), [architecture.md](architecture.md#agents)).
+
+- **Claude Code**: `.claude/agents/<id>.md` (global `$CLAUDE_CONFIG_DIR/agents`). Frontmatter `name`,
+  `description`, `model` (`opus|sonnet|haiku` by tier), `effort`, and `disallowedTools` derived
+  from the denied abstract tools (`shell` denies `Bash, PowerShell, Monitor`). An agent with a
+  `tools` restriction also denies `Agent, Task`, so it cannot delegate to an unrestricted
+  subagent such as `general-purpose`. Cursor also reads this directory and may not accept the model
+  aliases.
+- **OpenCode**: `.opencode/agents/<id>.md` (global `~/.config/opencode/agents`). `mode: subagent`,
+  `model` only if configured with `agents models set opencode ...`, and `permission` entries
+  set to `deny` for edit, bash, webfetch, websearch, and `task: deny` for a restricted agent
+  (`task: allow` otherwise, so a user-level file cannot leak a deny). OpenCode can deny MCP tools
+  only per server with a wildcard (`<server>_*`); skillvolution does not write those because it
+  does not know your servers, so a denied `mcp` is not enforced (it warns). Effort is not written
+  because markdown agents do not document it.
+- The body ends with the agent's vault skills as `id vN`, the published version visible from the
+  agent's scope when the file was generated; the subagent is told to pass that version to
+  `get_skill`. Skills are therefore pinned until `agents sync --apply` (a new skill version
+  is flagged there as `! skill ID vA -> vB`).
+- Every file starts (after the frontmatter) with the `skillvolution-managed:agent:` marker.
+  `setup --remove` leaves these files and lists them; remove them with `agents remove <id>`.
+- After delegating to such an agent, the `evolution` skill has the orchestrator report its
+  id and version from the marker (not for `sv-*`). The OpenCode plugin counts a `task` call whose
+  `subagent_type` has a marked file in the project's `.opencode/agents/` (found under the plugin input's `worktree`, i.e. the repository root, else `directory`) or the per-user
+  `~/.config/opencode/agents/` (`XDG_CONFIG_HOME`) as work, like a `get_skill` load. Both the Claude Code hook and the plugin then end the reminder with a
+  line `Delegated vault agents to report: <id> v<N>, ...` naming the delegated agents (version from the marker).
 
 ## What `setup --remove` keeps
 

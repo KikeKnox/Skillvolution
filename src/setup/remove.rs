@@ -87,6 +87,7 @@ fn run_scope(explicit: Option<Clients>, scope: Scope, db: &Path, dry_run: bool) 
     for kind in candidates {
         let mut notes = Vec::new();
         let edits = kind.removals(scope, &mut notes)?;
+        notes.extend(crate::agents::left_behind_note(kind, scope));
         // With no explicit --client, only clients with something to remove are
         // included, so nothing is reported (or written) for one that never had
         // Skillvolution configured.

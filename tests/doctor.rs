@@ -3,6 +3,9 @@
 //! CLAUDE_CONFIG_DIR and PATH explicitly and runs the built binary as a
 //! subprocess, like tests/setup_global.rs does.
 
+#[path = "support/mod.rs"]
+mod support;
+
 // Only needed by tests that require a real, executable fake `claude` on PATH; see
 // `write_fake_claude`.
 #[cfg(unix)]
@@ -54,7 +57,7 @@ impl Env {
     /// this sandbox and no `claude` on PATH, outside any git repo so the
     /// legacy-install warning never fires by accident.
     fn cli(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::isolated(self.home.path());
         cmd.env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", &self.xdg_config)
             .env("APPDATA", &self.appdata)

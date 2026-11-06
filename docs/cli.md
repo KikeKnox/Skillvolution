@@ -78,7 +78,7 @@ to import existing Claude Code skills. `--id` is an error there; `--scope`, `--p
 (`[published] ID vN (scope)`, `[skipped] ID: already at vN; pass --replace` for an existing
 id, or `[rejected] PATH:` with its problems), the SKILL.md template once if any were
 rejected (an error raised while publishing a file, such as a credential-shaped value, an over-size field, a scope conflict, or a non-UTF-8 file, is a per-file rejection too, not an abort), and a summary `N published, N skipped, N rejected`; the exit code is 1 if any
-were rejected. A directory with no SKILL.md at all is an error. The optional frontmatter (`---` lines, simple
+were rejected. A directory with no SKILL.md or AGENT.md at all is an error. The optional frontmatter (`---` lines, simple
 `key: value` pairs) supplies `name` (the id; `--id` overrides it), `description`, and
 `tags` (`[a, b]` or comma-separated), and `scope` (`global` or `project`; `--scope` wins,
 default global; `get` writes `scope: project` for project skills); a YAML-style trailing
@@ -97,11 +97,26 @@ pass --replace to publish vN+1`); `--replace` also acknowledges replacing a prov
 version (the replaced version keeps its record at half weight in ranking). `--scope project` uses `--project KEY`, else the project detected like `serve`;
 the scope is fixed on first publish. Prints `Published ID vN (scope).`
 
+### Publishing an AGENT.md
+
+A file named `AGENT.md`, or any file whose frontmatter has `tier` or `role`, is published as an
+agent (kind fixed at the id's first publish; an id cannot switch between skill and agent).
+Directory publish collects `PATH/*/SKILL.md` and `PATH/*/AGENT.md` together, and `PATH/AGENT.md`
+directly. Frontmatter: `name`, `description`, `tier` (`high|mid|low`, required), optional `role`
+(`subagent` only; `primary` is rejected as not supported yet), `effort` (`low|medium|high|xhigh|max`),
+`tools` (subset of `read, edit, shell, web, mcp`; omitted = all; `tools: []` is rejected; `read` is always allowed),
+`skills` (at most 8 published skills visible from the agent's scope, loaded with `get_skill`; a global agent can only use global skills; requires `mcp` in `tools`), `tags`, `scope`. Body sections:
+`## Output contract` is required; `## Role`, `## Procedure`, `## Output contract`, `## Limits`
+must appear in that order when present. An `AGENT.md` template is printed on rejection. Agent ids
+starting with `sv-`, and client/managed names such as `explore`, `plan`, `general-purpose` or
+`evolution`, are reserved. Every id in `skills` must be a published skill visible from the agent's scope. Output ends
+`Published ID vN (scope, agent).` See [architecture.md#agents](architecture.md#agents).
+
 ## search / list / get
 
 ```
 skillvolution search QUERY [--limit N] [--project KEY] [--json]
-skillvolution list [--project KEY] [--json]
+skillvolution list [--kind skill|agent] [--project KEY] [--json]
 skillvolution get ID [--version N] [--project KEY]
 ```
 
@@ -110,7 +125,11 @@ per skill, `ID vN [scope] (helped H, failed F): description`, plus `N of TOTAL` 
 match. `list` is `search` with an empty query and limit 100. `get` prints a skill as a
 `SKILL.md` (frontmatter `name`, `description`, `tags`, then the content) that
 `publish --replace` accepts, so you can fetch, edit, and republish it. None of them
-record outcomes. The project is resolved like `serve`.
+record outcomes. The project is resolved like `serve`. `search` and the MCP tools only
+see skills; `list --kind agent` lists agents (default `skill`), and `get` on an agent (or on a built-in
+`sv-high`, `sv-mid`, `sv-low`) prints a round-trippable `AGENT.md` (`name`, `description`, `tags` if any, `role: subagent`, `tier`,
+`effort`, `tools`, `skills`, `scope: project` for project agents, then the body). `show` of an agent adds its kind
+and `tier`/`tools`/`skills`; `list --kind agent` shows the tier and prints `no agents` when empty.
 
 ## deprecate / undeprecate
 
@@ -122,6 +141,8 @@ skillvolution undeprecate ID
 `deprecate` hides a skill from `search_skills` without deleting its history; the body is
 still returned by `get_skill` with `deprecated: true`. `undeprecate` makes it searchable
 again. Both print nothing on success and fail with `unknown skill: ID` otherwise.
+A deprecated agent is not added by `agents add`, is left as is by `agents sync`, and is
+flagged by `doctor`.
 
 ## outcomes
 
@@ -237,7 +258,7 @@ outcome report), or as having reviewed when it ends with
 ### hook stop
 
 ```
-skillvolution hook stop [--client CLIENT]
+skillvolution hook stop [--client CLIENT] [--project KEY]
 ```
 
 Asks for an evolution review when the session has unreviewed work, at most once per
@@ -327,7 +348,7 @@ only the marked ones, plus any skill directory left empty.
 ## purge
 
 ```
-skillvolution purge ID [--version N]
+skillvolution purge ID [--version N] [--force]
 ```
 
 Permanently deletes a skill — or, with `--version N`, just that revision — together
@@ -336,6 +357,17 @@ the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linge
 disk. Compaction can't complete while another connection (an AI client's MCP server)
 holds the vault open; then it prints a warning and the content may linger until a later
 purge compacts it. Prints `Purged ID: N revision(s), M outcome(s)[, skill removed].`
+
+`purge` refuses a skill that a current agent revision lists in `skills` (it names the agents) unless
+`--force` is given; with `--force` it still prints a warning naming every agent (any project,
+deprecated or not) whose current revision lists the purged skill, also when the skill only stops
+being published (the purged revision was the last published one) while superseded rows remain.
+`purge ID --version N` goes through the same refusal (and `--force`) when `N` is the skill's
+current published version, since agents pin the current one; purging an older revision is not
+refused. When a published version of the skill remains, the warning says `agents sync --apply`
+repins the agents to it instead of telling you to republish them. Purging an agent's current
+version prints `[warning] agent X: skill Y is not available (...)` for each skill the newly
+current revision lists that is missing, purged or out of the agent's scope.
 
 Prefer `deprecate` for content you merely don't want surfaced; `purge` is for data that
 must be gone (a leaked secret that predates the scanner, etc.).
@@ -350,7 +382,7 @@ skillvolution import FILE
 ```
 
 `export` writes every skill, revision, and outcome as a versioned JSON document
-(`format: "skillvolution-export"`, `version: 1`) to `FILE` or stdout. Per-session hook
+(`format: "skillvolution-export"`, `version: 1`, or `2` when any agent is included so older binaries refuse it; import accepts both) to `FILE` or stdout. Per-session hook
 state and `get_skill` loads (local telemetry) are not exported. `import` merges such a document into the vault in one
 transaction: new revisions are validated like fresh publishes (headings, secrets),
 identical existing revisions and duplicate outcomes are skipped, and any conflicting
@@ -358,7 +390,9 @@ revision — a skill that exists under a different scope — or a revision/outco
 id differs from the skill it's listed under — aborts the whole import with no partial
 writes. A `draft` or `rejected` revision from an export written before schema v5 is
 imported as `superseded`, its note prefixed `legacy <status>`. `import` prints a JSON
-report of imported/skipped counts.
+report of imported/skipped counts and the ids of imported agents (`agents_imported`); for those it
+prints a note to review them and run `agents sync` (a dry run) before `--apply`, since their
+generated files can now change.
 
 ```bash
 skillvolution export -o vault.json
@@ -374,6 +408,83 @@ skillvolution backup PATH
 Writes a consistent copy of the live database to `PATH` via `VACUUM INTO` (WAL content
 included, no exclusive lock needed). `PATH` must not exist. Prints `Backed up to PATH.`
 
+## agents
+
+Subagent definitions kept in the vault and generated into client files. Applies to Claude Code
+and OpenCode. Nothing is generated automatically: there is no sync at session start.
+
+```
+skillvolution agents models
+skillvolution agents models set CLIENT TIER MODEL [--effort E]
+skillvolution agents models unset CLIENT TIER
+skillvolution agents add ID... [--global | --project KEY] [--force]
+skillvolution agents remove ID... [--global]
+skillvolution agents sync [--apply [--force]] [--global | --project KEY]
+skillvolution agents import PATH [-o DIR]
+```
+
+- `models` prints the tier mapping per client (`claude-code`, `opencode`) marked `(default)`,
+  `(set)` or `(none)`. Defaults for Claude Code: `high` -> `opus`/`high`, `mid` -> `sonnet`/`medium`,
+  `low` -> `haiku`/`low`; OpenCode has none. `models set` stores an override in the vault
+  (`agent_models`, not exported); omitting `--effort` keeps the
+  mapping's current effort; `--effort` on `opencode` is stored with a warning, since OpenCode
+  files carry no effort, and a `claude-code` model containing `/` or an `opencode` model
+  without `/` also warns. `models unset CLIENT TIER` deletes the stored mapping (back to the
+  default, or none).
+- `add` resolves each id (the built-ins `sv-high`, `sv-mid`, `sv-low` first, then a vault agent) and
+  writes one file per configured client (Claude Code: `.claude/agents/ID.md`; OpenCode:
+  `.opencode/agents/ID.md`; `--global` uses the per-user directories). Without `--global` a
+  client counts as configured if `setup` was applied globally or for the project. A foreign
+  file at a target aborts before anything is written, and a hand-edited managed file is
+  skipped; `--force` overwrites either after a backup (a foreign file gets setup's numbered
+  backup, an edited one, and a foreign file that happens to contain the
+  `skillvolution-managed:` text such as a renamed copy of a generated file, is kept as
+  `<file>.skillvolution.bak`; the check reads the file's bytes, so a non-UTF-8 file is backed up too). Backups are taken only after every target has been validated
+  (a refused symlink target leaves everything untouched), and an id repeated on the command
+  line is handled once. A project-scoped agent is refused outside its project (paths are
+  compared after resolving symlinks, so a symlinked `$HOME` is recognised).
+  Cursor also reads `.claude/agents/` and may not accept Claude model aliases (noted on output).
+- `remove` deletes only files carrying our marker whose hash still matches; it exits 1 if an
+  id was not installed or if nothing could be removed for it (only a foreign or hand-edited
+  file exists; the line printed says why it was left).
+- `sync` re-renders every managed file and reports updates; it is a dry run unless `--apply`,
+  lists unchanged agents as `[ok]`, and explains same-version rendering updates (e.g. a
+  model change). Updates are flagged `!` when review-worthy: widened tools, a changed prompt
+  on a shell agent, added or removed `skills`, a changed `tier`, and a new version of a listed skill
+  (`! skill helper v1 -> v2`; the file is rewritten because skills are pinned, see below), the same
+  version number with different content (`! skill helper v2 content changed`), and a pin that
+  appears or disappears (`! skill helper now v3`, `! skill helper dropped (not available)`). When
+  only pins changed, the `[update]` line says which instead of a generic "rendering changed".
+  `add`, `sync` and `doctor` print
+  `[warning] agent X: skill Y is not available (reason)` for referenced skills that are missing,
+  an agent, or scoped to another project; such a skill is left out of the generated file (if none
+  remains, so are the load and report lines). They also print `[warning] agent X: skill Y is
+  deprecated` for a deprecated skill, which stays pinned and usable.
+  Hand-edited files are skipped unless `--apply --force` (after a backup).
+- Trust boundary: a generated agent loads its vault skills with `get_skill` and runs them with
+  the agent's own tools. Vault skills can be republished by any MCP-connected agent, so each file
+  pins the version it was generated with (`id vN (#hash)`, from the agent's scope at render time;
+  the hash is a short digest of that revision's content so that new text under the same number
+  changes the file, and the subagent is told to pass only the number) and the
+  subagent is told to load exactly that version; a newer version reaches the agent only through
+  `agents sync --apply`, after you have seen the `! skill ... -> ...` flag. `add` prints a note
+  when an agent with shell or edit tools lists skills. A restricted agent (`tools` set) also
+  denies delegation (Claude Code `Agent, Task`; OpenCode `task: deny`), and the Claude Code
+  `shell` tool covers `Bash, PowerShell, Monitor`. Hand edits are detected by a hash that skips
+  only the marker line right after the frontmatter, so an extra marker-looking line counts as an
+  edit.
+- OpenCode files carry an explicit allow/deny `permission:` map. OpenCode merges same-named
+  user and project agent files, so `add`, `sync` and `doctor` warn on the same id at both levels.
+- `import` converts Claude Code agent files (one file, or a directory of `*.md`) into canonical
+  `AGENT.md` text: stdout for a single file, or `-o DIR` to write `DIR/ID/AGENT.md` (never
+  overwrites: an existing output prints `[skipped] ...: exists`) so `skillvolution publish DIR`
+  publishes them. Notes go to stderr, and so do `[rejected]` lines when no `-o` is given (stdout
+  is then only AGENT.md text); import notes also say what a conversion widens or drops: a scoped
+  `Bash(git log:*)` becomes unrestricted shell, and `permissionMode`, `hooks` and `mcpServers`
+  are not imported. `import` of a file we generated for a project-scoped agent keeps its `scope: project` and tags from the vault entry. Reading stored agent metadata tolerates unknown keys written by a newer version; `skillvolution import` of an export with unknown `meta` keys is rejected with a message naming the key. Notes go to stderr; the missing `## Output contract` section is one of them,
+  add it before publishing. A file that cannot be imported is printed as
+  `[rejected] PATH: reason` and the rest still run; the exit status is 1 if any was rejected.
+
 ## doctor
 
 ```
@@ -387,13 +498,13 @@ check fails.
 
 ```
 [warn] vault: database: will be created on first use
-[ok] vault: schema: up to date (v5)
+[ok] vault: schema: up to date (v6)
 [ok] vault: integrity: PRAGMA quick_check: ok
 [ok] vault: search index: 12 skill(s) indexed, no orphans
 [ok] vault: stats: 12 skill(s), 15 published revision(s), 34 outcome(s), 1 deprecated
 [ok] Claude Code: configured, up to date
 [warn] OpenCode: differs from what `skillvolution setup --client opencode` would write: …
-[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v11)
+[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v13)
 [fail] Devin CLI binary: configured binary /old/path/skillvolution does not exist; rerun setup
 [warn] Claude Code MCP registration: `claude mcp get skillvolution` reports no registration; rerun setup
 [warn] legacy install: project-level install found (…) alongside the global one; hooks will run twice
@@ -465,6 +576,13 @@ skillvolution relocate ~/vaults/skills.db
 # Note: CLI commands without --db still resolve to the old path. Set SKILLVOLUTION_DB=/home/you/vaults/skills.db in your shell profile (or pass --db) so they use the new vault; AI clients are already repointed.
 ```
 
+Agent checks (warn-only, no auto-fix) run over managed agent files in the global and current
+project agent directories, and print nothing when there are none: files edited by hand
+(use `agents import` then `publish`; for the built-ins `sv-high`, `sv-mid`, `sv-low`, delete the file and re-run `skillvolution agents add <id>`), files older than the vault's current version or the
+built-in version (`agents sync --apply`), agents missing from the vault, files with no `model`
+for their tier, and one `agents: catalog` line estimating the description tokens per client.
+The vault is only read, never migrated, for these checks.
+
 ## MCP tools
 
 `serve` speaks newline-delimited JSON-RPC 2.0: one request per line, one response per
@@ -486,6 +604,11 @@ Notifications (no `id`) and response-shaped messages are ignored. A tool *argume
 problem or a tool-side failure is not a protocol error: it comes back as a normal
 `tools/call` result with `"isError": true` and the message in `content[0].text`, so the
 model can read and react to it.
+
+The MCP tools cover skills only: `search_skills` never returns agents and `get_skill`
+refuses an agent id (telling the model to delegate instead). `report_skill_outcome` accepts
+an agent id with the version from the generated file's marker. `publish_skill` cannot
+publish agents, and an id already used by an agent is refused.
 
 ### search_skills
 

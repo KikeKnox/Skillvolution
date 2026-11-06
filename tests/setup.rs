@@ -440,7 +440,8 @@ fn settings_local_json_gets_hooks_with_correct_commands() {
     assert!(session_cmd.contains(" hook session-start --project "));
     assert!(session_cmd.contains(" --db "));
     let stop_cmd = stop["command"].as_str().unwrap();
-    assert!(stop_cmd.ends_with(" hook stop"));
+    // The review hook needs the project key too, to tell vault agents from foreign ones.
+    assert!(stop_cmd.contains(" hook stop --project "), "{stop_cmd}");
     // Prompt retrieval is scoped to the project like the catalog.
     let prompt = &settings["hooks"]["UserPromptSubmit"][0];
     assert!(prompt.get("matcher").is_none());

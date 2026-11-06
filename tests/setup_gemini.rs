@@ -4,6 +4,9 @@
 //! binary as a subprocess (like `tests/setup_global.rs` and `tests/hook.rs`), since HOME
 //! and stdin/stdout need real process boundaries.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use skillvolution::{hook, setup, vault::Vault};
 
 use clap::Parser;
@@ -403,7 +406,7 @@ impl GlobalEnv {
     /// sandbox (like `tests/setup_global.rs`'s `Env`), so `doctor`'s checks of every
     /// other client never touch this machine's real config files.
     fn base(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::cli();
         cmd.env("HOME", self.home.path())
             // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
             .env("APPDATA", self.home.path().join("AppData"))
@@ -550,7 +553,7 @@ fn global_gemini_doctor_reports_configured_up_to_date() {
 
 /// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
 fn run_hook(db: &Path, args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let mut child = support::cli()
         .arg("--db")
         .arg(db)
         .arg("hook")

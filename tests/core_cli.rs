@@ -2,15 +2,11 @@
 mod support;
 
 use skillvolution::vault::Vault;
-use std::{
-    fs,
-    path::Path,
-    process::{Command, Output},
-};
+use std::{fs, path::Path, process::Output};
 use support::Draft;
 
 fn run(db: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    support::cli()
         .arg("--db")
         .arg(db)
         .args(args)
@@ -188,7 +184,7 @@ fn cli_error_cases_produce_stderr_and_no_stdout() {
 #[test]
 fn help_lists_commands_without_opening_database() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .env("HOME", dir.path())
         .env_remove("XDG_DATA_HOME")
         .arg("--help")
@@ -206,7 +202,7 @@ fn help_lists_commands_without_opening_database() {
 fn default_database_respects_xdg_then_home() {
     for use_xdg in [true, false] {
         let dir = tempfile::tempdir().unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut command = support::cli();
         command
             .arg("outcomes")
             .env("HOME", dir.path())
@@ -236,7 +232,7 @@ fn default_database_respects_xdg_then_home() {
 fn default_database_prefers_local_app_data_on_windows() {
     let dir = tempfile::tempdir().unwrap();
     let local_app_data = dir.path().join("Local");
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .arg("outcomes")
         .env("LOCALAPPDATA", &local_app_data)
         .env_remove("XDG_DATA_HOME")
@@ -257,7 +253,7 @@ fn default_database_keeps_using_a_legacy_home_vault_on_windows() {
     let local_app_data = dir.path().join("Local");
     let legacy = dir.path().join(".local/share/skillvolution/skills.db");
     skillvolution::vault::Vault::open(&legacy).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .arg("outcomes")
         .env("LOCALAPPDATA", &local_app_data)
         .env("USERPROFILE", dir.path())
@@ -290,7 +286,7 @@ fn setup_without_project_defaults_bin_and_xdg_database_globally() {
     // of which the app's own command string carries.
     let canonical_bin = std::path::absolute(bin).unwrap();
 
-    let output = Command::new(bin)
+    let output = support::cli()
         .arg("setup")
         .arg("--client")
         .arg("claude-code")
@@ -331,7 +327,7 @@ fn setup_honours_global_db_flag() {
     fs::create_dir(&project).unwrap();
     let db = dir.path().join("global.db");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .arg("--db")
         .arg(&db)
         .arg("setup")
@@ -612,7 +608,8 @@ fn publish_rejects_multiline_yaml_and_ignores_nested_keys() {
         err.contains("description: multi-line YAML values are not supported; write it on one line"),
         "{err}"
     );
-    assert!(err.contains("write tags inline as [a, b]"), "{err}");
+    // Block lists (`tags:` then `- a`) are read like `[a]`, as Claude Code agents write them.
+    assert!(!err.contains("write tags inline"), "{err}");
     assert!(!err.contains("missing id"), "{err}");
 
     let nested = format!(
@@ -644,7 +641,7 @@ fn publish_ignores_yaml_inline_comments_in_frontmatter() {
     );
     let got = stdout(&run(&db, &["get", "my-skill", "--project", "alpha"]));
     assert!(
-        got.contains("description: Use when C# # builds fail\n"),
+        got.contains("description: \"Use when C# # builds fail\"\n"),
         "{got}"
     );
     assert!(got.contains("tags: [dotnet, csharp]\n"), "{got}");

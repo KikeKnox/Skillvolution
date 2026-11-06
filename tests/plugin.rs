@@ -117,10 +117,18 @@ const { SkillvolutionPlugin } = await import(process.argv[2]);
 const client = {
   app: { log: async () => {} },
   session: {
-    get: async ({ path: { id } }) => ({ data: { parentID: id === "child" ? "top" : undefined } }),
+    get: async ({ path: { id } }) => ({
+      data: { parentID: { child: "top", c2: "m2", c3: "e2", c4: "l2", c5: "r5", c6: "p6" }[id] },
+    }),
   },
 };
-const hooks = await SkillvolutionPlugin({ client, directory: process.cwd() });
+// The plugin looks for project agents in the worktree (the repository root), not in
+// the directory the session happens to run in.
+const hooks = await SkillvolutionPlugin({
+  client,
+  directory: process.cwd() + "/sub",
+  worktree: process.cwd(),
+});
 const system = async (sessionID) => {
   const output = { system: [] };
   await hooks["experimental.chat.system.transform"]({ sessionID }, output);
@@ -137,7 +145,66 @@ await hooks["tool.execute.after"]({ tool: "skillvolution_get_skill", sessionID: 
 hooks.event({ event: { type: "session.idle", properties: { sessionID: "top" } } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 const after = await system("top");
-console.log(JSON.stringify({ top, child, after }));
+const idle = async (sessionID) => {
+  hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return system(sessionID);
+};
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "u", args: { subagent_type: "unmanaged" } });
+const unmanaged = await idle("u");
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "m", args: { subagent_type: "reviewer" } });
+const managed = await idle("m");
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "g", args: { subagent_type: "global-reviewer" } });
+const global = await idle("g");
+// A subagent's own report must not mark the parent reviewed: the delegation is still owed.
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "m2", args: { subagent_type: "reviewer" } });
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "m2", args: { subagent_type: "global-reviewer" } });
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "m2", args: { subagent_type: "reviewer" } });
+await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "c2" });
+const childReported = await idle("m2");
+// Reporting from the parent clears the reminder and the delegated list.
+await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "m2" });
+const parentReported = await system("m2");
+// A subagent's edits count toward the parent; its skill loads do not.
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "c3" });
+const childEdit = await idle("e2");
+await hooks["tool.execute.after"]({ tool: "skillvolution_get_skill", sessionID: "c4" });
+const childLoad = await idle("l2");
+// Work after a review within the same turn is still owed.
+await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "o1" });
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o1" });
+const workAfterReview = await idle("o1");
+// Work before a review in the same turn is settled.
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o2" });
+await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "o2" });
+const workBeforeReview = await idle("o2");
+// A child's session.error must not clear the parent's pending work.
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "p6" });
+hooks.event({ event: { type: "session.error", properties: { sessionID: "c6" } } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const childError = await idle("p6");
+// A managed agent marker must follow the frontmatter and match the file stem.
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad1", args: { subagent_type: "misplaced" } });
+const misplaced = await idle("bad1");
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad2", args: { subagent_type: "wrongid" } });
+const wrongId = await idle("bad2");
+// A hook that gets garbage must not throw.
+let threw = false;
+try {
+  await hooks["tool.execute.after"]({});
+  await hooks["tool.execute.after"]({ tool: "edit" });
+  await hooks["chat.message"]({ sessionID: "z" }, undefined);
+  hooks.event({ event: undefined });
+} catch { threw = true; }
+// Non-git project: worktree "/" falls back to directory.
+const rooted = await SkillvolutionPlugin({ client, directory: process.cwd() + "/nogit", worktree: "/" });
+await rooted["tool.execute.after"]({ tool: "task", sessionID: "n1", args: { subagent_type: "nogit-agent" } });
+rooted.event({ event: { type: "session.idle", properties: { sessionID: "n1" } } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const rootedOut = { system: [] };
+await rooted["experimental.chat.system.transform"]({ sessionID: "n1" }, rootedOut);
+const nonGit = rootedOut.system;
+console.log(JSON.stringify({ workAfterReview, workBeforeReview, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
 "#;
 
 /// Drives the installed plugin in `node` with a fake `skillvolution` binary: a top-level
@@ -186,6 +253,43 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     // `.mjs` so node loads the plugin as an ES module wherever it sits.
     let plugin = project.join("plugin.mjs");
     fs::copy(project.join(".opencode/plugins/skillvolution.js"), &plugin).unwrap();
+    fs::create_dir_all(project.join("sub")).unwrap();
+    let agents = project.join(".opencode/agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        agents.join("reviewer.md"),
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:reviewer:v1:abcdef12 -->\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        agents.join("unmanaged.md"),
+        "---\ndescription: x\n---\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        agents.join("misplaced.md"),
+        "---\ndescription: x\n---\nbody\n<!-- skillvolution-managed:agent:misplaced:v1:abcdef12 -->\n",
+    )
+    .unwrap();
+    fs::write(
+        agents.join("wrongid.md"),
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:other:v1:abcdef12 -->\nbody\n",
+    )
+    .unwrap();
+    let nogit_agents = project.join("nogit/.opencode/agents");
+    fs::create_dir_all(&nogit_agents).unwrap();
+    fs::write(
+        nogit_agents.join("nogit-agent.md"),
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:nogit-agent:v2:abcdef12 -->\nbody\n",
+    )
+    .unwrap();
+    let global_agents = project.join("xdg/opencode/agents");
+    fs::create_dir_all(&global_agents).unwrap();
+    fs::write(
+        global_agents.join("global-reviewer.md"),
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12 -->\nbody\n",
+    )
+    .unwrap();
     let driver = project.join("driver.mjs");
     fs::write(&driver, PLUGIN_DRIVER).unwrap();
 
@@ -193,6 +297,7 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
         .arg(&driver)
         .arg(&plugin)
         .current_dir(project)
+        .env("XDG_CONFIG_HOME", project.join("xdg"))
         .output()
         .unwrap();
     assert!(
@@ -204,11 +309,73 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
     let reminded = result["after"].as_array().unwrap().iter().any(|text| {
-        text.as_str()
-            .unwrap()
-            .starts_with("Skillvolution review: you edited files or loaded vault skills")
+        text.as_str().unwrap().starts_with(
+            "Skillvolution review: you edited files, loaded vault skills, or delegated",
+        )
     });
     assert!(reminded, "{result}");
+    let has_reminder = |key: &str| {
+        result[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|text| text.as_str().unwrap().starts_with("Skillvolution review:"))
+    };
+    assert!(!has_reminder("unmanaged"), "{result}");
+    assert!(
+        has_reminder("managed") && has_reminder("global"),
+        "{result}"
+    );
+    let reminder_text = |key: &str| {
+        result[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|text| text.as_str())
+            .find(|text| text.starts_with("Skillvolution review:"))
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        reminder_text("childReported"),
+        Some(format!(
+            "{}\nDelegated vault agents to report: reviewer v1, global-reviewer v1.",
+            skillvolution::hook::STOP_REASON
+        ))
+    );
+    assert_eq!(
+        reminder_text("managed").as_deref(),
+        Some(
+            format!(
+                "{}\nDelegated vault agents to report: reviewer v1.",
+                skillvolution::hook::STOP_REASON
+            )
+            .as_str()
+        )
+    );
+    assert!(reminder_text("parentReported").is_none(), "{result}");
+    assert_eq!(
+        reminder_text("childEdit").as_deref(),
+        Some(skillvolution::hook::STOP_REASON),
+        "{result}"
+    );
+    assert!(reminder_text("childLoad").is_none(), "{result}");
+    assert!(has_reminder("workAfterReview"), "{result}");
+    assert!(!has_reminder("workBeforeReview"), "{result}");
+    assert!(has_reminder("childError"), "{result}");
+    assert!(!has_reminder("misplaced"), "{result}");
+    assert!(!has_reminder("wrongId"), "{result}");
+    assert_eq!(result["threw"], false);
+    assert!(has_reminder("nonGit"), "{result}");
+    assert_eq!(
+        reminder_text("nonGit").as_deref(),
+        Some(
+            format!(
+                "{}\nDelegated vault agents to report: nogit-agent v2.",
+                skillvolution::hook::STOP_REASON
+            )
+            .as_str()
+        )
+    );
     let stdin: serde_json::Value = serde_json::from_slice(&fs::read(&stdin_log).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
 }

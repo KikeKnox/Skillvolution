@@ -168,8 +168,8 @@ Every client gets the three managed skills (`evolution`, `skill-evaluation`,
 
 | Client | Files and entries | Review reminder | Notes |
 |---|---|---|---|
-| Claude Code | `SessionStart`/`UserPromptSubmit`/`Stop` hooks and `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` (skipped when an identical registration already exists) | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) or `get_skill` loads after the last successful review call. It returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). The prompt hook adds suggestions as `additionalContext`. If `claude` isn't on `PATH`, setup prints the `mcp add-json` command for you to run |
-| OpenCode | `mcp.skillvolution` entry and `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, `plugins/skillvolution.js` | The plugin injects the catalog and the skills matching each user message into the system prompt. When a turn that edited files or loaded a skill goes idle without a review, it adds a reminder to later turns' system prompts | Never blocks a turn and spends no extra model turn. Suggestions come from `hook prompt` via the `chat.message` hook |
+| Claude Code | `SessionStart`/`UserPromptSubmit`/`Stop` hooks and `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` (skipped when an identical registration already exists) | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`), `get_skill` loads, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker) after the last successful review call. It returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). The prompt hook adds suggestions as `additionalContext`. If `claude` isn't on `PATH`, setup prints the `mcp add-json` command for you to run |
+| OpenCode | `mcp.skillvolution` entry and `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, `plugins/skillvolution.js` | The plugin injects the catalog and the skills matching each user message into the system prompt. When a turn that edited files, loaded a skill, or delegated to a managed vault agent goes idle without a review, it adds a reminder to later turns' system prompts | Never blocks a turn and spends no extra model turn. Suggestions come from `hook prompt` via the `chat.message` hook |
 | Devin CLI | `mcp_config.json` server entry, `config.json` (`permissions.allow`: `run_subagent`, `read_subagent`, `mcp__skillvolution__*`, plus `SessionStart`/`UserPromptSubmit`/`PostToolUse`/`Stop`/`SessionEnd`/`PermissionRequest` hooks), `AGENTS.md` marker block | `hook tool-use`/`hook stop --client devin` keep per-session worked/reviewed flags. A stop after unreviewed work prints `{"decision":"block"}` | `UserPromptSubmit` suggestions follow Devin's docs but are not verified live. `hook approve` auto-approves `run_subagent`/`read_subagent` and every `mcp__skillvolution__*` tool, including `publish_skill` (see [Safety and limitations](#safety-and-limitations)) |
 | Codex CLI | `[mcp_servers.skillvolution]` in `config.toml`, `hooks.json` (SessionStart, UserPromptSubmit, PostToolUse on `apply_patch` and `mcp__skillvolution__*`, Stop, SessionEnd, PermissionRequest on `mcp__skillvolution__*`), `AGENTS.md` | Same flag tracking as Devin; `{"decision":"block"}` on Stop | `UserPromptSubmit` adds the suggestions. A project-mode `.codex/config.toml` loads only after you trust the project in Codex. Your `approval_policy` decides whether tools run without prompting |
 | Gemini CLI | `mcpServers.skillvolution` (with `trust: true` unless already set) and `SessionStart`/`BeforeAgent`/`AfterTool`/`AfterAgent`/`SessionEnd` hooks in `settings.json`, `GEMINI.md` marker block | Same flag tracking. AfterAgent, Gemini's Stop, prints `{"decision":"deny"}` | `BeforeAgent` appends the suggestions to that turn's prompt. MCP tools are named `mcp_skillvolution_*`. `trust` is the documented way to skip tool-confirmation prompts for one server |
@@ -187,18 +187,30 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 | **Use** | `setup [--client …] [--project DIR] [--dry-run]` | Configure clients ([Setup](#setup)) |
 | | `doctor [--json] [--fix]` | Health check of the vault and every client config; `--fix` repairs |
 | | `search QUERY [--limit N] [--project KEY] [--json]` | Rank skills like `search_skills` (default limit 20) |
-| | `list [--project KEY] [--json]` | Every skill visible from the project |
-| | `get ID [--version N] [--project KEY]` | Print a skill as a `SKILL.md` that `publish --replace` accepts; records nothing |
-| **Curate** | `publish PATH [--id ID] [--scope global\|project] [--project KEY] [--evidence TEXT] [--replace]` | Publish a `SKILL.md` or a directory of them yourself ([manual publishing](#publishing-a-skill-manually)) |
+| | `list [--kind skill\|agent] [--project KEY] [--json]` | Every skill (or agent) visible from the project |
+| | `get ID [--version N] [--project KEY]` | Print a skill as a `SKILL.md` (an agent as `AGENT.md`) that `publish --replace` accepts; records nothing |
+| **Curate** | `publish PATH [--id ID] [--scope global\|project] [--project KEY] [--evidence TEXT] [--replace]` | Publish a `SKILL.md`/`AGENT.md` or a directory of them yourself ([manual publishing](#publishing-a-skill-manually)) |
 | | `show ID [--version N] [--json]` | Status, evidence, and diff against the base revision |
 | | `outcomes [ID] [--failing] [--unreported] [--json]` | Per-skill helped / failed / not applicable / loaded / unreported, or one skill's log |
 | | `deprecate ID` / `undeprecate ID` | Hide a skill from search without deleting its history, or bring it back |
-| | `purge ID [--version N]` | Permanently delete a skill or one revision, with its outcomes and loads |
+| | `purge ID [--version N] [--force]` | Permanently delete a skill or one revision, with its outcomes and loads; refuses skills agents list unless `--force` |
+| | `agents models\|add\|remove\|sync\|import …` | Generate subagent files from the vault ([Subagents](#subagents)) |
 | **Maintain** | `backup PATH` | Consistent copy of the live database (`VACUUM INTO`; PATH must not exist) |
 | | `export [-o FILE]` / `import FILE` | Whole vault as JSON / merge an export back (atomic; a conflict aborts) |
 | | `relocate PATH` | Move the vault and repoint every global client config |
 | | `setup --remove [--client …]` | Uninstall ([Uninstall](#uninstall)) |
 | *Internal* | `serve`, `hook …` | Started by the clients: the MCP server and the hook entry points |
+
+## Subagents
+
+The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`) that
+`skillvolution agents add` generates for Claude Code and OpenCode (built-in `sv-high`,
+`sv-mid` and `sv-low` ship with the binary; `agents models set` maps each tier to a model per
+client). `agents sync` is a dry run until `--apply`, hand-edited files are never overwritten
+without `--force` (after a backup), listed skills are pinned to the version seen when the file
+was generated (`agents sync` flags newer ones), a restricted agent cannot delegate to other
+subagents, and nothing is generated automatically. See
+[docs/cli.md#agents](docs/cli.md#agents) and [docs/architecture.md#agents](docs/architecture.md#agents).
 
 ## Publishing a skill manually
 
@@ -370,7 +382,11 @@ root-level `AGENTS.md`, `GEMINI.md`, `opencode.json`, and `.mcp.json`.
 - every detected client: whether it is configured and up to date, whether each managed
   skill is current, whether the configured binary path still exists, and whether Claude
   Code's MCP registration is in place;
-- leftover project-level installs.
+- leftover project-level installs;
+- managed agent files (warn-only, nothing when there are none): edited by hand, outdated,
+  missing from the vault (or deprecated, or a skill rather than an agent), the same id at
+  project and user level, no model for a tier, unavailable `skills:`, and a catalog size
+  estimate. `--fix` doesn't regenerate them: run `skillvolution agents sync --apply`.
 
 It exits 0 when nothing fails; warnings don't count as failures.
 
@@ -464,7 +480,8 @@ skillvolution doctor                              # anything still stale? doctor
 ```
 
 - **Schema migration.** The schema migrates automatically on first open. The current
-  schema, v5, rebuilds the search index with the porter stemmer. Back up first: once
+  schema, v6, adds agents (`skills.kind`, `revisions.meta`, `agent_models`); v5 rebuilt the
+  search index with the porter stemmer. Back up first: once
   migrated, the vault no longer opens with an older binary.
 - **Newer vaults.** A vault written by a newer version refuses to open and asks you to
   upgrade skillvolution.
@@ -493,6 +510,8 @@ It deliberately keeps:
 - generic permission grants you might rely on for other tools: `Agent`/`Task` in Claude
   Code and `run_subagent`/`read_subagent` in Devin CLI. Each one is reported as a
   `note: … still allows …` line;
+- generated agent files (`.claude/agents`, `.opencode/agents`): `setup --remove` lists them
+  but doesn't delete them; use `skillvolution agents remove ID...`;
 - the vault database and the `.skillvolution.bak*` backups;
 - the `skillvolution` binary. Remove it yourself, for example with
   `rm ~/.local/bin/skillvolution`.
@@ -547,7 +566,7 @@ It deliberately keeps:
 No, that's the review reminder working. `hook stop` scans the session transcript from
 the offset recorded for that session. It looks for the last piece of work: a file-edit
 tool call (`Edit`, `Write`, `MultiEdit`, or `NotebookEdit`; `Bash` doesn't count) or a
-successful `get_skill`. When that work comes after the last *successful*
+successful `get_skill`, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker). When that work comes after the last *successful*
 `publish_skill`/`report_skill_outcome` call, the hook asks for a report on every loaded
 skill. A rejected review call doesn't count, and neither does a failed `get_skill`.
 
@@ -599,7 +618,9 @@ drops the flags.
 - **Suggestions.** It runs `hook prompt` on each new top-level user message and adds the
   matching skills to that turn's system prompt. Subagent sessions get none.
 - **Work tracking.** It tracks file-edit tools (`edit`, `write`, `multiedit`, `patch`,
-  `apply_patch`; `bash` doesn't count) and `get_skill` loads on the top-level session.
+  `apply_patch`; `bash` doesn't count), `get_skill` loads, and `task` delegations to a
+  managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)
+  on the top-level session.
   Subagent work is attributed to its parent, and a subagent's own idle events are
   ignored.
 - **Reminder.** Once a working turn goes idle without a review call, later turns' system

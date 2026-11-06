@@ -3,12 +3,7 @@ mod support;
 
 use serde_json::{Value, json};
 use skillvolution::{hook, vault::Vault};
-use std::{
-    fs,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{fs, io::Write, path::Path, process::Stdio};
 use support::{Draft, git_repo};
 
 /// A tool_use line whose id is the tool name, so `tool_result` can answer it.
@@ -54,7 +49,7 @@ fn no_work_does_not_block() {
     let transcript = dir.path().join("transcript.jsonl");
     write_transcript(&transcript, &[user_text("hi"), assistant_tool_use("Read")]);
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 }
 
 #[test]
@@ -67,8 +62,8 @@ fn edit_blocks_once_then_not_again_on_an_unchanged_transcript() {
         &[user_text("please edit"), assistant_tool_use("Edit")],
     );
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 }
 
 #[test]
@@ -78,15 +73,15 @@ fn new_lines_appended_after_the_offset_block_again() {
     let transcript = dir.path().join("transcript.jsonl");
     write_transcript(&transcript, &[assistant_tool_use("Edit")]);
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 
     let mut file = fs::OpenOptions::new()
         .append(true)
         .open(&transcript)
         .unwrap();
     writeln!(file, "{}", assistant_tool_use("Edit")).unwrap();
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
 }
 
 #[test]
@@ -103,7 +98,7 @@ fn work_plus_review_tool_does_not_block() {
             &[assistant_tool_use("Edit"), assistant_tool_use(review_tool)],
         );
         let input = stop_input(session, &transcript, false);
-        assert!(hook::stop(&vault, &input).unwrap().is_none());
+        assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
     }
 }
 
@@ -121,7 +116,7 @@ fn work_after_a_review_in_the_same_span_still_blocks() {
         ],
     );
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
 }
 
 #[test]
@@ -140,7 +135,10 @@ fn failed_publish_does_not_count_as_review() {
             ],
         );
         let input = stop_input(session, &transcript, false);
-        assert_eq!(hook::stop(&vault, &input).unwrap().is_some(), blocks);
+        assert_eq!(
+            hook::stop(&vault, &input, None, &[]).unwrap().is_some(),
+            blocks
+        );
     }
 }
 
@@ -159,7 +157,10 @@ fn a_loaded_skill_without_a_report_blocks() {
         ],
     );
     let input = stop_input("s1", &transcript, false);
-    assert_eq!(hook::stop(&vault, &input).unwrap(), Some(hook::STOP_REASON));
+    assert_eq!(
+        hook::stop(&vault, &input, None, &[]).unwrap().as_deref(),
+        Some(hook::STOP_REASON)
+    );
 }
 
 #[test]
@@ -179,7 +180,7 @@ fn a_loaded_skill_followed_by_a_report_does_not_block() {
         ],
     );
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 }
 
 #[test]
@@ -193,13 +194,165 @@ fn a_failed_skill_load_is_not_work() {
         &[assistant_tool_use(get), tool_result(get, true)],
     );
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
+}
+
+/// A tool_use of the Agent (or legacy Task) tool delegating to `subagent_type`;
+/// its id is `delegate-<subagent_type>`.
+fn delegation(tool: &str, subagent_type: &str) -> String {
+    json!({"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":format!("delegate-{subagent_type}"),"name":tool,
+         "input":{"subagent_type":subagent_type,"prompt":"review"}}
+    ]}})
+    .to_string()
+}
+
+/// Generated-file directory holding a managed (marker-carrying) `reviewer` agent file.
+fn managed_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
+    let agents = dir.join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        agents.join("reviewer.md"),
+        "---\nname: reviewer\n---\n<!-- skillvolution-managed:agent:reviewer:v1:00000000 -->\nbody\n",
+    )
+    .unwrap();
+    vec![agents]
+}
+
+fn stop_after(lines: &[String], vault: &Vault, dir: &Path) -> Option<String> {
+    let transcript = dir.join("transcript.jsonl");
+    write_transcript(&transcript, lines);
+    hook::stop(
+        vault,
+        &stop_input("s1", &transcript, false),
+        None,
+        &managed_dirs(dir),
+    )
+    .unwrap()
+    .map(|reason| reason.into_owned())
+}
+
+fn with_delegated(names: &str) -> String {
+    format!(
+        "{}\nDelegated vault agents to report: {names}.",
+        hook::STOP_REASON
+    )
+}
+
+#[test]
+fn delegating_to_a_vault_agent_without_a_report_blocks_and_a_report_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    let report = "mcp__skillvolution__report_skill_outcome";
+    for tool in ["Agent", "Task"] {
+        let delegate = delegation(tool, "reviewer");
+        let result = tool_result("delegate-reviewer", false);
+        assert_eq!(
+            stop_after(&[delegate.clone(), result.clone()], &vault, dir.path()),
+            Some(with_delegated("reviewer v1")),
+            "{tool}"
+        );
+        let reported = [
+            delegate,
+            result,
+            assistant_tool_use(report),
+            tool_result(report, false),
+        ];
+        let transcript = dir.path().join("reported.jsonl");
+        write_transcript(&transcript, &reported);
+        let input = stop_input("s2", &transcript, false);
+        assert!(
+            hook::stop(&vault, &input, None, &managed_dirs(dir.path()))
+                .unwrap()
+                .is_none(),
+            "{tool}"
+        );
+    }
+}
+
+#[test]
+fn delegating_to_an_agent_scoped_to_another_project_is_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("reviewer")
+        .scope("other-project")
+        .publish_agent(&mut vault);
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            delegation("Agent", "reviewer"),
+            tool_result("delegate-reviewer", false),
+        ],
+    );
+    let dirs = managed_dirs(dir.path());
+    let stop = |session: &str, project| {
+        hook::stop(
+            &vault,
+            &stop_input(session, &transcript, false),
+            project,
+            &dirs,
+        )
+        .unwrap()
+        .map(|reason| reason.into_owned())
+    };
+    assert!(stop("s1", Some("my-project")).is_none());
+    assert!(stop("s2", None).is_none());
+    assert_eq!(
+        stop("s3", Some("other-project")),
+        Some(with_delegated("reviewer v1"))
+    );
+}
+
+#[test]
+fn delegating_to_a_vault_agent_with_no_generated_file_is_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            delegation("Agent", "reviewer"),
+            tool_result("delegate-reviewer", false),
+        ],
+    );
+    // Not installed anywhere, or a foreign (marker-less) file of the same name.
+    let foreign = dir.path().join("foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(
+        foreign.join("reviewer.md"),
+        "---\nname: reviewer\n---\nmine\n",
+    )
+    .unwrap();
+    for (session, dirs) in [("s1", vec![]), ("s2", vec![foreign])] {
+        let input = stop_input(session, &transcript, false);
+        assert!(hook::stop(&vault, &input, None, &dirs).unwrap().is_none());
+    }
+}
+
+#[test]
+fn delegating_to_builtin_unknown_or_failed_agents_is_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    for lines in [
+        vec![delegation("Agent", "sv-mid")],
+        vec![delegation("Agent", "no-such-agent")],
+        vec![
+            delegation("Agent", "reviewer"),
+            tool_result("delegate-reviewer", true),
+        ],
+    ] {
+        assert!(stop_after(&lines, &vault, dir.path()).is_none());
+    }
 }
 
 #[test]
 fn stop_reason_asks_for_outcomes_of_loaded_skills_and_names_the_evaluation_skill() {
     for expected in [
-        "edited files or loaded vault skills",
+        "loaded vault skills, or delegated to vault agents",
         "report_skill_outcome for every skill you loaded with get_skill",
         "fresh subagent that follows the skill-evaluation skill",
         "publish_skill",
@@ -215,7 +368,7 @@ fn stop_hook_active_never_blocks() {
     let transcript = dir.path().join("transcript.jsonl");
     write_transcript(&transcript, &[assistant_tool_use("Edit")]);
     let input = stop_input("s1", &transcript, true);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 }
 
 #[test]
@@ -230,7 +383,7 @@ fn stop_hook_active_still_advances_the_offset_so_the_next_turn_sees_only_new_wor
     write_transcript(&transcript, &[assistant_tool_use("Edit")]);
 
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_some()); // turn 1: blocks
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some()); // turn 1: blocks
 
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -243,7 +396,11 @@ fn stop_hook_active_still_advances_the_offset_so_the_next_turn_sees_only_new_wor
     )
     .unwrap();
     let active_input = stop_input("s1", &transcript, true);
-    assert!(hook::stop(&vault, &active_input).unwrap().is_none()); // stop_hook_active: never blocks
+    assert!(
+        hook::stop(&vault, &active_input, None, &[])
+            .unwrap()
+            .is_none()
+    ); // stop_hook_active: never blocks
 
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -254,7 +411,7 @@ fn stop_hook_active_still_advances_the_offset_so_the_next_turn_sees_only_new_wor
     // turn 2: a fresh, unreviewed Edit must block again. If the offset was not
     // saved above, this call would re-see the old Edit+report pair together
     // with the new Edit and conclude everything was already reviewed.
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
 }
 
 #[test]
@@ -262,7 +419,7 @@ fn missing_transcript_does_not_block() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::open(&dir.path().join("skills.db")).unwrap();
     let input = stop_input("s1", &dir.path().join("does-not-exist.jsonl"), false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 }
 
 #[test]
@@ -276,7 +433,7 @@ fn trailing_partial_line_is_not_consumed() {
     let partial = &partial[..partial.len() - 5];
     fs::write(&transcript, format!("{}\n{partial}", user_text("hi"))).unwrap();
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_none());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_none());
 
     // Once the writer finishes the line, it is picked up on the next call.
     let mut file = fs::OpenOptions::new()
@@ -284,7 +441,7 @@ fn trailing_partial_line_is_not_consumed() {
         .open(&transcript)
         .unwrap();
     writeln!(file, "{}", &assistant_tool_use("Edit")[partial.len()..]).unwrap();
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
 }
 
 #[test]
@@ -295,7 +452,7 @@ fn a_truncated_or_rotated_transcript_restarts_at_zero() {
     write_transcript(&transcript, &[assistant_tool_use("Edit")]);
     vault.set_transcript_offset("s1", 10_000).unwrap();
     let input = stop_input("s1", &transcript, false);
-    assert!(hook::stop(&vault, &input).unwrap().is_some());
+    assert!(hook::stop(&vault, &input, None, &[]).unwrap().is_some());
 }
 
 #[test]
@@ -810,7 +967,7 @@ fn devin_session_start_wraps_the_catalog_in_hook_specific_output() {
 
 /// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
 fn run_hook(db: &Path, args: &[&str], input: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let mut child = support::cli()
         .arg("--db")
         .arg(db)
         .arg("hook")
@@ -895,7 +1052,7 @@ fn run_hook_session_start(
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+    let mut command = support::cli();
     command
         .arg("--db")
         .arg(db)
@@ -1376,4 +1533,45 @@ fn two_forms_of_one_word_count_as_one_keyword() {
     );
     let skills = hook::relevant_skills(&vault, None, "deployment rollout").unwrap();
     assert_eq!(ids(&skills), ["blue-green-deployment"]);
+}
+
+#[test]
+fn the_reason_names_each_delegated_vault_agent_once_with_its_installed_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::open(&dir.path().join("skills.db")).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    Draft::new("counter-agent").publish_agent(&mut vault);
+    let agents = dir.path().join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    for (id, version) in [("reviewer", 1), ("counter-agent", 2)] {
+        fs::write(
+            agents.join(format!("{id}.md")),
+            format!(
+                "---\nname: {id}\n---\n<!-- skillvolution-managed:agent:{id}:v{version}:00000000 -->\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+    let transcript = dir.path().join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        &[
+            delegation("Agent", "counter-agent"),
+            tool_result("delegate-counter-agent", false),
+            delegation("Agent", "reviewer"),
+            tool_result("delegate-reviewer", false),
+            // A repeat and a built-in add nothing.
+            delegation("Task", "counter-agent"),
+            delegation("Agent", "sv-low"),
+        ],
+    );
+    let reason = hook::stop(
+        &vault,
+        &stop_input("s1", &transcript, false),
+        None,
+        &[agents],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(reason, with_delegated("counter-agent v2, reviewer v1"));
 }

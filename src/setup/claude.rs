@@ -60,11 +60,11 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
 /// SessionStart (catalog), UserPromptSubmit (skills matching each request, injected as
 /// `additionalContext`: https://code.claude.com/docs/en/hooks), and Stop (review). `key`
-/// scopes both retrieval hooks to the project.
+/// scopes all three hooks to the project.
 fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start = hooks::hook_cmd(bin, db, "session-start", &hooks::project_flag(key))?;
     let prompt = hooks::hook_cmd(bin, db, "prompt", &hooks::project_flag(key))?;
-    let stop = hooks::hook_cmd(bin, db, "stop", "")?;
+    let stop = hooks::hook_cmd(bin, db, "stop", &hooks::project_flag(key))?;
     hooks::merge(
         config,
         &[

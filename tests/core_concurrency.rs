@@ -7,7 +7,7 @@ use support::Draft;
 
 #[test]
 fn simultaneous_connections_publish_distinct_skills_without_conflict() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::fast_tempdir();
     let path = dir.path().join("skills.db");
     Vault::open(&path).unwrap();
     let barrier = Arc::new(Barrier::new(8));
@@ -34,7 +34,7 @@ fn simultaneous_connections_publish_distinct_skills_without_conflict() {
 fn competing_publishers_have_exactly_one_winner() {
     // Proposals publish immediately against an expected base, so concurrent
     // proposals for the same new id cannot all succeed.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::fast_tempdir();
     let path = dir.path().join("skills.db");
     Vault::open(&path).unwrap();
     let barrier = Arc::new(Barrier::new(8));
@@ -61,7 +61,7 @@ fn competing_publishers_have_exactly_one_winner() {
 #[test]
 fn opening_a_fresh_database_concurrently_never_fails_with_busy() {
     for _ in 0..5 {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = support::fast_tempdir();
         let path = dir.path().join("skills.db");
         let barrier = Arc::new(Barrier::new(10));
         let threads: Vec<_> = (0..10)
@@ -85,7 +85,7 @@ fn opening_a_fresh_database_concurrently_never_fails_with_busy() {
 
 #[test]
 fn a_writer_waits_for_an_existing_write_transaction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::fast_tempdir();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -106,7 +106,7 @@ fn parallel_devin_tool_uses_never_lose_the_work_flag() {
     // Devin runs PostToolUse hooks in parallel, one process each. Whichever of
     // a work and a review tool lands last, the session must stay marked as
     // worked; a read-modify-write update lets a review overwrite the work flag.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::fast_tempdir();
     let path = dir.path().join("skills.db");
     Vault::open(&path).unwrap();
     for round in 0..20 {

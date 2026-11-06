@@ -4,6 +4,9 @@
 //! global-scope and `doctor` tests run the built binary as a subprocess with HOME/
 //! CODEX_HOME/PATH pinned (like `tests/setup_global.rs`), since those are process-global.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use skillvolution::setup;
 
 use clap::Parser;
@@ -358,7 +361,7 @@ impl Env {
     /// pinned too so `doctor`'s pass over every other client never touches this
     /// machine's real OpenCode/Claude Code config.
     fn cli(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skillvolution"));
+        let mut cmd = support::cli();
         cmd.env("HOME", self.home.path())
             // Isolate %APPDATA% (Devin's config dir on Windows) from the host.
             .env("APPDATA", self.home.path().join("AppData"))
@@ -447,7 +450,7 @@ fn doctor_reports_codex_configured_up_to_date_after_setup() {
 
 /// Runs `hook <args>` with `input` on stdin; stdout/stderr are captured.
 fn run_hook(db: &Path, args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let mut child = support::cli()
         .arg("--db")
         .arg(db)
         .arg("hook")
@@ -508,7 +511,7 @@ fn cli_hook_session_start_wraps_context_for_codex() {
     let db = dir.path().join("skills.db");
     skillvolution::vault::Vault::open(&db).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+    let output = support::cli()
         .arg("--db")
         .arg(&db)
         .arg("hook")

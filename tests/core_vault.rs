@@ -1247,15 +1247,15 @@ fn new_databases_are_stamped_with_the_version_and_application_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 }
 
 #[test]
-fn migrates_a_v1_database_to_v5() {
+fn migrates_a_v1_database_to_v6() {
     let (_dir, path) = legacy_database(1);
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
     // v1 defaulted new revisions to draft; the v5 rebuild drops that too.
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -1275,10 +1275,10 @@ fn migrates_a_v1_database_to_v5() {
 }
 
 #[test]
-fn migrates_a_v2_database_to_v5_preserving_data() {
+fn migrates_a_v2_database_to_v6_preserving_data() {
     let (_dir, path) = legacy_database(2);
     let mut vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 
     // Revisions survive; the legacy draft is retired.
@@ -1323,7 +1323,7 @@ fn migrates_a_v2_database_to_v5_preserving_data() {
 }
 
 #[test]
-fn migrates_a_v3_database_to_v5_with_loads_and_inherited_records() {
+fn migrates_a_v3_database_to_v6_with_loads_and_inherited_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
@@ -1344,6 +1344,7 @@ fn migrates_a_v3_database_to_v5_with_loads_and_inherited_records() {
     // without prior counts (unchanged from v1 through v3).
     let v3_view = &V1_SCHEMA[V1_SCHEMA.find("CREATE VIEW").unwrap()..];
     let conn = rusqlite::Connection::open(&path).unwrap();
+    strip_v6(&conn);
     conn.execute_batch("DROP TABLE loads; DROP VIEW current_skills;")
         .unwrap();
     conn.execute_batch(v3_view).unwrap();
@@ -1351,7 +1352,7 @@ fn migrates_a_v3_database_to_v5_with_loads_and_inherited_records() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(
         ids(&page),
@@ -1368,6 +1369,42 @@ fn migrates_a_v3_database_to_v5_with_loads_and_inherited_records() {
             .collect::<Vec<_>>(),
         [("zeta", 1, 1)]
     );
+}
+
+/// Takes a current database back to its v5 shape: no agent kind, revision
+/// metadata, or tier-to-model table.
+fn strip_v6(conn: &rusqlite::Connection) {
+    let view = schema_sql(conn, "current_skills").replace(", s.kind, r.meta", "");
+    conn.execute_batch(&format!(
+        "DROP VIEW current_skills;
+         DROP TABLE agent_models;
+         ALTER TABLE skills DROP COLUMN kind;
+         ALTER TABLE revisions DROP COLUMN meta;
+         {view};"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn migrates_a_v5_database_to_v6_keeping_skills_as_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills.db");
+    let mut vault = Vault::open(&path).unwrap();
+    Draft::new("skill").publish(&mut vault);
+    drop(vault);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    strip_v6(&conn);
+    conn.pragma_update(None, "user_version", 5).unwrap();
+    drop(conn);
+
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(pragma(&path, "user_version"), 6);
+    let skill = vault.get("skill", None, None).unwrap();
+    assert_eq!((skill.kind.as_str(), skill.meta.is_none()), ("skill", true));
+    assert_eq!(ids(&vault.search("", None, 20, 0).unwrap()), ["skill"]);
+    vault
+        .set_agent_model("claude-code", "mid", "sonnet", None)
+        .unwrap();
 }
 
 /// The `CREATE` statement sqlite_master stores for `name`.
@@ -1395,6 +1432,7 @@ fn migrates_a_v4_database_retiring_draft_and_rejected_revisions() {
     // Put revisions back in its v4 shape (draft and rejected still allowed),
     // then add one of each, plus an outcome and a load on the draft.
     let conn = rusqlite::Connection::open(&path).unwrap();
+    strip_v6(&conn);
     let view = schema_sql(&conn, "current_skills");
     let v4_revisions = schema_sql(&conn, "revisions")
         .replace("CREATE TABLE revisions", "CREATE TABLE revisions_v4")
@@ -1423,7 +1461,7 @@ fn migrates_a_v4_database_retiring_draft_and_rejected_revisions() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     let draft = vault.inspect("skill", 2).unwrap();
     assert_eq!(draft.status, "superseded");
     assert_eq!(draft.review_note.as_deref(), Some("legacy draft"));
@@ -1508,7 +1546,7 @@ fn migration_tolerates_foreign_key_violations_already_in_the_vault() {
     drop(conn);
 
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 5);
+    assert_eq!(pragma(&path, "user_version"), 6);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let orphans: i64 = conn
         .query_row(
@@ -1518,4 +1556,147 @@ fn migration_tolerates_foreign_key_violations_already_in_the_vault() {
         )
         .unwrap();
     assert_eq!(orphans, 1);
+}
+
+#[test]
+fn proposing_an_agent_over_a_skill_id_fails_and_leaves_the_skill_unchanged() {
+    let (_dir, mut vault) = open();
+    Draft::new("shared-id").publish(&mut vault);
+    let before = vault.inspect("shared-id", 1).unwrap();
+
+    let draft = Draft::new("shared-id")
+        .raw_content("## Role\nR.\n## Procedure\n1. P.\n## Output contract\nO.\n## Limits\nL.\n")
+        .expected_version(1);
+    let meta = skillvolution::vault::AgentMeta {
+        role: "subagent".into(),
+        tier: "mid".into(),
+        effort: None,
+        tools: None,
+        skills: vec![],
+    };
+    let error = vault
+        .propose_agent(&draft.proposal(), &meta)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("already exists as a skill"), "{error}");
+
+    assert_eq!(vault.latest_version("shared-id").unwrap(), 1);
+    let after = vault.inspect("shared-id", 1).unwrap();
+    assert_eq!(after.content, before.content);
+    assert!(vault.inspect("shared-id", 2).is_err());
+}
+
+#[test]
+fn agent_skills_must_be_published_skills_visible_from_the_agents_scope() {
+    let (_dir, mut vault) = open();
+    Draft::new("global-skill").publish(&mut vault);
+    Draft::new("mine-skill").scope("mine").publish(&mut vault);
+    Draft::new("theirs-skill")
+        .scope("theirs")
+        .publish(&mut vault);
+    Draft::new("an-agent").publish_agent(&mut vault);
+    let body = "## Output contract\nFindings.\n";
+    let meta = |skills: &[&str]| skillvolution::vault::AgentMeta {
+        role: "subagent".into(),
+        tier: "mid".into(),
+        effort: None,
+        tools: None,
+        skills: skills.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    let publish = |vault: &mut Vault, id: &str, scope: Option<&str>, skills: &[&str]| {
+        let mut draft = Draft::new(id).raw_content(body);
+        if let Some(scope) = scope {
+            draft = draft.scope(scope);
+        }
+        vault.propose_agent(&draft.proposal(), &meta(skills))
+    };
+    let error = publish(
+        &mut vault,
+        "bad-agent",
+        Some("mine"),
+        &[
+            "global-skill",
+            "mine-skill",
+            "gone",
+            "an-agent",
+            "theirs-skill",
+        ],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("gone (missing or purged)")
+            && error.contains("an-agent (is an agent, not a skill)")
+            && error.contains("theirs-skill (project-scoped to another project)")
+            && !error.contains("mine-skill")
+            && !error.contains("global-skill"),
+        "{error}"
+    );
+    let error = publish(&mut vault, "global-agent", None, &["mine-skill"])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("skills: `mine-skill` is project-scoped; a global agent can only use global skills (or give the agent `scope: project`)"),
+        "{error}"
+    );
+    assert!(
+        publish(
+            &mut vault,
+            "ok-agent",
+            Some("mine"),
+            &["global-skill", "mine-skill"]
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn agent_messages_name_the_tier_and_the_entry_kind() {
+    let (_dir, mut vault) = open();
+    let missing_tier = skillvolution::vault::AgentMeta {
+        role: "subagent".into(),
+        tier: String::new(),
+        effort: None,
+        tools: None,
+        skills: vec![],
+    };
+    let draft = Draft::new("some-agent").raw_content("## Role\nx\n");
+    let problems = skillvolution::vault::agent_problems(
+        Some("some-agent"),
+        Some("d"),
+        &[],
+        "## Role\nx\n",
+        &missing_tier,
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p == "tier is required (high, mid or low)")
+            && problems.iter().any(|p| p.contains("## Output contract")),
+        "{problems:?}"
+    );
+    drop(draft);
+    Draft::new("scoped-agent")
+        .scope("mine")
+        .publish_agent(&mut vault);
+    let error = vault
+        .propose_agent(
+            &Draft::new("scoped-agent")
+                .raw_content("## Output contract\nx\n")
+                .expected_version(1)
+                .proposal(),
+            &skillvolution::vault::AgentMeta {
+                role: "subagent".into(),
+                tier: "mid".into(),
+                effort: None,
+                tools: None,
+                skills: vec![],
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("agent scoped-agent already exists with scope mine"),
+        "{error}"
+    );
 }
