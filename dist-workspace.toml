@@ -31,3 +31,7 @@ plan-jobs = ["./ci"]
 # otherwise leaves the builds "skipped" and still publishes an empty release); keep `dist`
 # from rejecting that edit. After `dist generate`, reapply it.
 allow-dirty = ["ci"]
+
+# GitHub retired the macos-14 image dist defaults to for this target.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
