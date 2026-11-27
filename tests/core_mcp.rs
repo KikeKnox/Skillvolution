@@ -135,7 +135,8 @@ fn tools_list_exposes_the_four_tools() {
             "usage_report",
             "search_agents",
             "install_agent",
-            "list_models"
+            "list_models",
+            "publish_agent"
         ]
     );
 }
@@ -812,4 +813,18 @@ fn initialize_result_includes_instructions() {
         "{instructions}"
     );
     assert!(instructions.contains("skill-evaluation"), "{instructions}");
+    for agent_flow in [
+        "search_agents",
+        "install_agent",
+        "list_models",
+        "publish_agent",
+        "agent-evaluation",
+        "usage_report",
+    ] {
+        assert!(instructions.contains(agent_flow), "{instructions}");
+    }
+    assert!(
+        instructions.contains("never load an agent's prompt"),
+        "{instructions}"
+    );
 }

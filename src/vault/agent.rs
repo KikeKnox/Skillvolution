@@ -12,7 +12,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const TOOLS: [&str; 5] = ["read", "edit", "shell", "web", "mcp"];
 /// Client built-in agent names and our managed skills; a vault agent with one of these ids
 /// would shadow the client's native agent or a managed skill.
-const RESERVED_AGENT_IDS: [&str; 13] = [
+const RESERVED_AGENT_IDS: [&str; 14] = [
     "general-purpose",
     "statusline-setup",
     "claude-code-guide",
@@ -26,6 +26,7 @@ const RESERVED_AGENT_IDS: [&str; 13] = [
     "evolution",
     "skill-evaluation",
     "skill-acquisition",
+    "agent-evaluation",
 ];
 
 /// Why no vault agent may use `id` (agents only; skills may), or `None` when it is free.

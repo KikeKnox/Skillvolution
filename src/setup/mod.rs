@@ -36,7 +36,8 @@ use std::{
 /// at `<skills dir>/<name>/SKILL.md` and carries the marker
 /// `<!-- skillvolution-managed:<name>:vN -->`. `evolution` drives the vault loop;
 /// `skill-evaluation` is the evaluator subagent's rubric; `skill-acquisition` is what an
-/// agent follows when it notices mid-task that it lacks the know-how.
+/// agent follows when it notices mid-task that it lacks the know-how; `agent-evaluation`
+/// is the evaluator's rubric for a vault agent before `publish_agent`.
 pub(crate) const SKILLS: &[(&str, &str)] = &[
     ("evolution", include_str!("../../assets/evolution/SKILL.md")),
     (
@@ -46,6 +47,10 @@ pub(crate) const SKILLS: &[(&str, &str)] = &[
     (
         "skill-acquisition",
         include_str!("../../assets/skill-acquisition/SKILL.md"),
+    ),
+    (
+        "agent-evaluation",
+        include_str!("../../assets/agent-evaluation/SKILL.md"),
     ),
 ];
 

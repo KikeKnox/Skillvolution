@@ -370,6 +370,7 @@ fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
         "skillvolution_search_agents",
         "skillvolution_install_agent",
         "skillvolution_list_models",
+        "skillvolution_publish_agent",
     ] {
         assert_eq!(oc["permission"][tool], "allow", "{tool}");
     }

@@ -387,7 +387,12 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
 }
 
 /// Every managed skill, as installed under a client's `skills/` directory.
-const MANAGED_SKILLS: [&str; 3] = ["evolution", "skill-evaluation", "skill-acquisition"];
+const MANAGED_SKILLS: [&str; 4] = [
+    "evolution",
+    "skill-evaluation",
+    "skill-acquisition",
+    "agent-evaluation",
+];
 
 #[test]
 fn every_managed_skill_is_installed_per_client_and_removed_with_its_directory() {
@@ -424,6 +429,7 @@ fn every_managed_skill_is_installed_per_client_and_removed_with_its_directory() 
     let agents = fs::read_to_string(p.join("AGENTS.md")).unwrap();
     assert!(agents.contains("`skill-acquisition` skill"), "{agents}");
     assert!(agents.contains("`skill-evaluation` skill"), "{agents}");
+    assert!(agents.contains("`agent-evaluation` skill"), "{agents}");
 
     remove_project(p, &db, None, false).unwrap();
     for client_dir in [

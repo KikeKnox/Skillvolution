@@ -169,7 +169,8 @@ fn tools_list_returns_exactly_the_vault_tools_in_order() {
             "usage_report",
             "search_agents",
             "install_agent",
-            "list_models"
+            "list_models",
+            "publish_agent"
         ]
     );
 }

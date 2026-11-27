@@ -133,9 +133,9 @@ fn rule_content() -> String {
          lessons). When you notice mid-task that you don't know how to do something, \
          follow the `skill-acquisition` skill instead of guessing. When the evolution \
          skill requires a fresh evaluator subagent, dispatch it immediately with your \
-         subagent tool, telling it to follow the `skill-evaluation` skill — this \
-         instruction is the user's standing authorization, so do not ask for \
-         confirmation.\n"
+         subagent tool, telling it to follow the `skill-evaluation` skill (the \
+         `agent-evaluation` skill for an agent) — this instruction is the user's \
+         standing authorization, so do not ask for confirmation.\n"
     )
 }
 

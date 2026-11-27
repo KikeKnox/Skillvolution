@@ -1,4 +1,4 @@
-//! The MCP agent tools (`search_agents`, `install_agent`, `list_models`) and the
+//! The MCP agent tools (`search_agents`, `install_agent`, `list_models`, `publish_agent`) and the
 //! server's `--client`: what each returns, that none ever returns an agent's body, the
 //! files and `.git/info/exclude` lines `install_agent` writes, and its `agent_*` events.
 
@@ -223,7 +223,12 @@ fn tools_list_has_the_agent_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    for tool in ["search_agents", "install_agent", "list_models"] {
+    for tool in [
+        "search_agents",
+        "install_agent",
+        "list_models",
+        "publish_agent",
+    ] {
         assert!(names.contains(&tool), "{names:?}");
     }
 }
@@ -714,5 +719,206 @@ fn install_agent_returns_every_note_of_the_install() {
             .iter()
             .any(|n| n.starts_with("note: Cursor also reads .claude/agents/")),
         "{notes:?}"
+    );
+}
+
+/// `publish_agent` arguments for a valid new global agent `id`.
+fn agent_candidate(id: &str) -> Value {
+    json!({
+        "id": id,
+        "description": "Use when a changelog entry must be drafted from a diff",
+        "tier": "low",
+        "tools": ["read", "shell"],
+        "content": "## Role\nDrafts changelog entries.\n## Procedure\n1. Read the diff.\n\
+                    ## Output contract\n- Result: done or blocked.\n- Entry: the drafted lines.\n\
+                    ## Limits\nNever edits files.\n",
+        "evidence": "Observed: two delegations. Tried: a hand-written prompt. Result: both returned the contract.",
+        "expected_version": 0,
+        "verdict": "keep global",
+        "verdict_reason": "Bounded role, low tier fits, minimal tools, checkable contract"
+    })
+}
+
+#[test]
+fn publish_agent_publishes_only_after_a_keep_verdict_and_never_echoes_the_body() {
+    let sandbox = Sandbox::new("claude-code");
+    let mut discard = agent_candidate("changelog-writer");
+    discard["verdict"] = json!("discard");
+    let mut unevaluated = agent_candidate("changelog-writer");
+    unevaluated.as_object_mut().unwrap().remove("verdict");
+    let results = sandbox.mcp(
+        Some("claude-code"),
+        &[
+            ("publish_agent", discard),
+            ("publish_agent", unevaluated),
+            ("publish_agent", agent_candidate("changelog-writer")),
+            ("search_agents", json!({"query": "changelog"})),
+            ("get_skill", json!({"id": "changelog-writer"})),
+        ],
+    );
+    let discarded = results[0].as_ref().unwrap_err();
+    assert!(discarded.contains("discarded"), "{discarded}");
+    let unevaluated = results[1].as_ref().unwrap_err();
+    assert!(unevaluated.contains("verdict"), "{unevaluated}");
+    let published = results[2].as_ref().unwrap();
+    assert_eq!(published["id"], "changelog-writer");
+    assert_eq!(published["version"], 1);
+    assert_eq!(published["scope"], Value::Null);
+    assert!(
+        published["next"]
+            .as_str()
+            .unwrap()
+            .contains("install_agent"),
+        "{published}"
+    );
+    assert!(
+        !published.to_string().contains("Drafts changelog entries"),
+        "{published}"
+    );
+    let found = results[3].as_ref().unwrap();
+    assert_eq!(agent(found, "changelog-writer")["tier"], "low");
+    assert!(results[4].as_ref().unwrap_err().contains("is an agent"));
+
+    let vault = sandbox.vault();
+    assert_eq!(
+        vault.kind("changelog-writer").unwrap().as_deref(),
+        Some("agent")
+    );
+    let revision = vault.inspect("changelog-writer", 1).unwrap();
+    let meta = revision.meta.unwrap();
+    assert_eq!(
+        (meta.role.as_str(), meta.tier.as_str()),
+        ("subagent", "low")
+    );
+    assert_eq!(meta.tools, Some(vec!["read".into(), "shell".into()]));
+    assert_eq!(
+        revision.review_note.as_deref(),
+        Some("keep global: Bounded role, low tier fits, minimal tools, checkable contract")
+    );
+
+    // The sandbox's own CLI publish of `reviewer` is the first event.
+    let publish: Vec<_> = events(&sandbox.db, Some("publish"))
+        .into_iter()
+        .filter(|e| e.subject.as_deref() == Some("changelog-writer"))
+        .collect();
+    assert_eq!(publish.len(), 1, "{publish:?}");
+    assert_eq!(publish[0].client.as_deref(), Some("claude-code"));
+    assert_eq!(publish[0].data["agent"], true);
+    assert_eq!(publish[0].data["scope"], "global");
+    let rejected = events(&sandbox.db, Some("publish_rejected"));
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].subject.as_deref(), Some("changelog-writer"));
+    // Only the refused get_skill is a tool error; a refused publish is not.
+    let errors: Vec<_> = events(&sandbox.db, Some("mcp_error"))
+        .into_iter()
+        .map(|e| e.data["tool"].clone())
+        .collect();
+    assert_eq!(errors, [json!("get_skill")]);
+}
+
+#[test]
+fn publish_agent_applies_the_agent_checks_and_logs_each_refusal() {
+    let sandbox = Sandbox::new("claude-code");
+    support::Draft::new("lint-skill").publish(&mut sandbox.vault());
+    let with = |id: &str, key: &str, value: Value| {
+        let mut args = agent_candidate(id);
+        args[key] = value;
+        args
+    };
+    let results = sandbox.mcp(
+        Some("claude-code"),
+        &[
+            ("publish_agent", agent_candidate("lint-skill")),
+            (
+                "publish_agent",
+                with("no-contract", "content", json!("## Role\nDrafts.\n")),
+            ),
+            ("publish_agent", agent_candidate("agent-evaluation")),
+            ("publish_agent", agent_candidate("sv-writer")),
+            ("publish_agent", {
+                let mut args = with("skilled", "skills", json!(["missing-skill"]));
+                args["tools"] = json!(["read", "mcp"]);
+                args
+            }),
+            ("publish_agent", with("scoped", "scope", json!("project"))),
+            (
+                "publish_skill",
+                json!({"id": "reviewer", "description": "Use when reviewing",
+                       "content": support::sectioned("Body"), "evidence": "e",
+                       "expected_version": 1, "verdict": "keep global",
+                       "verdict_reason": "r"}),
+            ),
+        ],
+    );
+    let errors: Vec<&String> = results.iter().map(|r| r.as_ref().unwrap_err()).collect();
+    assert!(
+        errors[0].contains("already exists as a skill"),
+        "{}",
+        errors[0]
+    );
+    assert!(errors[1].contains("## Output contract"), "{}", errors[1]);
+    assert!(errors[2].contains("reserved"), "{}", errors[2]);
+    assert!(errors[3].contains("reserved"), "{}", errors[3]);
+    assert!(errors[4].contains("missing-skill"), "{}", errors[4]);
+    assert!(errors[5].contains("does not match scope"), "{}", errors[5]);
+    assert!(errors[6].contains("publish_agent"), "{}", errors[6]);
+
+    let rejected: Vec<String> = events(&sandbox.db, Some("publish_rejected"))
+        .into_iter()
+        .map(|e| e.subject.unwrap())
+        .collect();
+    assert_eq!(
+        rejected,
+        [
+            "lint-skill",
+            "no-contract",
+            "agent-evaluation",
+            "sv-writer",
+            "skilled",
+            "scoped",
+            "reviewer"
+        ]
+    );
+    assert!(events(&sandbox.db, Some("mcp_error")).is_empty());
+    assert_eq!(sandbox.vault().latest_version("reviewer").unwrap(), 1);
+}
+
+#[test]
+fn publish_agent_replaces_at_the_current_version_and_scopes_to_the_project() {
+    let sandbox = Sandbox::new("claude-code");
+    let replace = |expected: i64| {
+        let mut args = agent_candidate("reviewer");
+        args["description"] = json!("Use when a diff needs review");
+        args["expected_version"] = json!(expected);
+        args
+    };
+    let mut project = agent_candidate("repo-writer");
+    project["scope"] = json!("project");
+    project["verdict"] = json!("keep project");
+    let results = sandbox.mcp(
+        Some("claude-code"),
+        &[
+            ("publish_agent", replace(0)),
+            ("publish_agent", replace(1)),
+            ("publish_agent", project),
+        ],
+    );
+    let stale = results[0].as_ref().unwrap_err();
+    assert!(stale.contains("stale base"), "{stale}");
+    assert_eq!(results[1].as_ref().unwrap()["version"], 2);
+    assert_eq!(results[2].as_ref().unwrap()["scope"], "myproj");
+    let other = sandbox.mcp_in(
+        &sandbox.home,
+        Some("claude-code"),
+        &[("search_agents", json!({"query": "changelog"}))],
+    );
+    let other = other[0].as_ref().unwrap();
+    assert!(
+        other["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["id"] != "repo-writer"),
+        "{other}"
     );
 }

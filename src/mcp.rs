@@ -9,7 +9,7 @@ use std::{
 use crate::clients::ClientKind;
 use crate::mcp_agents;
 use crate::vault::{
-    DEFAULT_SINCE, Event, MAX_REASON_CHARS, Proposal, Vault, error_class, scrub_text,
+    AgentMeta, DEFAULT_SINCE, Event, MAX_REASON_CHARS, Proposal, Vault, error_class, scrub_text,
     search_query_for_event,
 };
 
@@ -43,7 +43,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_skill",
-            "description": "Load the body of one published skill that matched your task, then tell the user in one line which skill (id and version) you are applying. Defaults to the latest published version. Only returns skills visible to the current project (global skills, plus this project's own); a deprecated skill still returns its body, with a `deprecated: true` flag. Loading a skill commits you to reporting it: after applying it, call report_skill_outcome with this id and version, as the result's `next` field says.",
+            "description": "Load the body of one published skill that matched your task, then tell the user in one line which skill (id and version) you are applying. Defaults to the latest published version. Only returns skills visible to the current project (global skills, plus this project's own); a deprecated skill still returns its body, with a `deprecated: true` flag. Loading a skill commits you to reporting it: after applying it, call report_skill_outcome with this id and version, as the result's `next` field says. Refuses vault agents: find them with search_agents, install with install_agent and delegate to them instead; an agent's prompt is never loaded into your context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -57,7 +57,7 @@ fn tools() -> Value {
         },
         {
             "name": "report_skill_outcome",
-            "description": "After applying a skill loaded with get_skill, record whether it helped. Failures with a concrete note are the most valuable signal for improving skills. Also takes a vault agent id, after delegating to that agent.",
+            "description": "After applying a skill loaded with get_skill, record whether it helped. Failures with a concrete note are the most valuable signal for improving skills. Also takes a vault agent id and version (from search_agents or install_agent), after delegating to that agent; not the built-in sv-high, sv-mid and sv-low, which have no vault row.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -73,7 +73,7 @@ fn tools() -> Value {
         },
         {
             "name": "publish_skill",
-            "description": "Publish a new skill or a complete replacement of an existing one, visible to agents immediately. Publish only lessons that a fresh-context evaluation judged worth keeping: verified, reusable, non-obvious. `scope` is fixed on an id's first publish and can't change on later revisions. `content` must contain the headings `## When to use`, `## Procedure`, `## Pitfalls`, and `## Verification`, in that order (extra `##` sections are fine). `description`, `content`, and `evidence` are scanned for credential-shaped values and the publish is refused if one is found. `verdict` must be exactly \"keep global\" or \"keep project\" (compared case-insensitively after trimming) and must agree with `scope`.",
+            "description": "Publish a new skill or a complete replacement of an existing one, visible to agents immediately. Publish only lessons that a fresh-context evaluation judged worth keeping: verified, reusable, non-obvious. `scope` is fixed on an id's first publish and can't change on later revisions. `content` must contain the headings `## When to use`, `## Procedure`, `## Pitfalls`, and `## Verification`, in that order (extra `##` sections are fine). `description`, `content`, and `evidence` are scanned for credential-shaped values and the publish is refused if one is found. `verdict` must be exactly \"keep global\" or \"keep project\" (compared case-insensitively after trimming) and must agree with `scope`. Agents are published with publish_agent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -107,7 +107,7 @@ fn tools() -> Value {
         },
         {
             "name": "search_agents",
-            "description": "Search the vault's subagents (and the built-in tier agents sv-high, sv-mid, sv-low) visible from this project, before delegating work to a subagent. Matches words in agent ids, descriptions and tiers; an empty query lists them all. Returns `agents` (metadata only, never the prompt: id, version, tier, description, `installed` (local, global, both, or no) and `outdated` (an installed copy is an older version)), `total`, and `has_more`. Install one with install_agent, then delegate to it by id.",
+            "description": "Search the vault's subagents (and the built-in tier agents sv-high, sv-mid, sv-low) visible from this project, before delegating work to a subagent. Matches words in agent ids, descriptions and tiers; an empty query lists them all. Returns `agents` (metadata only, never the prompt: id, version, tier, description, `installed` (local, global, both, or no) and `outdated` (an installed copy is an older version)), `total`, and `has_more`. Install one with install_agent, delegate to it by the name install_agent returns, then call report_skill_outcome with its id and version.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -145,6 +145,32 @@ fn tools() -> Value {
                 "additionalProperties": false
             },
             "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "publish_agent",
+            "description": "Publish a new vault agent (a subagent with a bounded role, a tier and an output contract) or a complete replacement of one, visible to search_agents immediately. Publish only an agent that a fresh-context evaluator following the agent-evaluation skill judged worth keeping. `content` is the agent's prompt: it must contain `## Output contract`, and may have `## Role`, `## Procedure` and `## Limits`, in the order Role, Procedure, Output contract, Limits. Declare `tools` with only what the agent needs: omitting it allows every tool, including delegating to other subagents. Every id in `skills` must be a published skill visible from the agent's scope, and needs `mcp` in `tools`. `scope` is fixed on an id's first publish. `description`, `content`, and `evidence` are scanned for credential-shaped values. `verdict` must be exactly \"keep global\" or \"keep project\" and must agree with `scope`. Returns the id and version, never the prompt; install it with install_agent to delegate to it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "maxLength": 64, "pattern": ID_PATTERN, "description": "Stable lowercase-hyphenated id, e.g. 'changelog-writer'; not sv-* nor a client built-in agent name"},
+                    "description": {"type": "string", "maxLength": 280, "description": "One line starting with 'Use when', naming the work an orchestrator should delegate to it"},
+                    "tags": {"type": "array", "items": {"type": "string", "maxLength": 32, "pattern": ID_PATTERN}, "maxItems": 8},
+                    "tier": {"type": "string", "enum": ["high", "mid", "low"], "description": "Model tier the work needs: low for search, summaries and mechanical edits; mid for bounded implementation and review; high for design and hard debugging"},
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Only to override the tier's effort"},
+                    "tools": {"type": "array", "items": {"type": "string", "enum": ["read", "edit", "shell", "web", "mcp"]}, "uniqueItems": true, "description": "The tools the agent may use (read is always allowed); omit only to allow every tool"},
+                    "skills": {"type": "array", "items": {"type": "string", "maxLength": 64, "pattern": ID_PATTERN}, "maxItems": 8, "description": "Vault skills the agent loads with get_skill before starting"},
+                    "content": {"type": "string", "maxLength": 65536, "description": "The agent's prompt: ## Role, ## Procedure, ## Output contract (required), ## Limits"},
+                    "evidence": {"type": "string", "maxLength": 16384, "description": "Observed / Tried / Result: the delegations that show the agent works"},
+                    "expected_version": {"type": "integer", "minimum": 0, "description": "Current published version of the agent, or 0 for a new agent"},
+                    "scope": {"type": "string", "enum": ["global", "project"], "default": "global", "description": "project when the agent only applies to this repository"},
+                    "verdict": {"type": "string", "enum": ["keep global", "keep project"], "description": "The fresh-context evaluator's verdict line, verbatim. A discard verdict must never be published."},
+                    "verdict_reason": {"type": "string", "maxLength": 280, "description": "The evaluator's one-line reason for that verdict, verbatim"},
+                    "replaces_proven": {"type": "boolean", "default": false, "description": "Set true only when replacing a version with more helped than failed reports, after merging its content rather than rewriting it"}
+                },
+                "required": ["id", "description", "tier", "content", "evidence", "expected_version", "verdict", "verdict_reason"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
         }
     ])
 }
@@ -216,6 +242,56 @@ struct PublishArgs {
     verdict_reason: String,
     #[serde(default)]
     replaces_proven: bool,
+}
+
+/// `publish_agent`'s arguments: `publish_skill`'s plus the agent's metadata.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishAgentArgs {
+    id: String,
+    description: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    tier: String,
+    effort: Option<String>,
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    skills: Vec<String>,
+    content: String,
+    evidence: String,
+    expected_version: i64,
+    #[serde(default)]
+    scope: Option<String>,
+    verdict: String,
+    verdict_reason: String,
+    #[serde(default)]
+    replaces_proven: bool,
+}
+
+impl PublishAgentArgs {
+    /// The publication fields and the agent's metadata (always a subagent).
+    fn split(self) -> (PublishArgs, AgentMeta) {
+        let meta = AgentMeta {
+            role: "subagent".to_owned(),
+            tier: self.tier,
+            effort: self.effort,
+            tools: self.tools,
+            skills: self.skills,
+        };
+        let args = PublishArgs {
+            id: self.id,
+            description: self.description,
+            tags: self.tags,
+            content: self.content,
+            evidence: self.evidence,
+            expected_version: self.expected_version,
+            scope: self.scope,
+            verdict: self.verdict,
+            verdict_reason: self.verdict_reason,
+            replaces_proven: self.replaces_proven,
+        };
+        (args, meta)
+    }
 }
 
 /// Where the server runs, from `serve`'s flags and environment.
@@ -436,6 +512,7 @@ impl Server {
         let result = self.call(params);
         if let (Err(ToolCallError::ToolFailure(error)), Some(tool)) = (&result, &tool)
             && tool != "publish_skill"
+            && tool != "publish_agent"
         {
             self.log(
                 Event::new("mcp_error").data(json!({"tool": tool, "class": error_class(error)})),
@@ -474,7 +551,8 @@ impl Server {
                 if skill.kind == "agent" {
                     return Err(anyhow::anyhow!(
                         "{} is an agent, not a skill; delegate to it as a subagent instead \
-                         (the user installs it with `skillvolution agents add {}`).",
+                         (the user installs it with `skillvolution agents add {}`). From this \
+                         session, install it with install_agent and delegate by the name it returns.",
                         skill.id,
                         skill.id
                     )
@@ -557,69 +635,94 @@ impl Server {
             }
             "publish_skill" => {
                 let args: PublishArgs = serde_json::from_value(arguments).map_err(parse_error)?;
-                let scope = match args.scope.as_deref() {
-                    None | Some("global") => None,
-                    Some("project") => Some(project.context(
-                        "this server has no project key: it was not started inside a git \
-                         repository (or with --project); use scope global instead",
-                    )?),
-                    Some(other) => {
-                        return Err(anyhow::anyhow!(
-                            "scope must be global or project, not {other:?}"
-                        )
-                        .into());
-                    }
-                };
-                if self.vault.kind(&args.id)?.as_deref() == Some("agent") {
-                    return Err(anyhow::anyhow!(
-                        "{}; agents are published only by the user with `skillvolution publish`",
-                        crate::vault::kind_conflict(&args.id, "agent")
-                    )
-                    .into());
-                }
-                let proposed = self.vault.propose(&Proposal {
-                    id: &args.id,
-                    description: &args.description,
-                    tags: &args.tags,
-                    content: &args.content,
-                    evidence: &args.evidence,
-                    expected_version: args.expected_version,
-                    scope,
-                    verdict: &args.verdict,
-                    verdict_reason: &args.verdict_reason,
-                    replaces_proven: args.replaces_proven,
-                });
-                let revision = match proposed {
-                    Ok(revision) => revision,
-                    Err(error) => {
-                        self.log(Event::new("publish_rejected").subject(&args.id, None).data(
-                            json!({
-                                "reason": scrub_text(&format!("{error:#}"), MAX_REASON_CHARS),
-                            }),
-                        ));
-                        return Err(error.into());
-                    }
-                };
-                self.log(
-                    Event::new("publish")
-                        .subject(&revision.id, Some(revision.version))
-                        .data(json!({
-                            "scope": if revision.scope.is_some() { "project" } else { "global" },
-                            "update": args.expected_version > 0,
-                        })),
-                );
-                Ok(json!({
-                    "id": revision.id,
-                    "version": revision.version,
-                    "status": revision.status,
-                    "expected_version": revision.expected_version,
-                    "scope": revision.scope,
-                    "next": "Published and immediately visible to agents. Tell the user the skill id and version; they can hide it later with `skillvolution deprecate ID`."
-                }))
+                Ok(self.publish(&args, None)?)
+            }
+            "publish_agent" => {
+                let args: PublishAgentArgs =
+                    serde_json::from_value(arguments).map_err(parse_error)?;
+                let (args, meta) = args.split();
+                Ok(self.publish(&args, Some(&meta))?)
             }
             other => Err(ToolCallError::InvalidParams(format!(
                 "unknown tool: {other}"
             ))),
+        }
+    }
+
+    /// `publish_skill` (no `meta`) or `publish_agent`: publishes the evaluated entry and
+    /// records a `publish` event, or a `publish_rejected` one with the scrubbed reason.
+    fn publish(&mut self, args: &PublishArgs, meta: Option<&AgentMeta>) -> Result<Value> {
+        let published = self.try_publish(args, meta);
+        let agent = meta.is_some();
+        match &published {
+            Ok(revision) => self.log(
+                Event::new("publish")
+                    .subject(&revision.id, Some(revision.version))
+                    .data(json!({
+                        "scope": if revision.scope.is_some() { "project" } else { "global" },
+                        "update": args.expected_version > 0,
+                        "agent": agent,
+                    })),
+            ),
+            Err(error) => self.log(Event::new("publish_rejected").subject(&args.id, None).data(
+                json!({
+                    "reason": scrub_text(&format!("{error:#}"), MAX_REASON_CHARS),
+                    "agent": agent,
+                }),
+            )),
+        }
+        let revision = published?;
+        let next = if agent {
+            "Published and immediately visible to search_agents. Tell the user the agent id and version; install it with install_agent to delegate to it. The user can hide it later with `skillvolution deprecate ID`."
+        } else {
+            "Published and immediately visible to agents. Tell the user the skill id and version; they can hide it later with `skillvolution deprecate ID`."
+        };
+        Ok(json!({
+            "id": revision.id,
+            "version": revision.version,
+            "status": revision.status,
+            "expected_version": revision.expected_version,
+            "scope": revision.scope,
+            "next": next,
+        }))
+    }
+
+    /// Resolves the scope and proposes the entry; every refusal is an error for `publish`.
+    fn try_publish(
+        &mut self,
+        args: &PublishArgs,
+        meta: Option<&AgentMeta>,
+    ) -> Result<crate::vault::Revision> {
+        let project = self.project.as_deref();
+        let scope = match args.scope.as_deref() {
+            None | Some("global") => None,
+            Some("project") => Some(project.context(
+                "this server has no project key: it was not started inside a git \
+                 repository (or with --project); use scope global instead",
+            )?),
+            Some(other) => anyhow::bail!("scope must be global or project, not {other:?}"),
+        };
+        if meta.is_none() && self.vault.kind(&args.id)?.as_deref() == Some("agent") {
+            anyhow::bail!(
+                "{}; publish agents with publish_agent",
+                crate::vault::kind_conflict(&args.id, "agent")
+            );
+        }
+        let proposal = Proposal {
+            id: &args.id,
+            description: &args.description,
+            tags: &args.tags,
+            content: &args.content,
+            evidence: &args.evidence,
+            expected_version: args.expected_version,
+            scope,
+            verdict: &args.verdict,
+            verdict_reason: &args.verdict_reason,
+            replaces_proven: args.replaces_proven,
+        };
+        match meta {
+            Some(meta) => self.vault.propose_agent(&proposal, meta),
+            None => self.vault.propose(&proposal),
         }
     }
 }
@@ -638,7 +741,12 @@ fn initialize(params: &Value) -> Value {
             and get_skill to load a match's body; tell the user in one line which skill (id and version) you are applying. \
             Every skill loaded with get_skill needs a report: after applying it, call report_skill_outcome so future rankings reflect what happened. \
             When you hit something you don't know how to do, follow the skill-acquisition skill: search the vault first, then research and verify. \
-            Only call publish_skill after a fresh subagent following the skill-evaluation skill has judged the lesson worth keeping."
+            Only call publish_skill after a fresh subagent following the skill-evaluation skill has judged the lesson worth keeping. \
+            Before delegating work to a subagent, call search_agents; install a match with install_agent and delegate to it by the name it returns, \
+            passing a model from list_models where the client takes one per call; never load an agent's prompt (get_skill refuses agents). \
+            After the delegation, call report_skill_outcome with the agent's id and version. \
+            Only call publish_agent after a fresh subagent following the agent-evaluation skill has judged the agent worth keeping. \
+            Call usage_report when the user asks how Skillvolution is performing, or after repeated failures."
     })
 }
 

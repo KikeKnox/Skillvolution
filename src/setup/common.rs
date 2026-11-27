@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub(super) const START: &str = "<!-- skillvolution:start -->";
 pub(super) const END: &str = "<!-- skillvolution:end -->";
 /// The trigger block setup keeps in AGENTS.md (OpenCode and Devin both read it).
-const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When you notice mid-task that you don't know how to do something, follow the `skill-acquisition` skill instead of guessing. When the evolution skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool, telling it to follow the `skill-evaluation` skill — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
+const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When you notice mid-task that you don't know how to do something, follow the `skill-acquisition` skill instead of guessing. When the evolution skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool, telling it to follow the `skill-evaluation` skill (the `agent-evaluation` skill for an agent) — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
 
 /// The environment variable `name` as a path, when set and nonempty.
 pub(super) fn env_dir(name: &str) -> Option<PathBuf> {
