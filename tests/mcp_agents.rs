@@ -922,3 +922,44 @@ fn publish_agent_replaces_at_the_current_version_and_scopes_to_the_project() {
         "{other}"
     );
 }
+
+#[test]
+fn publish_agent_requires_tools_so_published_agents_never_delegate() {
+    let sandbox = Sandbox::new("claude-code,opencode");
+    let mut missing = agent_candidate("no-tools");
+    missing.as_object_mut().unwrap().remove("tools");
+    let mut empty = agent_candidate("empty-tools");
+    empty["tools"] = json!([]);
+    let results = sandbox.mcp(
+        None,
+        &[
+            ("publish_agent", missing),
+            ("publish_agent", empty),
+            ("publish_agent", agent_candidate("changelog-writer")),
+            ("install_agent", json!({"id": "changelog-writer"})),
+        ],
+    );
+    for refused in &results[..2] {
+        let refused = refused.as_ref().unwrap_err();
+        assert!(refused.contains("tools"), "{refused}");
+    }
+    assert_eq!(results[2].as_ref().unwrap()["version"], 1);
+    results[3].as_ref().unwrap();
+    let vault = sandbox.vault();
+    assert!(vault.inspect("no-tools", 1).is_err());
+    assert!(vault.inspect("empty-tools", 1).is_err());
+    let rejected: Vec<String> = events(&sandbox.db, Some("publish_rejected"))
+        .into_iter()
+        .map(|e| e.subject.unwrap())
+        .collect();
+    assert_eq!(rejected, ["no-tools", "empty-tools"]);
+
+    let claude = fs::read_to_string(sandbox.claude("changelog-writer")).unwrap();
+    let denied = claude
+        .lines()
+        .find(|l| l.starts_with("disallowedTools:"))
+        .unwrap_or_else(|| panic!("{claude}"));
+    assert!(denied.contains("Agent, Task"), "{claude}");
+    let opencode = fs::read_to_string(sandbox.opencode("changelog-writer")).unwrap();
+    assert!(opencode.contains("\n  task: deny\n"), "{opencode}");
+}

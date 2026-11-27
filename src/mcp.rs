@@ -148,7 +148,7 @@ fn tools() -> Value {
         },
         {
             "name": "publish_agent",
-            "description": "Publish a new vault agent (a subagent with a bounded role, a tier and an output contract) or a complete replacement of one, visible to search_agents immediately. Publish only an agent that a fresh-context evaluator following the agent-evaluation skill judged worth keeping. `content` is the agent's prompt: it must contain `## Output contract`, and may have `## Role`, `## Procedure` and `## Limits`, in the order Role, Procedure, Output contract, Limits. Declare `tools` with only what the agent needs: omitting it allows every tool, including delegating to other subagents. Every id in `skills` must be a published skill visible from the agent's scope, and needs `mcp` in `tools`. `scope` is fixed on an id's first publish. `description`, `content`, and `evidence` are scanned for credential-shaped values. `verdict` must be exactly \"keep global\" or \"keep project\" and must agree with `scope`. Returns the id and version, never the prompt; install it with install_agent to delegate to it.",
+            "description": "Publish a new vault agent (a subagent with a bounded role, a tier and an output contract) or a complete replacement of one, visible to search_agents immediately. Publish only an agent that a fresh-context evaluator following the agent-evaluation skill judged worth keeping. `content` is the agent's prompt: it must contain `## Output contract`, and may have `## Role`, `## Procedure` and `## Limits`, in the order Role, Procedure, Output contract, Limits. `tools` is required and must not be empty: declare only what the agent needs; a published agent is never allowed to delegate to other subagents. Every id in `skills` must be a published skill visible from the agent's scope, and needs `mcp` in `tools`. `scope` is fixed on an id's first publish. `description`, `content`, and `evidence` are scanned for credential-shaped values. `verdict` must be exactly \"keep global\" or \"keep project\" and must agree with `scope`. Returns the id and version, never the prompt; install it with install_agent to delegate to it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -157,7 +157,7 @@ fn tools() -> Value {
                     "tags": {"type": "array", "items": {"type": "string", "maxLength": 32, "pattern": ID_PATTERN}, "maxItems": 8},
                     "tier": {"type": "string", "enum": ["high", "mid", "low"], "description": "Model tier the work needs: low for search, summaries and mechanical edits; mid for bounded implementation and review; high for design and hard debugging"},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Only to override the tier's effort"},
-                    "tools": {"type": "array", "items": {"type": "string", "enum": ["read", "edit", "shell", "web", "mcp"]}, "uniqueItems": true, "description": "The tools the agent may use (read is always allowed); omit only to allow every tool"},
+                    "tools": {"type": "array", "items": {"type": "string", "enum": ["read", "edit", "shell", "web", "mcp"]}, "minItems": 1, "uniqueItems": true, "description": "The tools the agent may use (read is always allowed); the generated subagent file also denies delegating to other subagents"},
                     "skills": {"type": "array", "items": {"type": "string", "maxLength": 64, "pattern": ID_PATTERN}, "maxItems": 8, "description": "Vault skills the agent loads with get_skill before starting"},
                     "content": {"type": "string", "maxLength": 65536, "description": "The agent's prompt: ## Role, ## Procedure, ## Output contract (required), ## Limits"},
                     "evidence": {"type": "string", "maxLength": 16384, "description": "Observed / Tried / Result: the delegations that show the agent works"},
@@ -167,7 +167,7 @@ fn tools() -> Value {
                     "verdict_reason": {"type": "string", "maxLength": 280, "description": "The evaluator's one-line reason for that verdict, verbatim"},
                     "replaces_proven": {"type": "boolean", "default": false, "description": "Set true only when replacing a version with more helped than failed reports, after merging its content rather than rewriting it"}
                 },
-                "required": ["id", "description", "tier", "content", "evidence", "expected_version", "verdict", "verdict_reason"],
+                "required": ["id", "description", "tier", "tools", "content", "evidence", "expected_version", "verdict", "verdict_reason"],
                 "additionalProperties": false
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
@@ -702,6 +702,16 @@ impl Server {
             )?),
             Some(other) => anyhow::bail!("scope must be global or project, not {other:?}"),
         };
+        // An agent published over MCP must declare its tools: only then do the generated
+        // files deny delegation (`disallowedTools: Agent, Task`, OpenCode `task: deny`).
+        // The user's own `skillvolution publish` of an AGENT.md may still omit them.
+        if meta.is_some_and(|meta| meta.tools.as_ref().is_none_or(Vec::is_empty)) {
+            anyhow::bail!(
+                "tools: declare the tools the agent needs (at least read; any of {}); \
+                 an agent published with publish_agent must never delegate to other subagents",
+                crate::vault::TOOLS.join(", ")
+            );
+        }
         if meta.is_none() && self.vault.kind(&args.id)?.as_deref() == Some("agent") {
             anyhow::bail!(
                 "{}; publish agents with publish_agent",

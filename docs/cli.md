@@ -797,7 +797,7 @@ agent's metadata and prompt instead of a skill's body — the fields of an `AGEN
 |---|---|---|
 | `tier` | string | required; `high`, `mid`, or `low` |
 | `effort` | string | `low`, `medium`, `high`, `xhigh`, or `max`; overrides the tier's |
-| `tools` | string[] | any of `read`, `edit`, `shell`, `web`, `mcp`; omitted allows every tool, including delegation |
+| `tools` | string[] | required, non-empty; any of `read`, `edit`, `shell`, `web`, `mcp`. The generated files deny delegation to other subagents |
 | `skills` | string[] | ≤ 8 ids of published skills visible from the agent's scope; needs `mcp` in `tools` |
 | `content` | string | required; ≤ 65,536 bytes; must contain `## Output contract`, and any of `## Role`, `## Procedure`, `## Limits` in the order Role, Procedure, Output contract, Limits |
 

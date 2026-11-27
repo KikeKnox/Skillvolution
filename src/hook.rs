@@ -14,7 +14,7 @@ use std::{
 };
 
 const CATALOG_LIMIT: i64 = 30;
-const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
+const REVIEW_TOOLS: [&str; 3] = ["publish_skill", "publish_agent", "report_skill_outcome"];
 // Loading a skill is work too: whoever applied it owes an outcome report. Matched by
 // suffix, like the review tools, since each client prefixes MCP tool names its own way.
 const LOAD_TOOL: &str = "get_skill";

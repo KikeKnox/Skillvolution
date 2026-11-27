@@ -45,7 +45,7 @@ You are usually a fresh subagent handed only a candidate. Judge the text in fron
 6. **Check the publish constraints** before answering, so the publication is not rejected:
    - `id` and every tag: lowercase ASCII letters or digits in hyphen-separated groups; `id` 1-64 bytes, not starting with `sv-`, and not a client built-in agent or managed skill name (`general-purpose`, `explore`, `plan`, `build`, `general`, `evolution`, ...); at most 8 tags of up to 32 bytes.
    - `description`: a single line of at most 280 bytes (an em dash or accented letter counts 2-4 bytes).
-   - `tier`: `high`, `mid`, or `low`. `effort`, if set: `low`, `medium`, `high`, `xhigh`, or `max`. `tools`: any of `read`, `edit`, `shell`, `web`, `mcp`. `skills`: at most 8 skill ids.
+   - `tier`: `high`, `mid`, or `low`. `effort`, if set: `low`, `medium`, `high`, `xhigh`, or `max`. `tools`: required and non-empty, any of `read`, `edit`, `shell`, `web`, `mcp`. `skills`: at most 8 skill ids.
    - `content` contains `## Output contract`; `## Role`, `## Procedure`, and `## Limits` are optional, and the ones present appear in the order Role, Procedure, Output contract, Limits.
    - `expected_version`: `0` for a new id, or the current version of the agent being replaced.
    - Nothing credential-shaped anywhere; the server rejects it.

@@ -207,6 +207,10 @@ const workAfterReview = await idle("o1");
 await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o2" });
 await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "o2" });
 const workBeforeReview = await idle("o2");
+// Publishing an agent is a review too.
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o3" });
+await hooks["tool.execute.after"]({ tool: "skillvolution_publish_agent", sessionID: "o3" });
+const workBeforeAgentPublish = await idle("o3");
 // A child's session.error must not clear the parent's pending work.
 await hooks["tool.execute.after"]({ tool: "edit", sessionID: "p6" });
 hooks.event({ event: { type: "session.error", properties: { sessionID: "c6" } } });
@@ -233,7 +237,7 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 const rootedOut = { system: [] };
 await rooted["experimental.chat.system.transform"]({ sessionID: "n1" }, rootedOut);
 const nonGit = rootedOut.system;
-console.log(JSON.stringify({ workAfterReview, workBeforeReview, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
+console.log(JSON.stringify({ workAfterReview, workBeforeReview, workBeforeAgentPublish, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
 "#;
 
 /// Installs the plugin with a fake `skillvolution` binary (prints `CATALOG` for
@@ -405,6 +409,7 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     assert!(reminder_text("childLoad").is_none(), "{result}");
     assert!(has_reminder("workAfterReview"), "{result}");
     assert!(!has_reminder("workBeforeReview"), "{result}");
+    assert!(!has_reminder("workBeforeAgentPublish"), "{result}");
     assert!(has_reminder("childError"), "{result}");
     assert!(!has_reminder("misplaced"), "{result}");
     assert!(!has_reminder("wrongId"), "{result}");

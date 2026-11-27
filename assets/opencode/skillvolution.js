@@ -31,7 +31,7 @@ const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"
 // `subagent`/`agent` in 2.x.
 const DELEGATION_TOOLS = { task: "subagent_type", subagent: "agent" };
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
-const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
+const REVIEW_TOOLS = ["publish_skill", "publish_agent", "report_skill_outcome"];
 // Loading a vault skill is work too: its outcome must be reported.
 const LOAD_TOOL = "get_skill";
 

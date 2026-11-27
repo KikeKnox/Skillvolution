@@ -91,6 +91,7 @@ fn work_plus_review_tool_does_not_block() {
     for (session, review_tool) in [
         ("s1", "mcp__skillvolution__report_skill_outcome"),
         ("s2", "mcp__skillvolution__publish_skill"),
+        ("s3", "mcp__skillvolution__publish_agent"),
     ] {
         let transcript = dir.path().join(format!("{session}.jsonl"));
         write_transcript(
