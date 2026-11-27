@@ -5,7 +5,7 @@
 use crate::{
     agents::{self, FileState, InstallOptions, Target, TierModel},
     clients::{ClientKind, ModelRefFormat},
-    vault::{TIERS, Vault},
+    vault::{ClientModel, TIERS, Vault},
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -80,12 +80,13 @@ pub fn search(vault: &Vault, scope: &Scope, query: &str, limit: i64, offset: i64
     // Stable: equal scores keep vault order, then the built-ins.
     hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     let total = hits.len();
+    let models = vault.client_models()?;
     let agents: Vec<Value> = hits
         .into_iter()
         .skip(offset)
         .take(limit)
         .map(|(_, agent)| {
-            let (installed, outdated) = install_state(&targets, scope.project_dir, &agent);
+            let (installed, outdated) = install_state(&models, &targets, scope.project_dir, &agent);
             json!({
                 "id": agent.id,
                 "version": agent.version,
@@ -104,8 +105,10 @@ pub fn search(vault: &Vault, scope: &Scope, query: &str, limit: i64, offset: i64
 }
 
 /// Where `agent` has a generated file for `targets`: `local` (the project), `global`
-/// (per user), `both` or `no`; and whether any of them is an older version.
+/// (per user), `both` or `no`; and whether any of them is outdated (`agents::is_outdated`:
+/// a managed file `sync` would rewrite, a hand-edited one of an older version).
 fn install_state(
+    models: &[ClientModel],
     targets: &[Target],
     project_dir: &Path,
     agent: &agents::Agent,
@@ -122,16 +125,18 @@ fn install_state(
         for (dir, is_local) in [(project, true), (Some(user_dir), false)] {
             let Some(dir) = dir else { continue };
             let path = dir.join(format!("{}.md", agent.id));
-            if let Ok(FileState::Managed(marker) | FileState::Edited(marker)) =
+            let Ok(state @ (FileState::Managed(_) | FileState::Edited(_))) =
                 agents::file_state(&path)
-            {
-                if is_local {
-                    local = true;
-                } else {
-                    global = true;
-                }
-                outdated |= marker.version < agent.version;
+            else {
+                continue;
+            };
+            if is_local {
+                local = true;
+            } else {
+                global = true;
             }
+            let at = is_local.then_some(project_dir);
+            outdated |= agents::is_outdated(models, target, agent, at, &state);
         }
     }
     let installed = match (local, global) {
@@ -160,7 +165,19 @@ pub fn install(vault: &Vault, scope: &Scope, id: &str, model: Option<&str>) -> R
         Some(scope.project_dir),
         &options,
     )?;
-    agents::log_agent_events(vault, &report.changes, "project", scope.project);
+    // Files can land in a per-user directory (a server started in $HOME): those are
+    // global installs, recorded without a project like `agents add --global`.
+    for target in Target::all() {
+        let changes: Vec<_> = report
+            .changes
+            .iter()
+            .filter(|c| c.target == target)
+            .cloned()
+            .collect();
+        let scope_name = agents::install_scope(target, Some(scope.project_dir));
+        let project = (scope_name == "project").then_some(scope.project).flatten();
+        agents::log_agent_events(vault, &changes, scope_name, project);
+    }
     if report.files.is_empty() {
         bail!("{id} was not installed: {}", report.lines.join("; "));
     }
@@ -212,21 +229,10 @@ pub fn install(vault: &Vault, scope: &Scope, id: &str, model: Option<&str>) -> R
             }
         });
     }
-    let notes: Vec<String> = report
-        .lines
-        .iter()
-        .map(|line| line.trim())
-        .filter(|line| {
-            line.starts_with("warning:")
-                || line.starts_with("[warning]")
-                || line.contains("info/exclude")
-        })
-        .map(str::to_owned)
-        .collect();
     Ok(json!({
         "result": parts.join(" | "),
         "restart_needed": restart_needed,
-        "notes": notes,
+        "notes": report.notes,
     }))
 }
 

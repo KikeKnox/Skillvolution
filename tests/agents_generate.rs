@@ -408,6 +408,26 @@ fn project_installs_are_kept_out_of_git_and_removal_cleans_up() {
 }
 
 #[test]
+fn sync_apply_adds_the_exclude_lines_of_the_files_it_writes() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    let exclude = sandbox.repo.join(".git/info/exclude");
+    fs::remove_file(&exclude).unwrap();
+    sandbox.ok(&["agents", "models", "set", "claude-code", "low", "sonnet"]);
+    // A dry run writes nothing, so no exclude either.
+    sandbox.ok(&["agents", "sync"]);
+    assert!(!exclude.exists());
+    let synced = sandbox.ok(&["agents", "sync", "--apply"]);
+    assert!(synced.contains("1 file(s) updated"), "{synced}");
+    assert!(
+        read(&exclude).contains("\n/.claude/agents/sv-low.md\n"),
+        "{}",
+        read(&exclude)
+    );
+}
+
+#[test]
 fn global_installs_never_touch_an_exclude_file() {
     let sandbox = Sandbox::new();
     sandbox.setup_global("claude-code");

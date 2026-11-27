@@ -313,8 +313,10 @@ client's model, with a warning). `agents models set` overrides per client in `ag
 - The body is the content plus a line telling the agent to load its `skills` with `get_skill` at the pinned versions (`id vN (#hash)`, resolved when the file is rendered; the hash is a content digest for change detection, and skills not available from the agent's scope are left out, along with the report line when none remains), and a second line asking it to call `report_skill_outcome` for each before returning (`import` strips both).
 
 **Ownership.** The first line after the frontmatter is
-`<!-- skillvolution-managed:agent:<id>:v<N>:<hash8> -->`, hash = FNV-1a 32 of the file without
-marker lines (BOM and line endings normalized). Id must equal the file stem; anything else is
+`<!-- skillvolution-managed:agent:<id>:v<N>:<hash8>[:model=<model>] -->`, hash = FNV-1a 32 of the
+file without marker lines (BOM and line endings normalized); the optional pin is the model
+`install_agent` was given, which `sync` keeps while the tier has it enabled
+(`agents::expected_plan`). Id must equal the file stem; anything else is
 foreign. States: missing, foreign (never overwritten), edited (hash mismatch: skipped by
 `add`/`remove`/`sync`, `doctor` warns), managed. Writes go through `setup::write_all`
 (atomic, rollback). `sync` is a dry run unless `--apply`, flags widened tools and changed prompts

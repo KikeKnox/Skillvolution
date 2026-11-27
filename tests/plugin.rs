@@ -316,7 +316,7 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     fs::create_dir_all(&global_agents).unwrap();
     fs::write(
         global_agents.join("global-reviewer.md"),
-        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12 -->\nbody\n",
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12:model=ollama/llama3:8b -->\nbody\n",
     )
     .unwrap();
     let driver_path = project.join("driver.mjs");

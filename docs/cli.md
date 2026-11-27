@@ -476,7 +476,8 @@ skillvolution agents import PATH [-o DIR]
   touch an exclude file. In a worktree the exclude of the common git directory
   (`git rev-parse --git-common-dir`) is used; outside a git repository it is skipped with a note.
 - `remove` deletes only files carrying our marker whose hash still matches, and takes their
-  `.git/info/exclude` lines back out; it exits 1 if an
+  `.git/info/exclude` lines back out (a line stays while another worktree of the repository
+  still has that file, since worktrees share the exclude file); it exits 1 if an
   id was not installed or if nothing could be removed for it (only a foreign or hand-edited
   file exists; the line printed says why it was left).
 - `sync` re-renders every managed file and reports updates; it is a dry run unless `--apply`,
@@ -707,7 +708,9 @@ Read-only; returns the same object as `telemetry summary --json`, over all proje
 | `offset` | integer | ≥ 0, default 0 |
 
 Returns `agents` (`id`, `version`, `tier`, `description`, `installed`: `local`, `global`,
-`both` or `no`, and `outdated`: an installed copy carries an older version), `total`,
+`both` or `no`, and `outdated`: an installed managed copy differs from what
+`agents sync --apply` would write (a new version, model, pinned skills or rendering), or a
+hand-edited copy carries an older version), `total`,
 `has_more`. Covers the vault agents visible from the project, then the built-ins
 `sv-high`, `sv-mid`, `sv-low`; an agent matches when a query word appears in its id,
 description or tier, more matching words first. `installed` looks at the server
@@ -726,9 +729,15 @@ configured client with agents without it), with the same code as `agents add`
 `agent_install`/`agent_update` events. Each file written inside the project gets an
 anchored line in `.git/info/exclude`. Returns `result` (one line per client: path, version,
 how to delegate to it, and whether the client needs a restart because it has no hot
-reload), `restart_needed`, and `notes` (rendering warnings, an exclude that could not
-be written). A model that is not an enabled model of the tier is refused with the valid
-ones.
+reload), `restart_needed`, and `notes` (the install's warnings and notes: rendering
+limits, unavailable skills, a copy at the other level, the shell/edit and Cursor notes, an
+exclude that could not be written). A model that is not an enabled model of the tier is
+refused with the valid ones. A model given here is pinned in the file's marker
+(`:model=<model>`): `agents sync` keeps it while the tier still has it enabled, and falls
+back to the tier's preferred model with `warning: pinned model X is no longer enabled for
+<client> <tier>` once it is not. Installing without `model` clears the pin. Files are
+recorded with scope `global` (and no project) when they land in a per-user directory,
+e.g. for a server started in `$HOME`.
 
 ### list_models
 

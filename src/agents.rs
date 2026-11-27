@@ -421,6 +421,17 @@ pub fn render(
     agent: &Agent,
     model: Option<(String, Option<String>)>,
 ) -> (String, Vec<String>) {
+    render_pinned(target, agent, model, None)
+}
+
+/// `render`, recording `pin` (a model chosen explicitly at install) in the marker as
+/// `:model=<pin>`, so `sync` keeps it. The marker line is outside the hash.
+fn render_pinned(
+    target: Target,
+    agent: &Agent,
+    model: Option<(String, Option<String>)>,
+    pin: Option<&str>,
+) -> (String, Vec<String>) {
     let (front, mut warnings) = (target.spec().render)(agent, model.as_ref());
     if model.is_none() {
         warnings.push(format!(
@@ -435,7 +446,11 @@ pub fn render(
     let front = front.join("\n");
     let body = body(agent);
     let hash = hash8(&format!("---\n{front}\n---\n{body}"));
-    let marker = format!("{MARKER_PREFIX}{}:v{}:{hash} -->", agent.id, agent.version);
+    let pin = pin.map(|m| format!(":model={m}")).unwrap_or_default();
+    let marker = format!(
+        "{MARKER_PREFIX}{}:v{}:{hash}{pin} -->",
+        agent.id, agent.version
+    );
     (format!("---\n{front}\n---\n{marker}\n{body}"), warnings)
 }
 
@@ -444,6 +459,9 @@ pub struct Marker {
     pub id: String,
     pub version: i64,
     pub hash: String,
+    /// The model pinned at install (`:model=<model>`), which `sync` keeps while the tier
+    /// still has it enabled.
+    pub pin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,8 +496,17 @@ fn parse_marker(text: &str, stem: &str) -> Option<Marker> {
         .next()?
         .strip_prefix(MARKER_PREFIX)?
         .strip_suffix(" -->")?;
-    let mut parts = inner.splitn(3, ':');
+    // The pin comes last and may itself contain ':' (`ollama/llama3:8b`).
+    let mut parts = inner.splitn(4, ':');
     let (id, version, hash) = (parts.next()?, parts.next()?, parts.next()?);
+    let pin = match parts.next() {
+        None => None,
+        Some(rest) => Some(
+            rest.strip_prefix("model=")
+                .filter(|m| !m.is_empty() && !m.contains(char::is_whitespace))?
+                .to_owned(),
+        ),
+    };
     let version = version.strip_prefix('v')?;
     let ok = validate_id(id).is_ok()
         && id == stem
@@ -494,6 +521,7 @@ fn parse_marker(text: &str, stem: &str) -> Option<Marker> {
         id: id.to_owned(),
         version: version.parse().ok()?,
         hash: hash.to_owned(),
+        pin,
     })
 }
 
@@ -538,15 +566,19 @@ pub fn managed_files(dir: &Path) -> Vec<(PathBuf, FileState)> {
         .collect()
 }
 
-/// Whether `agent` at `version` is already on disk exactly as rendered in `text`.
-fn is_current(marker: &Marker, version: i64, text: &str) -> bool {
-    marker.version == version && marker.hash == hash8(text)
+/// Whether the installed file with `marker` is already exactly `plan` of an agent at
+/// `version` (content, version and pin).
+fn is_current(marker: &Marker, version: i64, plan: &Plan) -> bool {
+    marker.version == version && marker.hash == hash8(&plan.text) && marker.pin == plan.pin
 }
 
-struct Plan {
+/// A file to write for one client.
+pub(crate) struct Plan {
     target: Target,
     path: PathBuf,
     text: String,
+    /// The model pinned in its marker.
+    pin: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -555,14 +587,92 @@ fn plan(
     agent: &Agent,
     project_dir: Option<&Path>,
     model: Option<ModelChoice>,
+    pin: Option<String>,
 ) -> Result<Plan> {
-    let (text, warnings) = render(target, agent, model);
+    let (text, warnings) = render_pinned(target, agent, model, pin.as_deref());
     Ok(Plan {
         target,
         path: target.dir(project_dir)?.join(format!("{}.md", agent.id)),
         text,
+        pin,
         warnings,
     })
+}
+
+/// The file `agent` should have for `target` given the installed file's `marker`: the
+/// model pinned there while it is still one of the tier's models, else the tier's best
+/// (with a warning when a pin is dropped). What `sync` writes and `search_agents` compares
+/// against; the one place that decides what an installed file is expected to be.
+pub(crate) fn expected_plan(
+    models: &[ClientModel],
+    target: Target,
+    agent: &Agent,
+    project_dir: Option<&Path>,
+    marker: Option<&Marker>,
+) -> Result<Plan> {
+    let tier = &agent.meta.tier;
+    let Some(pin) = marker.and_then(|m| m.pin.as_deref()) else {
+        return plan(
+            target,
+            agent,
+            project_dir,
+            model_for(models, target, tier),
+            None,
+        );
+    };
+    if let Some(found) = tier_models(models, target, tier)
+        .into_iter()
+        .find(|m| m.model == pin)
+    {
+        let model = Some((found.model, found.effort));
+        return plan(target, agent, project_dir, model, Some(pin.to_owned()));
+    }
+    let mut fallback = plan(
+        target,
+        agent,
+        project_dir,
+        model_for(models, target, tier),
+        None,
+    )?;
+    fallback.warnings.insert(
+        0,
+        format!(
+            "pinned model {pin} is no longer enabled for {} {tier}; using the tier's preferred model",
+            target.display_name()
+        ),
+    );
+    Ok(fallback)
+}
+
+/// Whether the installed file in `state` lags `agent`: a managed file that differs from
+/// `expected_plan`, or a hand-edited one carrying an older version.
+pub fn is_outdated(
+    models: &[ClientModel],
+    target: Target,
+    agent: &Agent,
+    project_dir: Option<&Path>,
+    state: &FileState,
+) -> bool {
+    match state {
+        FileState::Managed(marker) => {
+            expected_plan(models, target, agent, project_dir, Some(marker))
+                .is_ok_and(|plan| !is_current(marker, agent.version, &plan))
+        }
+        FileState::Edited(marker) => marker.version < agent.version,
+        _ => false,
+    }
+}
+
+/// `global` when `target`'s files for `project_dir` land in its per-user directory (no
+/// project, or the project is that directory's owner such as $HOME), else `project`: the
+/// scope `agent_*` events record.
+pub fn install_scope(target: Target, project_dir: Option<&Path>) -> &'static str {
+    let per_user = match (project_dir, target.dir(None)) {
+        (None, _) => true,
+        (Some(dir), Ok(user)) => target.dir(Some(dir)).is_ok_and(|d| same_dir(&d, &user)),
+        (Some(_), Err(_)) => false,
+    };
+    if per_user { "global" } else { "project" }
 }
 
 /// The clients with subagents set up per user or, with `project_dir`, in that project.
@@ -676,11 +786,13 @@ pub struct InstallOptions<'a> {
 }
 
 /// What `install` did: `add`'s output lines, the files it wrote (for the `agent_*`
-/// events), and every file it considered.
+/// events), every file it considered, and the notes among its lines (warnings, the
+/// shell/edit and Cursor notes, an exclude that could not be written) as plain text.
 pub struct InstallReport {
     pub lines: Vec<String>,
     pub changes: Vec<AgentChange>,
     pub files: Vec<InstalledFile>,
+    pub notes: Vec<String>,
 }
 
 /// One agent file `install` considered.
@@ -794,23 +906,36 @@ pub fn install(
             .and_then(|(.., choice)| choice.clone())
     };
     let (mut lines, mut edits, mut backups) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut changes, mut files) = (Vec::new(), Vec::new());
+    let (mut changes, mut files, mut notes) = (Vec::new(), Vec::new(), Vec::new());
+    // A note goes to the printed lines (indented as given) and, trimmed, to `notes`.
+    let mut note = |lines: &mut Vec<String>, line: String| {
+        notes.push(line.trim().to_owned());
+        lines.push(line);
+    };
     for agent in &agents {
-        lines.extend(skill_warnings(vault, agent));
+        for warning in skill_warnings(vault, agent) {
+            note(&mut lines, warning);
+        }
         if agent.deprecated {
-            lines.push(format!(
-                "[deprecated] {}: deprecated in the vault; not added",
-                agent.id
-            ));
+            note(
+                &mut lines,
+                format!(
+                    "[deprecated] {}: deprecated in the vault; not added",
+                    agent.id
+                ),
+            );
             continue;
         }
         if !agent.meta.skills.is_empty()
             && (agent.meta.allows("shell") || agent.meta.allows("edit"))
         {
-            lines.push(format!(
-                "note: {}: its vault skills run with its shell/edit tools and stay pinned to the versions listed in the file until `skillvolution agents sync --apply`",
-                agent.id
-            ));
+            note(
+                &mut lines,
+                format!(
+                    "note: {}: its vault skills run with its shell/edit tools and stay pinned to the versions listed in the file until `skillvolution agents sync --apply`",
+                    agent.id
+                ),
+            );
         }
         for &target in &targets {
             if let Some(problem) = placement_error(target, agent, project_dir) {
@@ -818,7 +943,9 @@ pub fn install(
             }
             let model = choice(target, &agent.id);
             let written_model = model.as_ref().map(|(m, _)| m.clone());
-            let plan = plan(target, agent, project_dir, model)?;
+            // An explicit model is pinned in the marker; without one any pin is cleared.
+            let pin = options.model.map(str::to_owned);
+            let plan = plan(target, agent, project_dir, model, pin)?;
             let mut file = InstalledFile {
                 target,
                 id: agent.id.clone(),
@@ -839,7 +966,7 @@ pub fn install(
                     if fs::read(&plan.path).is_ok_and(|old| contains_marker(&old)) {
                         backups.push(plan.path.clone());
                     }
-                    lines.push(format!("  {}", backup_note(&plan.path)));
+                    note(&mut lines, format!("  {}", backup_note(&plan.path)));
                     ("overwritten", kind)
                 }
                 FileState::Foreign => bail!(
@@ -857,14 +984,16 @@ pub fn install(
                     files.push(file);
                     continue;
                 }
-                FileState::Managed(m) if is_current(&m, agent.version, &plan.text) => {
+                FileState::Managed(m) if is_current(&m, agent.version, &plan) => {
                     lines.push(format!(
                         "[unchanged] {} {} v{}",
                         target.display_name(),
                         agent.id,
                         agent.version
                     ));
-                    lines.extend(double_install_warning(target, &agent.id, project_dir));
+                    if let Some(warning) = double_install_warning(target, &agent.id, project_dir) {
+                        note(&mut lines, warning);
+                    }
                     files.push(file);
                     continue;
                 }
@@ -884,8 +1013,12 @@ pub fn install(
                 agent.version,
                 plan.path.display()
             ));
-            lines.extend(plan.warnings.iter().map(|w| format!("  warning: {w}")));
-            lines.extend(double_install_warning(target, &agent.id, project_dir));
+            for warning in &plan.warnings {
+                note(&mut lines, format!("  warning: {warning}"));
+            }
+            if let Some(warning) = double_install_warning(target, &agent.id, project_dir) {
+                note(&mut lines, warning);
+            }
             edits.push(Edit::Write(plan.path, plan.text));
             file.status = tag;
             files.push(file);
@@ -901,9 +1034,12 @@ pub fn install(
         .filter(|f| f.status != "edited")
         .map(|f| f.path.clone())
         .collect();
-    lines.extend(exclude_from_git(project_dir, &ours, true));
+    if let Some(excluded) = exclude_from_git(project_dir, &ours, true) {
+        note(&mut lines, excluded);
+    }
     if targets.contains(&Target::ClaudeCode) {
-        lines.push(
+        note(
+            &mut lines,
             "note: Cursor also reads .claude/agents/ and may not accept Claude Code model aliases"
                 .into(),
         );
@@ -912,6 +1048,7 @@ pub fn install(
         lines,
         changes,
         files,
+        notes,
     })
 }
 
@@ -1195,9 +1332,8 @@ pub fn sync_with_changes(
                 lines.push(format!("[refused] {name} {id}: {problem}"));
                 continue;
             }
-            let model = model_for(&models, target, &agent.meta.tier);
-            let plan = plan(target, &agent, project_dir, model)?;
-            if !edited && is_current(marker, agent.version, &plan.text) {
+            let plan = expected_plan(&models, target, &agent, project_dir, Some(marker))?;
+            if !edited && is_current(marker, agent.version, &plan) {
                 unchanged += 1;
                 lines.push(format!("[ok] {name} {id} v{}", agent.version));
                 lines.extend(double_install_warning(target, id, project_dir));
@@ -1266,7 +1402,7 @@ pub fn sync_with_changes(
 /// `--force` replaced, is an `agent_install` (a managed file now exists where none did);
 /// replacing a managed or hand-edited generated file is an `agent_update`. `version` is
 /// the version written (`None` for a removal).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentChange {
     pub kind: &'static str,
     pub target: Target,
@@ -1649,6 +1785,30 @@ mod tests {
             "name: a\n<!-- skillvolution-managed:agent:my-agent:v3:0123abcd -->\n",
         ] {
             assert!(parse_marker(bad, "my-agent").is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_model_round_trips_through_the_marker_without_touching_the_hash() {
+        let agent = builtin("sv-mid").unwrap();
+        let model = Some(("ollama/llama3:8b".to_owned(), None));
+        let (pinned, _) = render_pinned(
+            Target::OpenCode,
+            &agent,
+            model.clone(),
+            Some("ollama/llama3:8b"),
+        );
+        let (plain, _) = render(Target::OpenCode, &agent, model);
+        let marker = parse_marker(&pinned, "sv-mid").unwrap();
+        assert_eq!(marker.pin.as_deref(), Some("ollama/llama3:8b"));
+        assert_eq!(marker.hash, hash8(&pinned));
+        assert_eq!(hash8(&pinned), hash8(&plain));
+        assert_eq!(parse_marker(&plain, "sv-mid").unwrap().pin, None);
+        for bad in [":model=", ":model=a b", ":other=x"] {
+            let text = format!(
+                "---\nname: a\n---\n<!-- skillvolution-managed:agent:my-agent:v3:0123abcd{bad} -->\n"
+            );
+            assert!(parse_marker(&text, "my-agent").is_none(), "{text}");
         }
     }
 

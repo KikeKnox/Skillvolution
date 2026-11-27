@@ -111,8 +111,18 @@ impl Sandbox {
     /// One MCP session (`serve`, with `--client` when given): each call's result text
     /// parsed as JSON, or `Err(text)` for a tool error.
     fn mcp(&self, client: Option<&str>, calls: &[(&str, Value)]) -> Vec<Result<Value, String>> {
+        self.mcp_in(&self.repo, client, calls)
+    }
+
+    /// `mcp` with the server started in `cwd`.
+    fn mcp_in(
+        &self,
+        cwd: &std::path::Path,
+        client: Option<&str>,
+        calls: &[(&str, Value)],
+    ) -> Vec<Result<Value, String>> {
         let mut command = self.command();
-        command.arg("serve");
+        command.current_dir(cwd).arg("serve");
         if let Some(client) = client {
             command.args(["--client", client]);
         }
@@ -199,6 +209,7 @@ fn tools_list_has_the_agent_tools() {
         .args(["serve", "--client", "claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -528,4 +539,180 @@ fn get_skill_still_refuses_agents() {
         .one(Some("claude-code"), "get_skill", json!({"id": "reviewer"}))
         .unwrap_err();
     assert!(refused.contains("is an agent"), "{refused}");
+}
+
+#[test]
+fn an_installed_model_is_pinned_and_sync_keeps_it_until_it_is_disabled() {
+    let sandbox = Sandbox::new("claude-code");
+    sandbox.ok(&["agents", "models", "add", "claude-code", "mid", "opus"]);
+    sandbox.ok(&["agents", "models", "add", "claude-code", "mid", "sonnet"]);
+    sandbox
+        .one(
+            Some("claude-code"),
+            "install_agent",
+            json!({"id": "reviewer", "model": "sonnet"}),
+        )
+        .unwrap();
+    let text = fs::read_to_string(sandbox.claude("reviewer")).unwrap();
+    assert!(
+        text.contains("model: sonnet\n") && text.contains(":model=sonnet -->"),
+        "{text}"
+    );
+
+    // sync keeps the pin although opus ranks first.
+    let synced = sandbox.ok(&["agents", "sync", "--apply"]);
+    assert!(synced.contains("[ok] Claude Code reviewer v1"), "{synced}");
+    assert_eq!(
+        fs::read_to_string(sandbox.claude("reviewer")).unwrap(),
+        text
+    );
+    let found = sandbox
+        .one(Some("claude-code"), "search_agents", json!({}))
+        .unwrap();
+    assert_eq!(agent(&found, "reviewer")["outdated"], false, "{found}");
+
+    // Disabled: sync falls back to the tier's best and says why.
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "disable",
+        "claude-code",
+        "mid",
+        "sonnet",
+    ]);
+    let found = sandbox
+        .one(Some("claude-code"), "search_agents", json!({}))
+        .unwrap();
+    assert_eq!(agent(&found, "reviewer")["outdated"], true, "{found}");
+    let synced = sandbox.ok(&["agents", "sync", "--apply"]);
+    assert!(
+        synced.contains("warning: pinned model sonnet is no longer enabled for Claude Code mid"),
+        "{synced}"
+    );
+    let text = fs::read_to_string(sandbox.claude("reviewer")).unwrap();
+    assert!(
+        text.contains("model: opus\n") && !text.contains(":model="),
+        "{text}"
+    );
+
+    // Installing without a model clears a pin.
+    sandbox.ok(&["agents", "models", "enable", "claude-code", "mid", "sonnet"]);
+    sandbox
+        .one(
+            Some("claude-code"),
+            "install_agent",
+            json!({"id": "reviewer", "model": "sonnet"}),
+        )
+        .unwrap();
+    sandbox
+        .one(
+            Some("claude-code"),
+            "install_agent",
+            json!({"id": "reviewer"}),
+        )
+        .unwrap();
+    let text = fs::read_to_string(sandbox.claude("reviewer")).unwrap();
+    assert!(
+        text.contains("model: opus\n") && !text.contains(":model="),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_pinned_model_with_a_colon_round_trips() {
+    let sandbox = Sandbox::new("opencode");
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "opencode",
+        "mid",
+        "anthropic/claude-sonnet-4-5",
+    ]);
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "opencode",
+        "mid",
+        "ollama/llama3:8b",
+    ]);
+    sandbox
+        .one(
+            Some("opencode"),
+            "install_agent",
+            json!({"id": "reviewer", "model": "ollama/llama3:8b"}),
+        )
+        .unwrap();
+    let text = fs::read_to_string(sandbox.opencode("reviewer")).unwrap();
+    assert!(text.contains(":model=ollama/llama3:8b -->"), "{text}");
+    let synced = sandbox.ok(&["agents", "sync", "--apply"]);
+    assert!(synced.contains("[ok] OpenCode reviewer v1"), "{synced}");
+    assert_eq!(
+        fs::read_to_string(sandbox.opencode("reviewer")).unwrap(),
+        text
+    );
+}
+
+#[test]
+fn search_agents_flags_a_same_version_file_that_sync_would_rewrite() {
+    let sandbox = Sandbox::new("claude-code");
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.ok(&["agents", "models", "set", "claude-code", "mid", "opus"]);
+    let found = sandbox
+        .one(Some("claude-code"), "search_agents", json!({}))
+        .unwrap();
+    let reviewer = agent(&found, "reviewer");
+    assert_eq!(
+        (reviewer["version"].as_i64(), reviewer["outdated"].as_bool()),
+        (Some(1), Some(true))
+    );
+}
+
+#[test]
+fn an_install_from_home_lands_per_user_and_is_recorded_as_global() {
+    let sandbox = Sandbox::new("claude-code");
+    let bin = sandbox.bin.to_str().unwrap();
+    sandbox.ok(&["setup", "--client", "claude-code", "--bin", bin]);
+    let result = sandbox
+        .mcp_in(
+            &sandbox.home,
+            Some("claude-code"),
+            &[("install_agent", json!({"id": "reviewer"}))],
+        )
+        .remove(0)
+        .unwrap();
+    assert!(
+        sandbox.home.join(".claude/agents/reviewer.md").exists(),
+        "{result}"
+    );
+    let installs = events(&sandbox.db, Some("agent_install"));
+    assert_eq!(installs.len(), 1, "{installs:?}");
+    assert_eq!(installs[0].data["scope"], "global");
+    assert_eq!(installs[0].project, None);
+    assert!(!sandbox.home.join(".git").exists());
+}
+
+#[test]
+fn install_agent_returns_every_note_of_the_install() {
+    let sandbox = Sandbox::new("claude-code");
+    let result = sandbox
+        .one(
+            Some("claude-code"),
+            "install_agent",
+            json!({"id": "reviewer"}),
+        )
+        .unwrap();
+    let notes: Vec<&str> = result["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with("note: Cursor also reads .claude/agents/")),
+        "{notes:?}"
+    );
 }

@@ -20,7 +20,9 @@ pub fn add(project_dir: &Path, files: &[PathBuf]) -> Option<String> {
     update(project_dir, files, true)
 }
 
-/// Removes the lines `add` wrote for `files`, and the block once it is empty.
+/// Removes the lines `add` wrote for `files`, and the block once it is empty. Every
+/// worktree of a repository shares one exclude file, so a line stays while its path still
+/// exists in another worktree.
 pub fn remove(project_dir: &Path, files: &[PathBuf]) -> Option<String> {
     update(project_dir, files, false)
 }
@@ -49,8 +51,19 @@ fn update(project_dir: &Path, files: &[PathBuf], add: bool) -> Option<String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Some(format!("note: could not read {}: {e}", exclude.display())),
     };
-    let (added, removed): (&[String], &[String]) = if add { (&lines, &[]) } else { (&[], &lines) };
-    let updated = with_lines(&text, added, removed);
+    let updated = if add {
+        with_lines(&text, &lines, &[])
+    } else {
+        let trees = worktrees(&root);
+        let gone: Vec<String> = lines
+            .into_iter()
+            .filter(|line| {
+                let relative = line.trim_start_matches('/');
+                !trees.iter().any(|tree| tree.join(relative).exists())
+            })
+            .collect();
+        with_lines(&text, &[], &gone)
+    };
     if updated == text {
         return None;
     }
@@ -85,6 +98,33 @@ fn exclude_path(root: &Path) -> Option<PathBuf> {
         .then(|| root.join(dir).join("info").join("exclude"))
 }
 
+/// The work tree roots of the repository whose work tree `root` is, as `git worktree list
+/// --porcelain` reports them; just `root` when git cannot say.
+fn worktrees(root: &Path) -> Vec<PathBuf> {
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "list", "--porcelain"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if listed.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        listed
+    }
+}
+
 /// `/`-anchored path of `file` relative to `root`, `None` when it is not inside it.
 fn pattern(root: &Path, file: &Path) -> Option<String> {
     let relative = file.strip_prefix(root).ok()?;
@@ -100,7 +140,8 @@ fn pattern(root: &Path, file: &Path) -> Option<String> {
 
 /// `text` with our block holding its previous lines minus `remove` plus `add` (in that
 /// order, without duplicates); the block is dropped when that leaves it empty and
-/// appended at the end when there was none.
+/// appended at the end when there was none. A start marker without an end marker opens a
+/// block that runs to the end of the file.
 fn with_lines(text: &str, add: &[String], remove: &[String]) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|l| l.trim_end() == START);
@@ -110,16 +151,20 @@ fn with_lines(text: &str, add: &[String], remove: &[String]) -> String {
             .position(|l| l.trim_end() == END)
             .map(|e| s + e)
     });
+    let entries_of = |block: &[&str]| -> Vec<String> {
+        block
+            .iter()
+            .map(|l| l.trim_end().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
     let (before, mut entries, after): (Vec<&str>, Vec<String>, Vec<&str>) = match (start, end) {
         (Some(s), Some(e)) => (
             lines[..s].to_vec(),
-            lines[s + 1..e]
-                .iter()
-                .map(|l| l.trim_end().to_owned())
-                .filter(|l| !l.is_empty())
-                .collect(),
+            entries_of(&lines[s + 1..e]),
             lines[e + 1..].to_vec(),
         ),
+        (Some(s), None) => (lines[..s].to_vec(), entries_of(&lines[s + 1..]), Vec::new()),
         _ => (lines.clone(), Vec::new(), Vec::new()),
     };
     entries.retain(|entry| !remove.contains(entry));
@@ -182,6 +227,15 @@ mod tests {
     }
 
     #[test]
+    fn a_start_marker_without_an_end_runs_to_the_end_of_the_file() {
+        let text = format!("*.log\n{START}\n/a.md\n");
+        let added = with_lines(&text, &s(&["/b.md"]), &[]);
+        assert_eq!(added, format!("*.log\n{START}\n/a.md\n/b.md\n{END}\n"));
+        assert_eq!(added.matches(START).count(), 1);
+        assert_eq!(with_lines(&text, &[], &s(&["/a.md"])), "*.log\n");
+    }
+
+    #[test]
     fn patterns_are_anchored_relative_paths_inside_the_root() {
         let root = Path::new("/repo");
         assert_eq!(
@@ -240,9 +294,36 @@ mod tests {
         }
         let wt = dir.path().join("wt");
         assert!(wt.join(".git").is_file());
-        assert_eq!(add(&wt, &[wt.join(".claude/agents/x.md")]), None);
-        let text = fs::read_to_string(main.join(".git/info/exclude")).unwrap();
+        let exclude = main.join(".git/info/exclude");
+        // The same agent installed in both worktrees: one shared line.
+        let files = [
+            main.join(".claude/agents/x.md"),
+            wt.join(".claude/agents/x.md"),
+        ];
+        for file in &files {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, "x").unwrap();
+        }
+        assert_eq!(add(&wt, std::slice::from_ref(&files[1])), None);
+        assert_eq!(add(&main, std::slice::from_ref(&files[0])), None);
+        let text = fs::read_to_string(&exclude).unwrap();
+        assert_eq!(
+            text.matches("\n/.claude/agents/x.md\n").count(),
+            1,
+            "{text}"
+        );
+
+        // Removed from the worktree: the main checkout still has it, so it stays hidden.
+        fs::remove_file(&files[1]).unwrap();
+        assert_eq!(remove(&wt, std::slice::from_ref(&files[1])), None);
+        let text = fs::read_to_string(&exclude).unwrap();
         assert!(text.contains("\n/.claude/agents/x.md\n"), "{text}");
+
+        // Removed from the last one: the line goes.
+        fs::remove_file(&files[0]).unwrap();
+        assert_eq!(remove(&main, std::slice::from_ref(&files[0])), None);
+        let text = fs::read_to_string(&exclude).unwrap();
+        assert!(!text.contains("x.md"), "{text}");
     }
 
     #[test]

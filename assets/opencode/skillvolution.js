@@ -47,7 +47,8 @@ const MAX_TRACKED_SESSIONS = 500;
 const managedAgentVersion = (root, id) => {
   if (typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id) || id.startsWith("sv-")) return null;
   const globalDir = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "agents");
-  const marker = new RegExp(`^<!-- skillvolution-managed:agent:${id}:v(\\d+):[0-9a-f]{8} -->$`);
+  // An optional `:model=<model>` pin (install_agent with a model) follows the hash.
+  const marker = new RegExp(`^<!-- skillvolution-managed:agent:${id}:v(\\d+):[0-9a-f]{8}(?::model=\\S+)? -->$`);
   for (const dir of [join(root, ".opencode", "agents"), globalDir]) {
     try {
       // Same strict form as the Rust side: the marker is the line right after the
