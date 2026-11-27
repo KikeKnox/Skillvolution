@@ -139,6 +139,9 @@ pub fn models_table(stored: &[ClientModel]) -> Vec<String> {
             {
                 any_enabled |= m.enabled;
                 let mut origin = vec!["set".to_owned()];
+                if m.provider().is_none() {
+                    origin.push("unknown provider".into());
+                }
                 if m.priority != 0 {
                     origin.push(format!("priority {}", m.priority));
                 }

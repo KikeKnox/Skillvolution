@@ -376,6 +376,29 @@ fn scope_name(global: bool) -> &'static str {
     if global { "global" } else { "project" }
 }
 
+/// The line `models remove/enable/disable` print; no matching row is a failure.
+fn model_rows_report(
+    reference: &ModelRef,
+    verb: &str,
+    count: usize,
+    failed: &mut bool,
+) -> Vec<String> {
+    if count == 0 {
+        *failed = true;
+        return vec![format!(
+            "No stored model `{}` for {} {}.",
+            reference.model, reference.client, reference.tier
+        )];
+    }
+    vec![format!(
+        "{verb} {count} row{} for {} {} `{}`.",
+        if count == 1 { "" } else { "s" },
+        reference.client,
+        reference.tier,
+        reference.model
+    )]
+}
+
 fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
     use skillvolution::agents;
     let mut failed = false;
@@ -450,41 +473,22 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             lines
         }
         AgentsCommand::Models {
-            action:
-                Some(
-                    action @ (ModelsAction::Remove(_)
-                    | ModelsAction::Enable(_)
-                    | ModelsAction::Disable(_)),
-                ),
+            action: Some(ModelsAction::Remove(r)),
         } => {
-            let vault = open(db)?;
-            let (reference, verb) = match &action {
-                ModelsAction::Remove(r) => (r, "Removed"),
-                ModelsAction::Enable(r) => (r, "Enabled"),
-                ModelsAction::Disable(r) => (r, "Disabled"),
-                _ => unreachable!(),
-            };
-            let selector = reference.selector();
-            let count = match &action {
-                ModelsAction::Remove(_) => vault.remove_client_model(&selector)?,
-                ModelsAction::Enable(_) => vault.set_client_model_enabled(&selector, true)?,
-                _ => vault.set_client_model_enabled(&selector, false)?,
-            };
-            if count == 0 {
-                failed = true;
-                vec![format!(
-                    "No stored model `{}` for {} {}.",
-                    reference.model, reference.client, reference.tier
-                )]
-            } else {
-                vec![format!(
-                    "{verb} {count} row{} for {} {} `{}`.",
-                    if count == 1 { "" } else { "s" },
-                    reference.client,
-                    reference.tier,
-                    reference.model
-                )]
-            }
+            let count = open(db)?.remove_client_model(&r.selector())?;
+            model_rows_report(&r, "Removed", count, &mut failed)
+        }
+        AgentsCommand::Models {
+            action: Some(ModelsAction::Enable(r)),
+        } => {
+            let count = open(db)?.set_client_model_enabled(&r.selector(), true)?;
+            model_rows_report(&r, "Enabled", count, &mut failed)
+        }
+        AgentsCommand::Models {
+            action: Some(ModelsAction::Disable(r)),
+        } => {
+            let count = open(db)?.set_client_model_enabled(&r.selector(), false)?;
+            model_rows_report(&r, "Disabled", count, &mut failed)
         }
         AgentsCommand::Add {
             ids,

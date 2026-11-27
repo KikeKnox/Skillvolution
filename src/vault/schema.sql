@@ -115,7 +115,8 @@ WHERE r.status = 'published'
 
 -- The models each client's tiers map to, ranked: file generation uses the enabled row
 -- with the lowest `priority` (ties by insertion order). `effort` is '' when none; an
--- OpenCode provider is the `provider/` prefix of its model. Machine-local configuration
+-- OpenCode provider is the `provider/` prefix of its model; `provider` is '' when
+-- unknown (a bare model from `set`, or pre-v9 data). Machine-local configuration
 -- (model availability depends on the machine): not exported or imported.
 CREATE TABLE client_models (
     id INTEGER PRIMARY KEY,

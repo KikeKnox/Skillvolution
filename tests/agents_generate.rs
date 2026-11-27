@@ -557,6 +557,30 @@ fn models_add_rank_disable_and_remove_drive_the_generated_model() {
 }
 
 #[test]
+fn models_set_replaces_the_priority_zero_model_across_providers_and_unknown_ones_list() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("opencode");
+    sandbox.ok(&["agents", "models", "set", "opencode", "mid", "anthropic/a"]);
+    sandbox.ok(&["agents", "models", "set", "opencode", "mid", "openai/b"]);
+    sandbox.ok(&["agents", "add", "sv-mid"]);
+    let file = read(&sandbox.opencode("sv-mid"));
+    assert!(file.contains("model: openai/b\n"), "{file}");
+    assert!(!sandbox.ok(&["agents", "models"]).contains("anthropic/a"));
+
+    let out = sandbox.ok(&["agents", "models", "set", "opencode", "mid", "sonnet"]);
+    assert!(out.contains("warning:"), "{out}");
+    let table = sandbox.ok(&["agents", "models"]);
+    assert!(table.contains("(set, unknown provider)"), "{table}");
+    let out = sandbox.ok(&["agents", "models", "disable", "opencode", "mid", "sonnet"]);
+    assert!(out.contains("Disabled 1 row"), "{out}");
+    assert!(
+        sandbox
+            .ok(&["agents", "models"])
+            .contains("(set, unknown provider, disabled)")
+    );
+}
+
+#[test]
 fn importing_a_generated_file_round_trips_and_native_files_map_sensibly() {
     let sandbox = Sandbox::new();
     sandbox.setup("claude-code");

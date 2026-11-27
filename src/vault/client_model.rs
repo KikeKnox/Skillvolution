@@ -21,6 +21,14 @@ pub struct ClientModel {
     pub enabled: bool,
 }
 
+impl ClientModel {
+    /// The provider, or `None` when unknown (stored as `''`: a bare model given to `set`,
+    /// or data from before v9).
+    pub fn provider(&self) -> Option<&str> {
+        Some(self.provider.as_str()).filter(|p| !p.is_empty())
+    }
+}
+
 /// Which rows of a client and tier `remove`, `enable` and `disable` act on.
 pub struct ModelSelector<'a> {
     pub client: &'a str,
@@ -117,7 +125,7 @@ impl Vault {
     }
 
     /// Maps `tier` to `model` (and optionally `effort`) for `client` as the priority-0
-    /// row, replacing the previous priority-0 model of the same provider. A bare OpenCode
+    /// row, replacing every other priority-0 model of that client and tier. A bare OpenCode
     /// model (no `provider/`) is accepted with an empty provider; the CLI warns about it.
     pub fn set_agent_model(
         &self,
@@ -140,8 +148,8 @@ impl Vault {
             params![client, provider, model, tier, effort],
         )?;
         tx.execute(
-            "DELETE FROM client_models WHERE client = ?1 AND tier = ?2 AND provider = ?3
-             AND priority = 0 AND NOT (model = ?4 AND effort = ?5)",
+            "DELETE FROM client_models WHERE client = ?1 AND tier = ?2
+             AND priority = 0 AND NOT (provider = ?3 AND model = ?4 AND effort = ?5)",
             params![client, tier, provider, model, effort],
         )?;
         tx.commit()?;
