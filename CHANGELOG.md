@@ -14,6 +14,9 @@ The vault migrates from schema v6 to v9 on first use: run `skillvolution backup 
 upgrading (an older binary can't open it afterwards). Then rerun `skillvolution setup` (or
 `skillvolution doctor --fix`): existing MCP entries need the new `--client` argument for the
 agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill are installed.
+Until then, an OpenCode plugin from an earlier release calls the hooks without
+`--client opencode`: its catalog gets Claude Code's agents block and its events are recorded
+as Claude Code's.
 
 ### Added
 
