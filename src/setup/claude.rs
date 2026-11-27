@@ -36,7 +36,7 @@ pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
         let entry = json!({
             "type": "stdio",
             "command": bin,
-            "args": common::server_args(db, Some(key)),
+            "args": common::server_args(db, Some(key), super::ClientKind::ClaudeCode),
         });
         fs_safe::merge_server(&mut config, "mcpServers", entry, scope)?;
         changes.push((path, common::json_text(&config)?));

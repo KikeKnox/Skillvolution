@@ -34,7 +34,11 @@ pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
     let mut config = load_config(&config_path)?;
     let mut command = vec![json!(bin)];
-    command.extend(common::server_args(db, scope.key()));
+    command.extend(common::server_args(
+        db,
+        scope.key(),
+        super::ClientKind::OpenCode,
+    ));
     let entry = json!({"type": "local", "command": command, "enabled": true});
     fs_safe::merge_server(&mut config, "mcp", entry, scope)?;
     if let Scope::Project { .. } = scope {

@@ -598,6 +598,101 @@ fn fix_reapplies_an_outdated_configured_client_with_a_backup() {
 }
 
 #[test]
+fn a_registration_without_client_is_flagged_and_fix_adds_it() {
+    let env = Env::new();
+    assert_success(&env.setup().args(["--client", "devin"]).output().unwrap());
+    // What a setup from before v0.7.0 wrote: no `--client devin`.
+    let path = [
+        env.home.path().join(".config/devin/mcp_config.json"),
+        env.xdg_config.join("devin/mcp_config.json"),
+        env.appdata.join("devin/mcp_config.json"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .expect("devin mcp_config.json");
+    let text = fs::read_to_string(&path).unwrap();
+    let old = text.replace(",\n        \"--client\",\n        \"devin\"", "");
+    assert_ne!(old, text, "{text}");
+    fs::write(&path, &old).unwrap();
+
+    let output = env.doctor().output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("its MCP server is registered without `--client devin`"),
+        "{stdout}"
+    );
+
+    let output = env.doctor().arg("--fix").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[fixed] Devin CLI: "), "{stdout}");
+    assert!(fs::read_to_string(&path).unwrap().contains("\"--client\""));
+}
+
+/// A fake `claude` whose `mcp get` reports a user-scope registration with `args`, and
+/// that logs every call to `log`.
+#[cfg(unix)]
+fn write_fake_claude_registered(dir: &Path, log: &Path, args: &str) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    write_executable(
+        &dir.join("claude"),
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1 $2\" = \"mcp get\" ]; then\n  echo 'skillvolution:'\n  echo '  Scope: User config'\n  echo '  Type: stdio'\n  echo '  Args: {args}'\nfi\nexit 0\n",
+            log.display()
+        ),
+    );
+    dir.to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_claude_code_registration_without_client_is_flagged_and_fix_reregisters() {
+    let env = Env::new();
+    let log = env.home.path().join("claude.log");
+    let old_args = format!("--db {} serve", env.db.display());
+    let bin_dir = write_fake_claude_registered(&env.home.path().join("bin"), &log, &old_args);
+    assert_success(
+        &env.setup()
+            .args(["--client", "claude-code"])
+            .env("PATH", &bin_dir)
+            .output()
+            .unwrap(),
+    );
+    fs::write(&log, "").unwrap();
+
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "[warn] Claude Code MCP registration: registered without `--client claude-code`"
+        ),
+        "{stdout}"
+    );
+
+    let output = env
+        .doctor()
+        .arg("--fix")
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[fixed] Claude Code MCP registration"),
+        "{stdout}"
+    );
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("\"--client\",\"claude-code\""), "{calls}");
+
+    // A registration that already has it is not flagged.
+    let current = format!("{old_args} --client claude-code");
+    let bin_dir = write_fake_claude_registered(&env.home.path().join("bin2"), &log, &current);
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("MCP registration"), "{stdout}");
+}
+
+#[test]
 fn fix_repoints_a_missing_configured_binary_at_the_current_one() {
     let env = Env::new();
     assert_success(

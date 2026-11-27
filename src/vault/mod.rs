@@ -13,7 +13,7 @@ pub use agent::{
     AGENT_SECTIONS, AgentMeta, EFFORTS, TIERS, TOOLS, agent_content_problems, agent_meta_problems,
     agent_section_problems, reserved_agent_id, skill_deprecated, skill_unavailable,
 };
-pub use client_model::{ClientModel, ModelSelector};
+pub use client_model::{ClientModel, ModelSelector, implied_provider};
 pub use client_version::{StoredVersion, stored_client_version};
 pub use events::{Event, MAX_REASON_CHARS, error_class, scrub_text, search_query_for_event};
 pub use location::{network_fs, warn_if_unsafe};

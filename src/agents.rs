@@ -7,8 +7,8 @@
 //! edit is detected and never overwritten.
 
 use crate::{
-    clients::AgentSpec,
-    project,
+    clients::{AgentSpec, ModelChoice},
+    git_exclude, project,
     setup::{self, ClientKind, Edit, MANAGED_MARKER, Scope},
     skill_file,
     vault::{self, AgentMeta, ClientModel, EFFORTS, TIERS, TOOLS, Vault, validate_id},
@@ -62,7 +62,7 @@ impl Target {
         self.0.display_name()
     }
 
-    fn kind(self) -> ClientKind {
+    pub fn kind(self) -> ClientKind {
         self.0
     }
 
@@ -97,11 +97,49 @@ pub fn model_for(
     target: Target,
     tier: &str,
 ) -> Option<(String, Option<String>)> {
-    stored
+    tier_models(stored, target, tier)
+        .into_iter()
+        .next()
+        .map(|m| (m.model, m.effort))
+}
+
+/// One model a tier can use on a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierModel {
+    pub model: String,
+    /// `None` when unknown (a bare OpenCode model).
+    pub provider: Option<String>,
+    pub effort: Option<String>,
+    /// The stored row's priority; `None` for the compiled default.
+    pub priority: Option<i64>,
+}
+
+/// The models `tier` can use on `target`, best first: its enabled stored rows, or the
+/// compiled default when none is enabled. `model_for` takes the first; an explicit model
+/// (`install_agent`) must be one of them.
+pub fn tier_models(stored: &[ClientModel], target: Target, tier: &str) -> Vec<TierModel> {
+    let rows: Vec<TierModel> = stored
         .iter()
-        .find(|m| m.enabled && m.client == target.token() && m.tier == tier)
-        .map(|m| (m.model.clone(), m.effort.clone()))
-        .or_else(|| default_model(target, tier).map(|(m, e)| (m.to_owned(), Some(e.to_owned()))))
+        .filter(|m| m.enabled && m.client == target.token() && m.tier == tier)
+        .map(|m| TierModel {
+            model: m.model.clone(),
+            provider: m.provider().map(str::to_owned),
+            effort: m.effort.clone(),
+            priority: Some(m.priority),
+        })
+        .collect();
+    if !rows.is_empty() {
+        return rows;
+    }
+    default_model(target, tier)
+        .map(|(model, effort)| TierModel {
+            model: model.to_owned(),
+            provider: vault::implied_provider(target.token(), model),
+            effort: Some(effort.to_owned()),
+            priority: None,
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The effort `models set` keeps when `--effort` is not given: the stored row's, else the
@@ -245,7 +283,7 @@ fn canonical(path: &Path) -> PathBuf {
     }
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     a == b || canonical(a) == canonical(b)
 }
 
@@ -516,9 +554,9 @@ fn plan(
     target: Target,
     agent: &Agent,
     project_dir: Option<&Path>,
-    models: &[ClientModel],
+    model: Option<ModelChoice>,
 ) -> Result<Plan> {
-    let (text, warnings) = render(target, agent, model_for(models, target, &agent.meta.tier));
+    let (text, warnings) = render(target, agent, model);
     Ok(Plan {
         target,
         path: target.dir(project_dir)?.join(format!("{}.md", agent.id)),
@@ -527,7 +565,8 @@ fn plan(
     })
 }
 
-fn configured_targets(project_dir: Option<&Path>) -> Vec<Target> {
+/// The clients with subagents set up per user or, with `project_dir`, in that project.
+pub fn configured_targets(project_dir: Option<&Path>) -> Vec<Target> {
     Target::all()
         .filter(|t| setup::client_configured(t.kind(), project_dir))
         .collect()
@@ -616,7 +655,94 @@ pub fn add_with_changes(
     project_dir: Option<&Path>,
     force: bool,
 ) -> Result<(Vec<String>, Vec<AgentChange>)> {
-    let targets = configured_targets(project_dir);
+    let options = InstallOptions {
+        force,
+        ..InstallOptions::default()
+    };
+    let report = install(vault, ids, project_key, project_dir, &options)?;
+    Ok((report.lines, report.changes))
+}
+
+/// What `install` does beyond `add`'s defaults.
+#[derive(Default)]
+pub struct InstallOptions<'a> {
+    /// Overwrite foreign and hand-edited files after a backup.
+    pub force: bool,
+    /// Write only for this client instead of every configured one.
+    pub client: Option<Target>,
+    /// This model instead of the tier's best one; it must be one of `tier_models` on
+    /// every client written.
+    pub model: Option<&'a str>,
+}
+
+/// What `install` did: `add`'s output lines, the files it wrote (for the `agent_*`
+/// events), and every file it considered.
+pub struct InstallReport {
+    pub lines: Vec<String>,
+    pub changes: Vec<AgentChange>,
+    pub files: Vec<InstalledFile>,
+}
+
+/// One agent file `install` considered.
+#[derive(Debug)]
+pub struct InstalledFile {
+    pub target: Target,
+    pub id: String,
+    pub version: i64,
+    pub path: PathBuf,
+    /// `added`, `updated`, `overwritten`, `unchanged`, or `edited` (hand-edited, skipped).
+    pub status: &'static str,
+    /// The model written in the file, if any.
+    pub model: Option<String>,
+}
+
+/// The model `target` writes for `tier`: the tier's best, or `requested` when it is one of
+/// the tier's models there.
+fn chosen_model(
+    stored: &[ClientModel],
+    target: Target,
+    tier: &str,
+    requested: Option<&str>,
+) -> Result<Option<ModelChoice>> {
+    let Some(requested) = requested else {
+        return Ok(model_for(stored, target, tier));
+    };
+    let models = tier_models(stored, target, tier);
+    if let Some(found) = models.iter().find(|m| m.model == requested) {
+        return Ok(Some((found.model.clone(), found.effort.clone())));
+    }
+    if models.is_empty() {
+        bail!(
+            "{} has no {tier} model configured, so `{requested}` cannot be used; add one with \
+             `skillvolution agents models add {} {tier} {requested}`",
+            target.display_name(),
+            target.token()
+        );
+    }
+    bail!(
+        "`{requested}` is not an enabled {} {tier} model; use one of: {} (see list_models)",
+        target.display_name(),
+        models
+            .iter()
+            .map(|m| m.model.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// `add` with options: the code behind `agents add` and the MCP `install_agent`.
+pub fn install(
+    vault: &Vault,
+    ids: &[String],
+    project_key: Option<&str>,
+    project_dir: Option<&Path>,
+    options: &InstallOptions,
+) -> Result<InstallReport> {
+    let force = options.force;
+    let targets = match options.client {
+        Some(target) => vec![target],
+        None => configured_targets(project_dir),
+    };
     ensure!(
         !targets.is_empty(),
         "{}",
@@ -654,8 +780,21 @@ pub fn add_with_changes(
         };
         agents.push(agent);
     }
+    let mut choices = Vec::new();
+    for agent in &agents {
+        for &target in &targets {
+            let choice = chosen_model(&models, target, &agent.meta.tier, options.model)?;
+            choices.push((target, agent.id.clone(), choice));
+        }
+    }
+    let choice = |target: Target, id: &str| {
+        choices
+            .iter()
+            .find(|(t, i, _)| *t == target && i == id)
+            .and_then(|(.., choice)| choice.clone())
+    };
     let (mut lines, mut edits, mut backups) = (Vec::new(), Vec::new(), Vec::new());
-    let mut changes = Vec::new();
+    let (mut changes, mut files) = (Vec::new(), Vec::new());
     for agent in &agents {
         lines.extend(skill_warnings(vault, agent));
         if agent.deprecated {
@@ -677,7 +816,17 @@ pub fn add_with_changes(
             if let Some(problem) = placement_error(target, agent, project_dir) {
                 bail!("{problem}");
             }
-            let plan = plan(target, agent, project_dir, &models)?;
+            let model = choice(target, &agent.id);
+            let written_model = model.as_ref().map(|(m, _)| m.clone());
+            let plan = plan(target, agent, project_dir, model)?;
+            let mut file = InstalledFile {
+                target,
+                id: agent.id.clone(),
+                version: agent.version,
+                path: plan.path.clone(),
+                status: "unchanged",
+                model: written_model,
+            };
             let (tag, kind) = match file_state(&plan.path)? {
                 state @ (FileState::Foreign | FileState::Edited(_)) if force => {
                     let kind = if matches!(state, FileState::Foreign) {
@@ -704,6 +853,8 @@ pub fn add_with_changes(
                         agent.id,
                         plan.path.display()
                     ));
+                    file.status = "edited";
+                    files.push(file);
                     continue;
                 }
                 FileState::Managed(m) if is_current(&m, agent.version, &plan.text) => {
@@ -714,6 +865,7 @@ pub fn add_with_changes(
                         agent.version
                     ));
                     lines.extend(double_install_warning(target, &agent.id, project_dir));
+                    files.push(file);
                     continue;
                 }
                 FileState::Managed(_) => ("updated", "agent_update"),
@@ -735,6 +887,8 @@ pub fn add_with_changes(
             lines.extend(plan.warnings.iter().map(|w| format!("  warning: {w}")));
             lines.extend(double_install_warning(target, &agent.id, project_dir));
             edits.push(Edit::Write(plan.path, plan.text));
+            file.status = tag;
+            files.push(file);
         }
     }
     setup::validate_edits(&edits)?;
@@ -742,13 +896,44 @@ pub fn add_with_changes(
         .iter()
         .try_for_each(|path| setup::backup_file(path))?;
     setup::write_all(edits)?;
+    let ours: Vec<PathBuf> = files
+        .iter()
+        .filter(|f| f.status != "edited")
+        .map(|f| f.path.clone())
+        .collect();
+    lines.extend(exclude_from_git(project_dir, &ours, true));
     if targets.contains(&Target::ClaudeCode) {
         lines.push(
             "note: Cursor also reads .claude/agents/ and may not accept Claude Code model aliases"
                 .into(),
         );
     }
-    Ok((lines, changes))
+    Ok(InstallReport {
+        lines,
+        changes,
+        files,
+    })
+}
+
+/// Adds (or, with `add` false, removes) the `.git/info/exclude` lines of `paths` that lie
+/// in a project's own agent directories; per-user files are never excluded. A note when
+/// that could not be done.
+fn exclude_from_git(project_dir: Option<&Path>, paths: &[PathBuf], add: bool) -> Option<String> {
+    let dir = project_dir?;
+    let user_dirs: Vec<PathBuf> = Target::all().filter_map(|t| t.dir(None).ok()).collect();
+    let in_project: Vec<PathBuf> = paths
+        .iter()
+        .filter(|path| {
+            path.parent()
+                .is_some_and(|parent| !user_dirs.iter().any(|user| same_dir(parent, user)))
+        })
+        .cloned()
+        .collect();
+    if add {
+        git_exclude::add(dir, &in_project)
+    } else {
+        git_exclude::remove(dir, &in_project)
+    }
 }
 
 /// Deletes our unedited generated files for `ids` in every client's directory. The
@@ -808,7 +993,9 @@ pub fn remove_with_changes(
             ));
         }
     }
+    let deleted: Vec<PathBuf> = edits.iter().map(|e| e.path().to_path_buf()).collect();
     setup::write_all(edits)?;
+    lines.extend(exclude_from_git(project_dir, &deleted, false));
     Ok((lines, missing, changes))
 }
 
@@ -1008,7 +1195,8 @@ pub fn sync_with_changes(
                 lines.push(format!("[refused] {name} {id}: {problem}"));
                 continue;
             }
-            let plan = plan(target, &agent, project_dir, &models)?;
+            let model = model_for(&models, target, &agent.meta.tier);
+            let plan = plan(target, &agent, project_dir, model)?;
             if !edited && is_current(marker, agent.version, &plan.text) {
                 unchanged += 1;
                 lines.push(format!("[ok] {name} {id} v{}", agent.version));
@@ -1050,11 +1238,13 @@ pub fn sync_with_changes(
     }
     let updates = edits.len();
     if apply {
+        let written: Vec<PathBuf> = edits.iter().map(|e| e.path().to_path_buf()).collect();
         setup::validate_edits(&edits)?;
         backups
             .iter()
             .try_for_each(|path| setup::backup_file(path))?;
         setup::write_all(edits)?;
+        lines.extend(exclude_from_git(project_dir, &written, true));
         lines.push(format!("{updates} file(s) updated, {unchanged} unchanged."));
     } else {
         lines.push(format!("{unchanged} unchanged."));

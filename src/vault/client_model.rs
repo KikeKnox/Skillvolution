@@ -101,6 +101,12 @@ fn provider_for(client: &str, model: &str, explicit: Option<&str>) -> Result<Opt
     Ok(prefix.or(explicit).map(str::to_owned))
 }
 
+/// The provider `model` implies for `client` with none given: `anthropic` for Claude
+/// Code, the `provider/` prefix for OpenCode, `None` when OpenCode's model has none.
+pub fn implied_provider(client: &str, model: &str) -> Option<String> {
+    provider_for(client, model, None).ok().flatten()
+}
+
 impl Vault {
     /// Every stored row, ordered by client, tier, then preference (priority, insertion).
     pub fn client_models(&self) -> Result<Vec<ClientModel>> {

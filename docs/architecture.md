@@ -21,6 +21,8 @@ client hooks.
 | Module | Role |
 |---|---|
 | `mcp.rs` | JSON-RPC server loop on stdio; `initialize`, `tools/list`, `tools/call`; tool argument validation |
+| `mcp_agents.rs` | The MCP agent tools behind `search_agents`, `install_agent` (the shared `agents::install`) and `list_models`; never return an agent's body |
+| `git_exclude.rs` | Keeps agent files written inside a project out of git: anchored lines in a marked block of `.git/info/exclude` (the common git dir for worktrees), removed on uninstall |
 
 ### Hooks
 

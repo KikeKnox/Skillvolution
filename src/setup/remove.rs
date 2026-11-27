@@ -36,7 +36,7 @@ pub(crate) enum Edit {
 }
 
 impl Edit {
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match self {
             Edit::Write(path, _) => path,
             Edit::Delete(path) => path,

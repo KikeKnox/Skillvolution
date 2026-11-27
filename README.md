@@ -64,7 +64,7 @@ flowchart LR
     subgraph bin["skillvolution binary"]
         direction TB
         hooks["hook session-start, prompt,<br/>tool-use, stop, ..."]
-        mcp["serve: MCP over stdio<br/>5 tools"]
+        mcp["serve: MCP over stdio<br/>8 tools"]
         cli["CLI: setup, doctor,<br/>publish, curation"]
     end
     clients -- "hooks or OpenCode plugin" --> hooks
@@ -82,6 +82,9 @@ flowchart LR
 | `report_skill_outcome` | Records `helped`, `failed` (naming the wrong step), or `not_applicable` for the loaded version |
 | `publish_skill` | Publishes a new skill or version after a `keep global` / `keep project` verdict |
 | `usage_report` | Read-only summary of local usage telemetry (searches without results, loads without report, usage by client/agent/model, errors) |
+| `search_agents` | Lists the vault's subagents visible from the project with tier, where each is installed and whether it is outdated; never the prompt |
+| `install_agent` | Writes an agent's subagent file for the calling client (as `agents add`), kept out of git via `.git/info/exclude`; says how to delegate and whether a restart is needed |
+| `list_models` | The enabled models of a tier for the calling client, and how to pass each per delegation call (or that the client can't) |
 
 Full parameter reference: [docs/cli.md#mcp-tools](docs/cli.md#mcp-tools).
 

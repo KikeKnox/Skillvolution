@@ -20,8 +20,8 @@ mod remove;
 pub(crate) use claude_cli::find_on_path;
 pub(crate) use client::{ClientKind, Clients, Scope};
 pub(crate) use inspect::{
-    claude_mcp_registered, configured_bin, double_install_warning, is_configured,
-    missing_configured_bin, skill_marker_version,
+    ClaudeMcp, claude_mcp_registration, configured_bin, double_install_warning, is_configured,
+    mcp_lacks_client, missing_configured_bin, skill_marker_version,
 };
 pub(crate) use remove::Edit;
 

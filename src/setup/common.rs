@@ -1,7 +1,7 @@
 //! Pieces every client's setup shares: config directories from the environment, the
 //! managed skill and AGENTS.md changes, config JSON text, and the MCP server argv.
 
-use super::{Change, Edit, fs_safe};
+use super::{Change, ClientKind, Edit, fs_safe};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -88,11 +88,12 @@ pub(super) fn json_text(value: &Value) -> Result<String> {
 }
 
 /// The MCP server's argv after the binary: `--db <db> serve`, plus `--project <key>`
-/// for a project.
-pub(super) fn server_args(db: &Path, key: Option<&str>) -> Vec<Value> {
+/// for a project, then `--client <token>` so the server knows which client runs it.
+pub(super) fn server_args(db: &Path, key: Option<&str>, client: ClientKind) -> Vec<Value> {
     let mut args = vec![json!("--db"), json!(db), json!("serve")];
     if let Some(key) = key {
         args.extend([json!("--project"), json!(key)]);
     }
+    args.extend([json!("--client"), json!(client.token())]);
     args
 }

@@ -65,6 +65,10 @@ enum Command {
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
+        /// The client that runs this server (setup passes it): the one `install_agent`
+        /// and `list_models` act for, and the client recorded on its usage events.
+        #[arg(long, value_enum)]
+        client: Option<AnyClient>,
     },
     /// Show one revision: its status, evidence, and a diff against its base.
     Show {
@@ -1039,6 +1043,22 @@ fn continue_with(output: ContinueOutput, reason: &str) -> serde_json::Value {
     }
 }
 
+/// Any client's `--client` token (`serve`).
+#[derive(Clone, Copy)]
+struct AnyClient(ClientKind);
+
+impl clap::ValueEnum for AnyClient {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: LazyLock<Vec<AnyClient>> =
+            LazyLock::new(|| ClientKind::ALL.into_iter().map(AnyClient).collect());
+        &VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.0.token()))
+    }
+}
+
 impl clap::ValueEnum for HookClient {
     fn value_variants<'a>() -> &'a [Self] {
         static VARIANTS: LazyLock<Vec<HookClient>> = LazyLock::new(|| {
@@ -1172,6 +1192,23 @@ fn resolve_project(explicit: Option<String>) -> Result<Option<String>> {
     Ok(match std::env::var("CLAUDE_PROJECT_DIR") {
         Ok(dir) if !dir.is_empty() => skillvolution::project::detect(&PathBuf::from(dir)),
         _ => None,
+    })
+}
+
+/// The directory `serve` installs project agents in: the git repository holding the
+/// current directory, else that of `CLAUDE_PROJECT_DIR` (or that directory itself), else
+/// the current directory; the same order as `resolve_project`.
+fn resolve_project_dir() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("determine current directory")?;
+    if let Some(repo) = skillvolution::project::repo_dir(&cwd) {
+        return Ok(repo);
+    }
+    Ok(match std::env::var("CLAUDE_PROJECT_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            let dir = PathBuf::from(dir);
+            skillvolution::project::repo_dir(&dir).unwrap_or(dir)
+        }
+        _ => cwd,
     })
 }
 
@@ -1373,14 +1410,21 @@ fn main() -> Result<()> {
         Command::Agents(command) => run_agents(&cli.db, command)?,
         Command::Relocate { path } => skillvolution::relocate::run(&db_path(&cli.db)?, &path)?,
         Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
-        Command::Serve { project } => {
+        Command::Serve { project, client } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
             eprintln!(
                 "skillvolution: project = {}",
                 project.as_deref().unwrap_or("none")
             );
-            skillvolution::mcp::serve(open(&cli.db)?, project)?;
+            skillvolution::mcp::serve(
+                open(&cli.db)?,
+                skillvolution::mcp::ServerContext {
+                    project,
+                    project_dir: resolve_project_dir()?,
+                    client: client.map(|c| c.0),
+                },
+            )?;
         }
         Command::Show { id, version, json } => {
             let vault = open(&cli.db)?;

@@ -480,7 +480,7 @@ fn global_gemini_writes_expected_files() {
         settings["mcpServers"]["skillvolution"],
         json!({
             "command": env.bin,
-            "args": ["--db", env.db, "serve"],
+            "args": ["--db", env.db, "serve", "--client", "gemini"],
             "trust": true,
         })
     );

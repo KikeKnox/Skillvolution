@@ -122,7 +122,7 @@ fn mcp_calls_record_search_load_outcome_and_publish_events() {
     assert_eq!(search.data["total"], 1);
     assert_eq!(search.data["ids"], json!(["sqlite-busy-timeout"]));
     assert_eq!(search.project.as_deref(), Some("proj"));
-    // The MCP server does not know its client yet.
+    // Started without --client, the MCP server does not know its client.
     assert_eq!((search.client, search.client_version), (None, None));
 
     let load = only(events(&db, Some("load")));

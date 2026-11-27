@@ -1,8 +1,10 @@
 pub mod agents;
 pub mod clients;
 pub mod doctor;
+pub mod git_exclude;
 pub mod hook;
 pub mod mcp;
+pub mod mcp_agents;
 pub mod project;
 pub mod relocate;
 pub mod setup;

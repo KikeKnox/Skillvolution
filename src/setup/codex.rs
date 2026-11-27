@@ -227,12 +227,13 @@ fn remove_mcp_server(text: &str) -> Result<Option<String>> {
 }
 
 /// The MCP server's argv after the binary, as plain strings for a TOML array:
-/// `--db <db> serve`, plus `--project <key>` for a project.
+/// `--db <db> serve`, plus `--project <key>` for a project, then `--client codex`.
 fn server_argv<'a>(db: &'a Path, key: Option<&'a str>) -> Result<Vec<&'a str>> {
     let db = hooks::require_utf8(db, "--db")?;
     let mut args = vec!["--db", db, "serve"];
     if let Some(key) = key {
         args.extend(["--project", key]);
     }
+    args.extend(["--client", super::ClientKind::Codex.token()]);
     Ok(args)
 }

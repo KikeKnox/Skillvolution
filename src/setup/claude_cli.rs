@@ -2,7 +2,7 @@
 //! `claude` CLI. We never edit `~/.claude.json` directly: Claude Code rewrites that file
 //! on its own, so a direct edit would race it and get lost.
 
-use super::{common, hooks};
+use super::{ClientKind, common, hooks};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ fn mcp_json(bin: &Path, db: &Path) -> String {
     serde_json::json!({
         "type": "stdio",
         "command": bin,
-        "args": common::server_args(db, None),
+        "args": common::server_args(db, None, ClientKind::ClaudeCode),
     })
     .to_string()
 }
@@ -129,12 +129,21 @@ fn run(claude: &Path, args: &[&str]) -> Result<Output> {
         .with_context(|| format!("run `{command}`"))
 }
 
-/// Whether `claude mcp get skillvolution` reports a registration. `doctor` uses
-/// this to warn when the global setup's user-scope registration is missing.
-pub(crate) fn mcp_registered(claude: &Path) -> Result<bool> {
-    Ok(run(claude, &["mcp", "get", "skillvolution"])?
-        .status
-        .success())
+/// What `claude mcp get skillvolution` reports: `None` when nothing is registered, else
+/// the registration's `Args:` line (`None` inside when the output has no such line).
+/// `doctor` uses this to warn when the global setup's user-scope registration is
+/// missing or predates `--client`.
+pub(crate) fn mcp_registration_args(claude: &Path) -> Result<Option<Option<String>>> {
+    let output = run(claude, &["mcp", "get", "skillvolution"])?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(Some(stdout.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Args:")
+            .map(|a| a.trim().to_owned())
+    })))
 }
 
 /// How the current `skillvolution` registration compares to the one `register` would
@@ -167,7 +176,7 @@ pub(crate) fn registration(claude: &Path, bin: &Path, db: &Path) -> Result<Regis
             .find_map(|line| line.trim().strip_prefix(name))
             .map(str::trim)
     };
-    let server_args = common::server_args(db, None);
+    let server_args = common::server_args(db, None, ClientKind::ClaudeCode);
     let args: Vec<&str> = server_args
         .iter()
         .filter_map(serde_json::Value::as_str)

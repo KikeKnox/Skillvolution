@@ -80,18 +80,18 @@ SQLite WAL needs local storage.
 
 ```bash
 claude mcp add-json --scope user skillvolution \
-  '{"type":"stdio","command":"BIN","args":["--db","DB","serve"]}'
+  '{"type":"stdio","command":"BIN","args":["--db","DB","serve","--client","claude-code"]}'
 ```
 
   Setup first reads `claude mcp get skillvolution`: a user-scope stdio registration
-  whose `Command:` is `BIN` and whose `Args:` are `--db DB serve` is left as is
+  whose `Command:` is `BIN` and whose `Args:` are `--db DB serve --client claude-code` is left as is
   (setup prints `skillvolution is already registered with Claude Code; unchanged.`,
   and `--dry-run` shows no `add-json` line). Anything else — missing, another
   scope, command or args, or output in a shape it doesn't recognize — is
   (re-)registered: `add-json`, and on "already exists" `remove` then `add-json`.
 
 **Project** (`<dir>`): `.mcp.json` gets the same server entry (with
-`"--project", "KEY"` in `args`), `.claude/settings.local.json` gets the
+`"--project", "KEY"` before `--client` in `args`), `.claude/settings.local.json` gets the
 hooks and permissions, and the three skills are installed under
 `.claude/skills/<name>/SKILL.md`. SessionStart and UserPromptSubmit carry
 `--project 'KEY'`, and so does Stop (project-scoped installs only; the global one passes none), which uses it to tell
@@ -131,7 +131,7 @@ both files existing is an error):
 ```json
 {
   "mcp": {"skillvolution": {"type": "local",
-    "command": ["BIN", "--db", "DB", "serve"], "enabled": true}},
+    "command": ["BIN", "--db", "DB", "serve", "--client", "opencode"], "enabled": true}},
   "permission": {
     "task": "allow",
     "skillvolution_search_skills": "allow",
@@ -184,7 +184,7 @@ AGENTS.md block.
 
 ```json
 {"mcpServers": {"skillvolution": {"command": "BIN",
-  "args": ["--db", "DB", "serve"]}}}
+  "args": ["--db", "DB", "serve", "--client", "devin"]}}}
 ```
 
 - `config.json` — permissions plus all six hooks:
@@ -236,7 +236,7 @@ docs) are exercised by tests but have not been verified against a live Devin ses
 ```toml
 [mcp_servers.skillvolution]
 command = "BIN"
-args = ["--db", "DB", "serve"]
+args = ["--db", "DB", "serve", "--client", "codex"]
 ```
 
 - `hooks.json` — same `{hooks: [{hooks: [...], matcher?}]}` group shape as
@@ -272,7 +272,7 @@ itself):
 ```json
 {
   "mcpServers": {"skillvolution": {"command": "BIN",
-    "args": ["--db", "DB", "serve"], "trust": true}},
+    "args": ["--db", "DB", "serve", "--client", "gemini"], "trust": true}},
   "hooks": {
     "SessionStart": ["... hook session-start --client gemini ..."],
     "BeforeAgent":  ["... hook prompt --client gemini ..."],

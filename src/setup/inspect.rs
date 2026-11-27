@@ -43,7 +43,7 @@ fn is_config_file(kind: ClientKind, path: &Path) -> bool {
 /// Every Skillvolution binary path `kind`'s on-disk config currently points
 /// at: hook commands (Claude Code, Devin) and MCP server commands (OpenCode,
 /// Devin). Claude Code's MCP registration lives in the `claude` CLI's own
-/// state, not a file, so it's checked separately (see `claude_mcp_registered`).
+/// state, not a file, so it's checked separately (see `claude_mcp_registration`).
 fn configured_bins(kind: ClientKind, changes: &[Change]) -> Vec<PathBuf> {
     let mut bins = Vec::new();
     for (path, _) in changes
@@ -171,14 +171,76 @@ pub(crate) fn double_install_warning(globally_configured: &[ClientKind]) -> Opti
     ))
 }
 
-/// Whether `claude` is on `PATH` and its user-scope MCP registration for
-/// skillvolution still exists. `None` when `claude` isn't on `PATH` (nothing
-/// to check there).
-pub(crate) fn claude_mcp_registered() -> Result<Option<bool>> {
+/// The state of Claude Code's user-scope MCP registration for skillvolution.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaudeMcp {
+    Missing,
+    /// Registered; whether its args lack `--client` (`false` when they can't be read).
+    Registered {
+        lacks_client: bool,
+    },
+}
+
+/// Claude Code's user-scope MCP registration for skillvolution, read through the
+/// `claude` CLI. `None` when `claude` isn't on `PATH` (nothing to check there).
+pub(crate) fn claude_mcp_registration() -> Result<Option<ClaudeMcp>> {
     let Some(claude) = claude_cli::resolve() else {
         return Ok(None);
     };
-    Ok(Some(claude_cli::mcp_registered(&claude)?))
+    Ok(Some(match claude_cli::mcp_registration_args(&claude)? {
+        None => ClaudeMcp::Missing,
+        Some(args) => ClaudeMcp::Registered {
+            lacks_client: args.is_some_and(|args| !has_client_flag(args.split_whitespace())),
+        },
+    }))
+}
+
+fn has_client_flag<'a>(mut args: impl Iterator<Item = &'a str>) -> bool {
+    args.any(|arg| arg == "--client")
+}
+
+/// Whether one of the config files among `changes` registers the skillvolution MCP
+/// server without `--client` (written by a setup from before v0.7.0).
+pub(crate) fn mcp_lacks_client(changes: &[Change]) -> bool {
+    changes.iter().any(|(path, _)| {
+        mcp_server_args(path).is_some_and(|args| !has_client_flag(args.iter().map(String::as_str)))
+    })
+}
+
+/// The argv of the `skillvolution` MCP server entry in the config file at `path`:
+/// `mcpServers.skillvolution.args` or OpenCode's `mcp.skillvolution.command` (JSON), or
+/// Codex's `mcp_servers.skillvolution.args` (TOML). `None` without such an entry.
+fn mcp_server_args(path: &Path) -> Option<Vec<String>> {
+    let strings = |values: &[serde_json::Value]| -> Vec<String> {
+        values
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    };
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => {
+            let text = fs_safe::read_optional(path).ok()??;
+            let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+            let args = doc
+                .get("mcp_servers")?
+                .get("skillvolution")?
+                .get("args")?
+                .as_array()?;
+            Some(
+                args.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+            )
+        }
+        Some("json" | "jsonc") => {
+            let config = fs_safe::load_json(path).ok()?;
+            config["mcpServers"]["skillvolution"]["args"]
+                .as_array()
+                .or_else(|| config["mcp"]["skillvolution"]["command"].as_array())
+                .map(|values| strings(values))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

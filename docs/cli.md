@@ -17,12 +17,19 @@ subcommands always exit `0`, even on error — see [hook](#hook).
 ## serve
 
 ```
-skillvolution serve [--project KEY]
+skillvolution serve [--project KEY] [--client CLIENT]
 ```
 
 Starts the MCP server on stdio (newline-delimited JSON-RPC 2.0) and serves it until
 stdin closes. This is the process every client's MCP entry launches; you don't run it
 yourself except to debug.
+
+`--client CLIENT` (`claude-code`, `opencode`, `devin`, `codex`, `gemini`, `cursor`) names
+the client that launched the server; setup writes it into every MCP entry (`doctor`
+flags an entry without it and `doctor --fix` rewrites it). `install_agent` and
+`list_models` act for that client, and the server's usage events record it with its
+stored version. Without it (entries from before v0.7.0) `install_agent` writes for every
+configured client with agents and `list_models` requires its `client` parameter.
 
 `--project KEY` sets the project scope for project-scoped skills and outcome records.
 When omitted, the project is auto-detected: the sanitized name of the enclosing git
@@ -462,7 +469,14 @@ skillvolution agents import PATH [-o DIR]
   line is handled once. A project-scoped agent is refused outside its project (paths are
   compared after resolving symlinks, so a symlinked `$HOME` is recognised).
   Cursor also reads `.claude/agents/` and may not accept Claude model aliases (noted on output).
-- `remove` deletes only files carrying our marker whose hash still matches; it exits 1 if an
+  Every file `add` (or `sync --apply`) leaves inside a project also gets an anchored line
+  (`/.claude/agents/ID.md`) in the repository's `.git/info/exclude`, inside a
+  `# skillvolution:start` … `# skillvolution:end` block, so a generated agent never lands in
+  a commit by accident; `.gitignore` is never touched, and per-user (`--global`) files never
+  touch an exclude file. In a worktree the exclude of the common git directory
+  (`git rev-parse --git-common-dir`) is used; outside a git repository it is skipped with a note.
+- `remove` deletes only files carrying our marker whose hash still matches, and takes their
+  `.git/info/exclude` lines back out; it exits 1 if an
   id was not installed or if nothing could be removed for it (only a foreign or hand-edited
   file exists; the line printed says why it was left).
 - `sync` re-renders every managed file and reports updates; it is a dry run unless `--apply`,
@@ -607,7 +621,7 @@ The vault is only read, never migrated, for these checks.
 line on stdout. `initialize` negotiates the protocol version (`2025-06-18`,
 `2025-03-26`, `2024-11-05` supported; an unrecognized version falls back to the newest)
 and returns `capabilities.tools` plus `instructions` for the agent. `ping` returns `{}`,
-`tools/list` returns the five tools below, `tools/call` dispatches by `name`.
+`tools/list` returns the eight tools below, `tools/call` dispatches by `name`.
 
 Protocol errors are JSON-RPC errors on the same `id`:
 
@@ -623,8 +637,9 @@ problem or a tool-side failure is not a protocol error: it comes back as a norma
 `tools/call` result with `"isError": true` and the message in `content[0].text`, so the
 model can read and react to it.
 
-The MCP tools cover skills only: `search_skills` never returns agents and `get_skill`
-refuses an agent id (telling the model to delegate instead). `report_skill_outcome` accepts
+`search_skills` never returns agents and `get_skill` refuses an agent id (telling the
+model to delegate instead); agents have their own tools (`search_agents`,
+`install_agent`, `list_models`), none of which ever returns an agent's prompt. `report_skill_outcome` accepts
 an agent id with the version from the generated file's marker. `publish_skill` cannot
 publish agents, and an id already used by an agent is refused.
 
@@ -682,6 +697,53 @@ per revision, project, and UTC day; a repeat that day replaces it.
 | `since` | string | `YYYY-MM-DD` or days like `7d`; default `30d` |
 
 Read-only; returns the same object as `telemetry summary --json`, over all projects.
+
+### search_agents
+
+| Param | Type | Constraint |
+|---|---|---|
+| `query` | string | ≤ 512 bytes, no NUL; empty lists every agent |
+| `limit` | integer | 1–100, default 20 |
+| `offset` | integer | ≥ 0, default 0 |
+
+Returns `agents` (`id`, `version`, `tier`, `description`, `installed`: `local`, `global`,
+`both` or `no`, and `outdated`: an installed copy carries an older version), `total`,
+`has_more`. Covers the vault agents visible from the project, then the built-ins
+`sv-high`, `sv-mid`, `sv-low`; an agent matches when a query word appears in its id,
+description or tier, more matching words first. `installed` looks at the server
+client's directories (every agent client's without `--client`).
+
+### install_agent
+
+| Param | Type | Constraint |
+|---|---|---|
+| `id` | string | required; id format above |
+| `model` | string | ≤ 128 bytes; one of `list_models`' models for the agent's tier on each client written |
+
+Writes the agent's file in the project, for the server's `--client` (for every
+configured client with agents without it), with the same code as `agents add`
+(never `--force`: hand-edited or foreign files are left alone) and the same
+`agent_install`/`agent_update` events. Each file written inside the project gets an
+anchored line in `.git/info/exclude`. Returns `result` (one line per client: path, version,
+how to delegate to it, and whether the client needs a restart because it has no hot
+reload), `restart_needed`, and `notes` (rendering warnings, an exclude that could not
+be written). A model that is not an enabled model of the tier is refused with the valid
+ones.
+
+### list_models
+
+| Param | Type | Constraint |
+|---|---|---|
+| `tier` | string | `high`, `mid` or `low`; every tier when omitted |
+| `client` | string | `claude-code` or `opencode`; required when the server has no `--client` |
+
+Returns `client`, its stored `version`, and `models`, best first per tier: the enabled
+`client_models` rows, or the compiled default when a tier has none (`priority: null`).
+Each has `tier`, `model`, `provider` (`unknown` for a bare model), `effort`, `priority`
+and `per_call`: `pass model: "…" when delegating` (an alias on Claude Code;
+`provider/model[#effort]` on OpenCode 2.x), or why it can't be passed per call (OpenCode
+1.x, a non-alias Claude Code model, an unknown provider) and to reinstall with
+`install_agent` instead.
 
 ### publish_skill
 

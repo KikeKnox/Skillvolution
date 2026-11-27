@@ -50,7 +50,7 @@ pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
-    let entry = json!({"command": bin, "args": common::server_args(db, scope.key())});
+    let entry = json!({"command": bin, "args": common::server_args(db, scope.key(), super::ClientKind::Gemini)});
     fs_safe::merge_server(&mut settings, "mcpServers", entry, scope)?;
     default_trust(&mut settings);
     merge_hooks(&mut settings, bin, db, scope.key())?;

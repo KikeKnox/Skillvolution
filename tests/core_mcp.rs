@@ -132,7 +132,10 @@ fn tools_list_exposes_the_four_tools() {
             "get_skill",
             "report_skill_outcome",
             "publish_skill",
-            "usage_report"
+            "usage_report",
+            "search_agents",
+            "install_agent",
+            "list_models"
         ]
     );
 }

@@ -9,7 +9,7 @@
 
 use crate::agents::{self, FileState, Target};
 use crate::clients::Version;
-use crate::setup::{self, Change, ClientKind, Edit, Scope};
+use crate::setup::{self, Change, ClaudeMcp, ClientKind, Edit, Scope};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -641,11 +641,19 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
     } else if !configured {
         checks.push(Check::ok(display, "installed but not configured"));
     } else {
+        let lacks_client = if setup::mcp_lacks_client(&changes) {
+            format!(
+                " (its MCP server is registered without `--client {}`)",
+                kind.token()
+            )
+        } else {
+            String::new()
+        };
         checks.push(
             Check::warn(
                 display,
                 format!(
-                    "differs from what `skillvolution setup --client {}` would write: {}",
+                    "differs from what `skillvolution setup --client {}` would write{lacks_client}: {}",
                     kind.token(),
                     mismatched.join(", ")
                 ),
@@ -682,18 +690,24 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         ));
     }
 
-    if kind == ClientKind::ClaudeCode
-        && let Some(registered) = setup::claude_mcp_registered()?
-        && !registered
-    {
-        // Re-applying the client already registers it, like setup does.
-        checks.push(
-            Check::warn(
-                "Claude Code MCP registration",
-                "`claude mcp get skillvolution` reports no registration; rerun setup",
-            )
-            .with_fix((configured && !reapply).then(|| Fix::RegisterClaudeMcp(bin.clone()))),
-        );
+    if kind == ClientKind::ClaudeCode {
+        let problem = match setup::claude_mcp_registration()? {
+            Some(ClaudeMcp::Missing) => {
+                Some("`claude mcp get skillvolution` reports no registration; rerun setup")
+            }
+            Some(ClaudeMcp::Registered { lacks_client: true }) => Some(
+                "registered without `--client claude-code` (from before v0.7.0); `doctor --fix` or setup re-registers it",
+            ),
+            _ => None,
+        };
+        if let Some(problem) = problem {
+            // Re-applying the client already registers it, like setup does.
+            checks.push(
+                Check::warn("Claude Code MCP registration", problem).with_fix(
+                    (configured && !reapply).then(|| Fix::RegisterClaudeMcp(bin.clone())),
+                ),
+            );
+        }
     }
     Ok((checks, configured || mismatched.is_empty()))
 }

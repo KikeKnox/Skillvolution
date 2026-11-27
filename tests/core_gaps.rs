@@ -166,7 +166,10 @@ fn tools_list_returns_exactly_the_vault_tools_in_order() {
             "get_skill",
             "report_skill_outcome",
             "publish_skill",
-            "usage_report"
+            "usage_report",
+            "search_agents",
+            "install_agent",
+            "list_models"
         ]
     );
 }

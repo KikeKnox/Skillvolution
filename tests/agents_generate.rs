@@ -389,6 +389,63 @@ fn doctor_reports_outdated_and_missing_agent_files() {
 }
 
 #[test]
+fn project_installs_are_kept_out_of_git_and_removal_cleans_up() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code,opencode");
+    let exclude = sandbox.repo.join(".git/info/exclude");
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, "*.log\n").unwrap();
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    let text = read(&exclude);
+    assert!(text.starts_with("*.log\n# skillvolution:start"), "{text}");
+    for line in ["/.claude/agents/sv-low.md", "/.opencode/agents/sv-low.md"] {
+        assert_eq!(text.matches(&format!("\n{line}\n")).count(), 1, "{text}");
+    }
+    assert!(!sandbox.repo.join(".gitignore").exists());
+    sandbox.ok(&["agents", "remove", "sv-low"]);
+    assert_eq!(read(&exclude), "*.log\n");
+}
+
+#[test]
+fn global_installs_never_touch_an_exclude_file() {
+    let sandbox = Sandbox::new();
+    sandbox.setup_global("claude-code");
+    sandbox.ok(&["agents", "add", "--global", "sv-low"]);
+    assert!(sandbox.user_claude("sv-low").exists());
+    assert!(!sandbox.repo.join(".git/info/exclude").exists());
+    sandbox.ok(&["agents", "remove", "--global", "sv-low"]);
+    assert!(!sandbox.repo.join(".git/info/exclude").exists());
+}
+
+#[test]
+fn outside_a_git_repository_add_notes_the_exclude_was_skipped() {
+    let sandbox = Sandbox::new();
+    let plain = sandbox.home.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let setup = sandbox.run_in(
+        &plain,
+        &[
+            "setup",
+            "--project",
+            plain.to_str().unwrap(),
+            "--client",
+            "claude-code",
+            "--bin",
+            sandbox.bin.to_str().unwrap(),
+        ],
+    );
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let out = sandbox.run_in(&plain, &["agents", "add", "sv-low"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = stdout(&out);
+    assert!(
+        out.contains("[added] Claude Code sv-low") && out.contains("not a git repository"),
+        "{out}"
+    );
+}
+
+#[test]
 fn remove_deletes_only_marked_files() {
     let sandbox = Sandbox::new();
     sandbox.setup("claude-code,opencode");
