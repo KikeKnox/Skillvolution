@@ -22,7 +22,7 @@ const PROJECT_KEY = __SKILLVOLUTION_PROJECT_KEY__;
 // Keep in sync with STOP_REASON in src/hook.rs (a test in src/setup/plugin.rs
 // checks that this literal matches it exactly).
 const REVIEW_REMINDER =
-  "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
+  "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now (agent-evaluation for an agent) — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill (publish_agent for an agent) with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 // OpenCode built-in tool ids that edit files: 1.x has edit, write, multiedit, patch
 // and apply_patch; 2.x has edit, write and patch.
@@ -110,7 +110,9 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
 
   const loadCatalog = (sessionID) =>
     new Promise((resolve) => {
-      const args = ["--db", DB, "hook", "session-start"];
+      // The catalog (skills and the agents block) comes from the binary, the single
+      // source for every client; `--client opencode` lists OpenCode's agents.
+      const args = ["--db", DB, "hook", "session-start", "--client", "opencode"];
       if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
       execFile(BIN, args, options, (error, stdout) => {

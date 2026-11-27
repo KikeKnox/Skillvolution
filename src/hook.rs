@@ -1,4 +1,6 @@
 use crate::{
+    agent_session,
+    agents::Target,
     clients::{ClientKind, HookSpec},
     vault::{Event, SkillMetadata, Vault},
 };
@@ -11,6 +13,7 @@ use std::{
     fmt::Write as _,
     fs::File,
     io::{Read, Seek, SeekFrom},
+    path::Path,
 };
 
 const CATALOG_LIMIT: i64 = 30;
@@ -31,8 +34,8 @@ pub const CURSOR_WORK_TOOLS: &[&str] = ClientKind::Cursor.spec().hooks.work_tool
 pub const STOP_REASON: &str = "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) \
 (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, \
-dispatch a fresh subagent that follows the skill-evaluation skill now \
-— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
+dispatch a fresh subagent that follows the skill-evaluation skill now (agent-evaluation for an agent) \
+— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill (publish_agent for an agent) with the verdict and its reason. \
 If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 /// Prompt retrieval limits: at most `PROMPT_TERMS` keywords of at most
@@ -596,14 +599,28 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     Ok(catalog(vault, project)?.0)
 }
 
-/// `session_start`, recording a `session_start` event (the catalog size) for the
-/// `client` that emitted it.
+/// `session_start` for the `client` that emitted it, after the session-start agent
+/// upkeep for `project_dir` (`agent_session::upkeep`): with the agents block when the
+/// client has subagents, and recording a `session_start` event (the catalog size). An
+/// upkeep or agents-block failure is reported like a hook error and the skills catalog
+/// is still returned.
 pub fn session_start_recorded(
     vault: &Vault,
     project: Option<&str>,
+    project_dir: Option<&Path>,
     client: ClientKind,
 ) -> Result<String> {
-    let (text, visible) = catalog(vault, project)?;
+    let mut report =
+        |error: anyhow::Error| report_hook_error(vault, "session-start", client, &error);
+    let refreshed = agent_session::upkeep(vault, project, project_dir, &mut report);
+    let (mut text, visible) = catalog(vault, project)?;
+    if let Some(target) = Target::from_kind(client) {
+        match agent_session::catalog_block(vault, project, project_dir, target, &refreshed) {
+            Ok(Some(block)) => text.push_str(&block),
+            Ok(None) => {}
+            Err(error) => report(error),
+        }
+    }
     vault.log_event(
         Event::new("session_start")
             .client(Some(client))
@@ -611,6 +628,17 @@ pub fn session_start_recorded(
             .data(json!({"catalog": visible})),
     );
     Ok(text)
+}
+
+/// Reports a failure that must not fail the hook: on stderr and as a `hook_error` event
+/// (hook and error class, never the message), like a hook that failed outright.
+fn report_hook_error(vault: &Vault, hook: &str, client: ClientKind, error: &anyhow::Error) {
+    eprintln!("skillvolution hook: {error:#}");
+    vault.log_event(
+        Event::new("hook_error")
+            .client(Some(client))
+            .data(json!({"hook": hook, "class": crate::vault::error_class(error)})),
+    );
 }
 
 /// The session-start context and how many skills are visible to `project`.

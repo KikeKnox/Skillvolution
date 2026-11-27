@@ -70,6 +70,15 @@ mod tests {
     use std::{path::Path, process::Command};
 
     #[test]
+    fn the_catalog_comes_from_the_binary_as_opencode() {
+        // One source for the catalog (skills and agents block): the plugin runs
+        // `hook session-start` and names its client so OpenCode's agents are listed.
+        assert!(
+            TEMPLATE.contains(r#"["--db", DB, "hook", "session-start", "--client", "opencode"]"#)
+        );
+    }
+
+    #[test]
     fn substitutes_placeholders_as_valid_json_string_literals() {
         let template = "const BIN = __SKILLVOLUTION_BIN__;\nconst DB = __SKILLVOLUTION_DB__;\n";
         let bin = Path::new("/opt/bin with spaces/skillvolution");

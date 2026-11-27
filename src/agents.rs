@@ -475,7 +475,7 @@ pub enum FileState {
 }
 
 impl FileState {
-    fn marker(&self) -> Option<&Marker> {
+    pub fn marker(&self) -> Option<&Marker> {
         match self {
             FileState::Edited(m) | FileState::Managed(m) => Some(m),
             _ => None,
@@ -1394,6 +1394,112 @@ pub fn sync_with_changes(
         changes.clear();
     }
     Ok((lines, changes))
+}
+
+/// The directories a session start looks after for `target`: the project's (when it is
+/// not the per-user one, e.g. a repository at $HOME) with `project_dir`, then the
+/// per-user one with `None`.
+pub(crate) fn session_levels(
+    target: Target,
+    project_dir: Option<&Path>,
+) -> Vec<(PathBuf, Option<&Path>)> {
+    let Ok(user_dir) = target.dir(None) else {
+        return Vec::new();
+    };
+    let project = project_dir.and_then(|dir| {
+        target
+            .dir(Some(dir))
+            .ok()
+            .filter(|d| !same_dir(d, &user_dir))
+            .map(|d| (d, Some(dir)))
+    });
+    project.into_iter().chain([(user_dir, None)]).collect()
+}
+
+/// Session-start refresh: rewrites, with `expected_plan`, the managed agent files of the
+/// project and the per-user directories (every client) that `is_outdated`. Hand-edited
+/// and foreign files are never touched, nor files whose agent is gone, deprecated or
+/// misplaced. Returns each file rewritten with its scope (`project` or `global`).
+pub fn refresh_outdated(
+    vault: &Vault,
+    project_key: Option<&str>,
+    project_dir: Option<&Path>,
+) -> Result<Vec<(AgentChange, &'static str)>> {
+    let models = vault.client_models()?;
+    let mut refreshed = Vec::new();
+    for target in Target::all() {
+        for (dir, level) in session_levels(target, project_dir) {
+            let key = level.and(project_key);
+            let mut edits = Vec::new();
+            for (_, state) in managed_files(&dir) {
+                let FileState::Managed(marker) = &state else {
+                    continue;
+                };
+                let Ok(agent) = resolve(vault, &marker.id, key) else {
+                    continue;
+                };
+                if agent.deprecated || placement_error(target, &agent, level).is_some() {
+                    continue;
+                }
+                if !is_outdated(&models, target, &agent, level, &state) {
+                    continue;
+                }
+                let plan = expected_plan(&models, target, &agent, level, Some(marker))?;
+                edits.push(Edit::Write(plan.path, plan.text));
+                refreshed.push((
+                    AgentChange {
+                        kind: "agent_update",
+                        target,
+                        id: agent.id.clone(),
+                        version: Some(agent.version),
+                    },
+                    install_scope(target, level),
+                ));
+            }
+            if edits.is_empty() {
+                continue;
+            }
+            let written: Vec<PathBuf> = edits.iter().map(|e| e.path().to_path_buf()).collect();
+            setup::validate_edits(&edits)?;
+            setup::write_all(edits)?;
+            exclude_from_git(level, &written, true);
+        }
+    }
+    Ok(refreshed)
+}
+
+/// Deletes the project copies of `ids` that are managed (never hand-edited) and whose
+/// client already has our copy in its per-user directory, with their
+/// `.git/info/exclude` lines: what a promoted agent's project copies become.
+pub fn retire_project_copies(ids: &[String], project_dir: &Path) -> Result<Vec<AgentChange>> {
+    let (mut edits, mut changes) = (Vec::new(), Vec::new());
+    for target in Target::all() {
+        let Some((dir, _)) = session_levels(target, Some(project_dir))
+            .into_iter()
+            .find(|(_, level)| level.is_some())
+        else {
+            continue;
+        };
+        let user_dir = target.dir(None)?;
+        for id in ids {
+            validate_id(id)?;
+            let path = dir.join(format!("{id}.md"));
+            let per_user = file_state(&user_dir.join(format!("{id}.md")))?;
+            if per_user.marker().is_some() && matches!(file_state(&path)?, FileState::Managed(_)) {
+                edits.push(Edit::Delete(path));
+                changes.push(AgentChange {
+                    kind: "agent_remove",
+                    target,
+                    id: id.clone(),
+                    version: None,
+                });
+            }
+        }
+    }
+    let deleted: Vec<PathBuf> = edits.iter().map(|e| e.path().to_path_buf()).collect();
+    setup::write_all(edits)?;
+    exclude_from_git(Some(project_dir), &deleted, false);
+    Ok(changes)
 }
 
 /// One agent file written or removed, for the `agent_*` usage events.

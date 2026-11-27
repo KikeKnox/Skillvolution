@@ -273,6 +273,28 @@ enum AgentsCommand {
         #[arg(long, requires = "apply")]
         force: bool,
     },
+    /// Show or change when a global-scope vault agent is promoted to a per-user install,
+    /// and list the current candidates and the agents already promoted. Within the
+    /// window, an agent is promoted when it was used (delegated to after its install in
+    /// that project) in at least --min-share percent of the active projects (those with
+    /// any Skillvolution event), in at least --min-projects projects, with a mean of at
+    /// least --min-delegations delegations per using project. Checked once a day at
+    /// session start, and by `doctor` (which promotes only with --fix). Without options,
+    /// shows the current values.
+    Promotion {
+        /// Window: a number of days such as `30d` (1 to 180). Default 30d.
+        #[arg(long)]
+        window: Option<String>,
+        /// Percent of the active projects that must use the agent (1 to 100). Default 75.
+        #[arg(long)]
+        min_share: Option<i64>,
+        /// Distinct projects that must use the agent. Default 6 (more than 5).
+        #[arg(long)]
+        min_projects: Option<i64>,
+        /// Mean delegations per using project. Default 3.
+        #[arg(long)]
+        min_delegations: Option<i64>,
+    },
     /// Turn a Claude Code agent file (or a directory of them) into AGENT.md for `publish`.
     Import {
         /// A Claude Code agent file, or a directory of *.md files.
@@ -403,6 +425,42 @@ fn model_rows_report(
     )]
 }
 
+/// `30d` or `30` as a number of days.
+fn parse_days(text: &str) -> Result<i64> {
+    let digits = text.trim().strip_suffix('d').unwrap_or(text.trim());
+    digits
+        .parse()
+        .ok()
+        .with_context(|| format!("invalid --window {text:?}: use a number of days like 30d"))
+}
+
+/// What `agents promotion` prints.
+fn promotion_report(status: &skillvolution::vault::PromotionStatus, changed: bool) -> Vec<String> {
+    let s = &status.settings;
+    let mut lines = Vec::new();
+    if changed {
+        lines.push("Saved the promotion thresholds.".to_owned());
+    }
+    lines.push(format!(
+        "Promotion thresholds: window {}d, min share {}%, min projects {}, min delegations {} (mean per using project).",
+        s.window_days, s.min_share, s.min_projects, s.min_delegations
+    ));
+    lines.push(format!("Active projects in the window: {}.", status.active));
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            "none".to_owned()
+        } else {
+            items.join(", ")
+        }
+    };
+    lines.push(format!(
+        "Candidates: {}.",
+        list(status.candidates.iter().map(|c| c.render()).collect())
+    ));
+    lines.push(format!("Promoted: {}.", list(status.promoted.clone())));
+    lines
+}
+
 fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
     use skillvolution::agents;
     let mut failed = false;
@@ -530,6 +588,29 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
                 agents::sync_with_changes(&vault, key.as_deref(), dir.as_deref(), apply, force)?;
             agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
             lines
+        }
+        AgentsCommand::Promotion {
+            window,
+            min_share,
+            min_projects,
+            min_delegations,
+        } => {
+            let vault = open(db)?;
+            let mut settings = vault.promotion_settings()?;
+            let changed = window.is_some()
+                || min_share.is_some()
+                || min_projects.is_some()
+                || min_delegations.is_some();
+            if let Some(window) = window {
+                settings.window_days = parse_days(&window)?;
+            }
+            settings.min_share = min_share.unwrap_or(settings.min_share);
+            settings.min_projects = min_projects.unwrap_or(settings.min_projects);
+            settings.min_delegations = min_delegations.unwrap_or(settings.min_delegations);
+            if changed {
+                vault.set_promotion_settings(&settings)?;
+            }
+            promotion_report(&vault.promotion_status()?, changed)
         }
         AgentsCommand::Import { path, output } => {
             anyhow::ensure!(
@@ -1043,9 +1124,29 @@ fn continue_with(output: ContinueOutput, reason: &str) -> serde_json::Value {
     }
 }
 
-/// Any client's `--client` token (`serve`).
+/// Any client's `--client` token (`serve`, `hook session-start`).
 #[derive(Clone, Copy)]
 struct AnyClient(ClientKind);
+
+impl AnyClient {
+    const CLAUDE_CODE: Self = Self(ClientKind::ClaudeCode);
+
+    /// The SessionStart output that injects `context`: the client's own hook convention,
+    /// or `hookSpecificOutput` for a client whose hooks are not `hook` commands (the
+    /// OpenCode plugin reads that form).
+    fn session_context(self, context: String) -> String {
+        if self.0.spec().hooks.commands.is_some() {
+            return HookClient(self.0).session_context(context);
+        }
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        })
+        .to_string()
+    }
+}
 
 impl clap::ValueEnum for AnyClient {
     fn value_variants<'a>() -> &'a [Self] {
@@ -1078,17 +1179,19 @@ impl clap::ValueEnum for HookClient {
 
 #[derive(Subcommand)]
 enum HookEvent {
-    /// Print the skill catalog as session context.
+    /// Print the skill catalog (and, for clients with subagents, the agents block) as
+    /// session context, after updating stale managed agent files, retiring project copies
+    /// of promoted agents and, once a day, promoting heavily used agents to per-user.
     SessionStart {
         /// Project key for project-scoped skills.
         /// Detected automatically from the working directory's git root when omitted,
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
-        /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
-        /// Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
-        client: HookClient,
+        /// The client emitting the hook: claude-code, devin, codex, gemini, cursor, or
+        /// opencode (its plugin). Defaults to claude-code.
+        #[arg(long, value_enum, default_value_t = AnyClient::CLAUDE_CODE)]
+        client: AnyClient,
     },
     /// Suggest the vault skills matching the submitted prompt (UserPromptSubmit, or
     /// Gemini CLI's BeforeAgent); prints nothing when none is relevant.
@@ -1212,6 +1315,20 @@ fn resolve_project_dir() -> Result<PathBuf> {
     })
 }
 
+/// The project directory a hook works in: the git repository holding the current
+/// directory, else `CLAUDE_PROJECT_DIR`.
+fn hook_project_dir() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .as_deref()
+        .and_then(skillvolution::project::repo_dir)
+        .or_else(|| {
+            std::env::var_os("CLAUDE_PROJECT_DIR")
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
 /// The database at `--db`, or the default location.
 fn db_path(db: &Option<PathBuf>) -> Result<PathBuf> {
     db.clone()
@@ -1240,7 +1357,13 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
         HookEvent::SessionStart { project, client } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let context = hook::session_start_recorded(&open(db)?, project.as_deref(), client.0)?;
+            let project_dir = hook_project_dir();
+            let context = hook::session_start_recorded(
+                &open(db)?,
+                project.as_deref(),
+                project_dir.as_deref(),
+                client.0,
+            )?;
             print!("{}", client.session_context(context));
         }
         HookEvent::Prompt { project, client } => {
@@ -1275,15 +1398,7 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
             match client.commands().stop {
                 StopJudgment::Transcript => {
                     let project = resolve_project(project)?;
-                    let cwd = std::env::current_dir().ok();
-                    let project_dir = cwd
-                        .as_deref()
-                        .and_then(skillvolution::project::repo_dir)
-                        .or_else(|| {
-                            std::env::var_os("CLAUDE_PROJECT_DIR")
-                                .filter(|d| !d.is_empty())
-                                .map(PathBuf::from)
-                        });
+                    let project_dir = hook_project_dir();
                     let dirs = skillvolution::agents::claude_agent_dirs(project_dir.as_deref());
                     let hooks = &client.0.spec().hooks;
                     if let Some(reason) = hook::transcript_stop_as(

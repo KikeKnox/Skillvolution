@@ -4,6 +4,7 @@ mod client_version;
 mod events;
 mod location;
 mod outcomes;
+mod promotion;
 mod revisions;
 mod search;
 mod telemetry;
@@ -18,6 +19,10 @@ pub use client_version::{StoredVersion, stored_client_version};
 pub use events::{Event, MAX_REASON_CHARS, error_class, scrub_text, search_query_for_event};
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
+pub use promotion::{
+    Candidate, Evaluation, MAX_WINDOW_DAYS, PromotionSettings, PromotionStatus, UsageRow, evaluate,
+    promotion_status,
+};
 pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
 pub use search::{SearchPage, SkillMetadata};
 pub use telemetry::{DEFAULT_SINCE, EventRecord, UsageReport};

@@ -66,6 +66,8 @@ enum Fix {
         kind: ClientKind,
         version: Version,
     },
+    /// Install the current promotion candidates per user (`agent_session::promote`).
+    PromoteAgents,
     /// Not auto-fixable; `--fix` prints this guidance instead.
     Manual(&'static str),
 }
@@ -149,7 +151,52 @@ fn all_checks(db: &Path) -> Result<Vec<Check>> {
         checks.push(Check::warn("legacy install", detail));
     }
     checks.extend(agent_checks(db));
+    checks.extend(promotion_checks(db));
     Ok(checks)
+}
+
+/// The agents promoted to a per-user install and the current candidates (read-only;
+/// `--fix` promotes the candidates). Nothing when the vault is not at the current schema
+/// or there is neither.
+fn promotion_checks(db: &Path) -> Vec<Check> {
+    let name = "agents: promotion";
+    let Some(status) = current_schema_conn(db).and_then(|conn| vault::promotion_status(&conn).ok())
+    else {
+        return Vec::new();
+    };
+    let mut checks = Vec::new();
+    if !status.promoted.is_empty() {
+        checks.push(Check::ok(
+            name,
+            format!(
+                "promoted to a per-user install: {}",
+                status.promoted.join(", ")
+            ),
+        ));
+    }
+    if !status.candidates.is_empty() {
+        let candidates: Vec<String> = status.candidates.iter().map(|c| c.render()).collect();
+        let candidates = candidates.join(", ");
+        checks.push(if agents::configured_targets(None).is_empty() {
+            Check::warn(
+                name,
+                format!(
+                    "candidates for a per-user install: {candidates}; no client with subagents is \
+                     set up per user (`skillvolution setup`), so they stay per project"
+                ),
+            )
+        } else {
+            Check::warn(
+                name,
+                format!(
+                    "candidates for a per-user install: {candidates}; `skillvolution doctor --fix` \
+                     installs them per user (a session start does it once a day)"
+                ),
+            )
+            .with_fix(Some(Fix::PromoteAgents))
+        });
+    }
+    checks
 }
 
 /// The `agents sync --apply` command for level `at` (0 is the per-user directory).
@@ -435,6 +482,17 @@ fn apply(fix: &Fix, db: &Path) -> Result<String> {
             let vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
             vault.record_client_version(*kind, *version)?;
             Ok(format!("recorded {} {version}", kind.display_name()))
+        }
+        Fix::PromoteAgents => {
+            let vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            let status = vault.promotion_status()?;
+            let mut errors = Vec::new();
+            let promoted =
+                crate::agent_session::promote(&vault, &status.candidates, &mut |e| errors.push(e));
+            if let Some(error) = errors.into_iter().next() {
+                return Err(error);
+            }
+            Ok(format!("installed per user: {}", promoted.join(", ")))
         }
         Fix::Manual(guidance) => Ok((*guidance).to_owned()),
     }
