@@ -885,7 +885,7 @@ fn doctor_warns_when_a_version_changed_since_setup_and_fix_records_it() {
     let env = Env::new();
     let bin_dir = fake_clis(
         &env.home.path().join("bin"),
-        &[("claude", ""), ("opencode", "opencode v2.2.4")],
+        &[("claude", ""), ("opencode", "opencode v1.19.5")],
     );
     assert_success(
         &env.setup()
@@ -896,19 +896,40 @@ fn doctor_warns_when_a_version_changed_since_setup_and_fix_records_it() {
     );
     let healthy = env.doctor().env("PATH", &bin_dir).output().unwrap();
     let stdout = String::from_utf8(healthy.stdout).unwrap();
-    assert!(stdout.contains("[ok] OpenCode version: 2.2.4"), "{stdout}");
+    assert!(stdout.contains("[ok] OpenCode version: 1.19.5\n"), "{stdout}");
 
+    // Within the same range (same capabilities): no warning, but `--fix` records it.
+    fake_clis(&bin_dir, &[("opencode", "opencode v1.19.6")]);
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] OpenCode version: 1.19.6 (setup recorded 1.19.5, same capabilities"),
+        "{stdout}"
+    );
+    let fixed = env
+        .doctor()
+        .arg("--fix")
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(fixed.stdout).unwrap();
+    assert!(
+        stdout.contains("[fixed] OpenCode version: recorded OpenCode 1.19.6"),
+        "{stdout}"
+    );
+
+    // Into another range: a warning.
     fake_clis(&bin_dir, &[("opencode", "opencode v2.2.5")]);
     let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
     assert_success(&output);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("[warn] OpenCode version: 2.2.5: changed since setup (was 2.2.4)"),
+        stdout.contains("[warn] OpenCode version: 2.2.5: changed since setup (was 1.19.6)"),
         "{stdout}"
     );
     assert_eq!(
         stored_version(&env.db, "opencode").as_deref(),
-        Some("2.2.4")
+        Some("1.19.6")
     );
 
     let fixed = env
@@ -963,14 +984,24 @@ fn doctor_flags_a_version_newer_than_the_last_tested_as_unverified() {
 
 #[cfg(unix)]
 #[test]
-fn doctor_says_not_detected_for_a_cli_without_a_version_instead_of_failing() {
+fn doctor_warns_for_a_cli_without_a_version_and_says_not_detected_without_one() {
     let env = Env::new();
     let bin_dir = fake_clis(&env.home.path().join("bin"), &[("opencode", "")]);
     let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
     assert_success(&output);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("[ok] OpenCode version: not detected"),
+        stdout.contains(
+            "[warn] OpenCode version: unreadable: `opencode --version` failed, timed out or printed no version"
+        ),
+        "{stdout}"
+    );
+    // No CLI on PATH at all: not a problem.
+    let empty = fake_clis(&env.home.path().join("empty"), &[]);
+    let output = env.doctor().env("PATH", &empty).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("[warn] OpenCode version") && !stdout.contains("unreadable"),
         "{stdout}"
     );
 }
@@ -990,7 +1021,7 @@ fn a_hanging_cli_does_not_hang_detection() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("[ok] OpenCode version: not detected"),
+        stdout.contains("[warn] OpenCode version: unreadable: `opencode --version` failed, timed out"),
         "{stdout}"
     );
 }

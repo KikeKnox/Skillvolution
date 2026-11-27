@@ -115,6 +115,23 @@ pub struct VersionSpec {
     pub last_tested: Option<Version>,
 }
 
+impl VersionSpec {
+    /// The index in `ranges` of the range holding `version` (the newest when none does).
+    fn range_of(&self, version: Version) -> usize {
+        self.ranges
+            .iter()
+            .position(|range| range.contains(version))
+            .unwrap_or(self.ranges.len() - 1)
+    }
+
+    /// Whether `version` is newer than `last_tested` and in the newest range: a version
+    /// inside an older range is described by that range, tested or not.
+    fn is_unverified(&self, version: Version) -> bool {
+        self.last_tested.is_some_and(|tested| version > tested)
+            && self.range_of(version) == self.ranges.len() - 1
+    }
+}
+
 /// The version the first range starts at.
 pub const ANY: Version = Version(0, 0, 0);
 
@@ -134,12 +151,17 @@ impl ClientKind {
         &range.caps
     }
 
-    /// Whether `version` is newer than the last one Skillvolution was tested against.
+    /// Whether `version` is newer than the last one Skillvolution was tested against and in
+    /// the newest known range.
     pub fn is_unverified(self, version: Version) -> bool {
-        self.spec()
-            .versions
-            .last_tested
-            .is_some_and(|tested| version > tested)
+        self.spec().versions.is_unverified(version)
+    }
+
+    /// Whether `a` and `b` fall in the same version range, so they have the same
+    /// capabilities.
+    pub fn same_range(self, a: Version, b: Version) -> bool {
+        let versions = &self.spec().versions;
+        versions.range_of(a) == versions.range_of(b)
     }
 
     /// The installed version, from `<cli> --version` (see `detect_version_with`).
@@ -333,6 +355,34 @@ mod tests {
             Some(if cli == second { "9.8.7" } else { "no version" }.to_owned())
         });
         assert_eq!(found, Some(Version(9, 8, 7)));
+    }
+
+    #[test]
+    fn only_a_version_past_the_last_tested_in_the_newest_range_is_unverified() {
+        const RANGES: &[VersionRange] = &[
+            VersionRange {
+                min: ANY,
+                max: Some(Version(2, 0, 0)),
+                caps: Caps::NONE,
+            },
+            VersionRange {
+                min: Version(2, 0, 0),
+                max: None,
+                caps: Caps::NONE,
+            },
+        ];
+        // Tested up to 1.5 only: a later 1.x is still described by the 1.x range.
+        let spec = VersionSpec {
+            ranges: RANGES,
+            last_tested: Some(Version(1, 5, 0)),
+        };
+        assert!(!spec.is_unverified(Version(1, 9, 0)));
+        assert!(spec.is_unverified(Version(2, 0, 0)));
+        assert_eq!(spec.range_of(Version(1, 9, 0)), 0);
+        assert_eq!(spec.range_of(Version(7, 0, 0)), 1);
+        let kind = ClientKind::OpenCode;
+        assert!(kind.same_range(Version(2, 2, 4), Version(2, 2, 5)));
+        assert!(!kind.same_range(Version(1, 19, 6), Version(2, 0, 0)));
     }
 
     #[test]

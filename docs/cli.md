@@ -635,8 +635,11 @@ the installed version of each managed skill (`evolution`, `skill-evaluation`,
 the current repo next to the global one. For each installed client doctor also runs
 `<cli> --version` (3 second limit; this and `setup` are the only places that do) and compares it with the
 version stored at the last setup and with the last version Skillvolution was tested against: it warns
-when it changed since setup and when it is newer than the last tested one (`unverified`), and
-a CLI it cannot run or parse is assumed to be the latest known version, never a failure.
+when it changed since setup into another version range (a change within the same range, which has
+the same capabilities, is shown as ok and still recorded by `--fix`) and when it is newer than the
+last tested one in the newest range (`unverified`). A CLI on `PATH` whose version it cannot read
+(it fails, times out or prints none) is a warning; the latest known version is assumed, and a
+client whose CLI is not on `PATH` is not a problem.
 Hooks and the server read the stored version and never run the CLI. A client whose config can't be read or parsed
 gets its own `[fail]` check and the report continues. `--json` prints
 `{"healthy": bool, "checks": [{"name", "status", "detail"}]}`.

@@ -407,8 +407,9 @@ OpenCode 1.x versus 2.x differ in the delegation tool and field, how the plugin 
 per-call models and hot reload. `<cli> --version` runs only in `setup` and `doctor` (3 second
 limit); the result is stored in `client_versions` and everything else (hooks, `list_models`,
 `install_agent`) reads the stored value, defaulting to the latest known range when nothing is
-stored. `doctor` warns when the version changed since setup and when it is newer than the last one
-tested.
+stored. `doctor` warns when the version moved to another range since setup (a change within a range
+is only recorded by `--fix`), when it is newer than the last one tested in the newest range, and
+when a CLI on `PATH` gives no readable version.
 
 ## Setup design
 

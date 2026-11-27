@@ -783,16 +783,29 @@ fn current_schema_conn(db: &Path) -> Option<Connection> {
 }
 
 /// The check of an installed client's version against the one setup stored and the last
-/// one tested: warns when it changed since setup (`--fix` records the new one) or is
-/// newer than tested. Detects with `<cli> --version`, as setup does; a client whose CLI
-/// is missing is "not detected", not a failure.
+/// one tested: warns when it moved to another version range since setup (another range
+/// has other capabilities; `--fix` records any new version, warned or not) or is newer
+/// than tested in the newest range. Detects with `<cli> --version`, as setup does; a client whose CLI
+/// is missing is "not detected", not a failure, while one on PATH whose version cannot be
+/// read (it failed, timed out or printed none) is a warning.
 fn version_check(kind: ClientKind, db: &Path) -> Option<Check> {
     let name = format!("{} version", kind.display_name());
     let Some(version) = kind.detect_version() else {
-        return Some(Check::ok(
-            name,
-            "not detected (no `--version` output); assuming the latest known version",
-        ));
+        let on_path = kind
+            .spec()
+            .clis
+            .iter()
+            .find(|cli| setup::find_on_path(cli).is_some());
+        return Some(match on_path {
+            Some(cli) => Check::warn(
+                name,
+                format!(
+                    "unreadable: `{cli} --version` failed, timed out or printed no version; \
+                     assuming the latest known version"
+                ),
+            ),
+            None => Check::ok(name, "not detected; assuming the latest known version"),
+        });
     };
     let stored = current_schema_conn(db)
         .and_then(|conn| vault::stored_client_version(&conn, kind).ok())
@@ -801,9 +814,11 @@ fn version_check(kind: ClientKind, db: &Path) -> Option<Check> {
     let mut fix = None;
     match stored {
         Some(Some(saved)) if saved != version => {
-            problems.push(format!(
-                "changed since setup (was {saved}); `doctor --fix` records it, rerun setup to refresh the client's files"
-            ));
+            if !kind.same_range(saved, version) {
+                problems.push(format!(
+                    "changed since setup (was {saved}); `doctor --fix` records it, rerun setup to refresh the client's files"
+                ));
+            }
             fix = Some(Fix::RecordVersion { kind, version });
         }
         Some(None) => fix = Some(Fix::RecordVersion { kind, version }),
@@ -813,10 +828,12 @@ fn version_check(kind: ClientKind, db: &Path) -> Option<Check> {
         problems.push("newer than the last version tested with Skillvolution (unverified)".into());
     }
     let check = if problems.is_empty() {
-        let note = if matches!(stored, Some(None)) {
-            " (not recorded yet)"
-        } else {
-            ""
+        let note = match stored {
+            Some(None) => " (not recorded yet)".to_owned(),
+            Some(Some(saved)) if saved != version => {
+                format!(" (setup recorded {saved}, same capabilities; `doctor --fix` records it)")
+            }
+            _ => String::new(),
         };
         Check::ok(name, format!("{version}{note}"))
     } else {

@@ -407,7 +407,8 @@ root-level `AGENTS.md`, `GEMINI.md`, `opencode.json`, and `.mcp.json`.
 - every detected client: whether it is configured and up to date, whether each managed
   skill is current, whether the configured binary path still exists, and whether Claude
   Code's MCP registration is in place, whether each MCP entry passes `--client`, and
-  whether the client's CLI version changed since setup or is newer than the last tested;
+  whether the client's CLI version moved to another version range since setup, is newer
+  than the last tested, or cannot be read;
 - leftover project-level installs;
 - managed agent files (warn-only, nothing when there are none): edited by hand, outdated,
   missing from the vault (or deprecated, or a skill rather than an agent), the same id at
