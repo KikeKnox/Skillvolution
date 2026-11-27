@@ -4,6 +4,9 @@
 // that did work (file edits or get_skill loads) ends without a report or
 // publication, adds a review reminder to the system prompt of the following
 // turns until the work is reviewed. It never prompts the session itself, so no extra turn is spent.
+// One default export loads in both plugin systems: OpenCode 1.x calls `server`
+// (its hooks object), OpenCode 2.x calls `setup` (hooks registered on its context)
+// and ignores the other key.
 // Setup rewrites this file on install; local edits will be overwritten.
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -21,8 +24,12 @@ const PROJECT_KEY = __SKILLVOLUTION_PROJECT_KEY__;
 const REVIEW_REMINDER =
   "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
-// OpenCode built-in tool ids that edit files.
+// OpenCode built-in tool ids that edit files: 1.x has edit, write, multiedit, patch
+// and apply_patch; 2.x has edit, write and patch.
 const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"]);
+// The delegation tool and its agent field: `task`/`subagent_type` in 1.x,
+// `subagent`/`agent` in 2.x.
+const DELEGATION_TOOLS = { task: "subagent_type", subagent: "agent" };
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
 const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
 // Loading a vault skill is work too: its outcome must be reported.
@@ -63,15 +70,13 @@ const reminderFor = (delegated) =>
     ? `${REVIEW_REMINDER}\nDelegated vault agents to report: ${[...delegated].map(([id, v]) => `${id} v${v}`).join(", ")}.`
     : REVIEW_REMINDER;
 
-export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
-  // OpenCode reports worktree "/" when the project is not a git repository.
-  const agentRoot = worktree && worktree !== "/" ? worktree : directory;
-  const log = (level, message) => {
-    try {
-      client.app.log({ body: { service: "skillvolution", level, message } })?.catch?.(() => {});
-    } catch {}
-  };
-
+// Session state shared by both plugin systems: what each session's next system
+// prompt gets (catalog, suggestions, review reminder) and the work that earns the
+// reminder. `directory` is where the session runs (the binary detects the project
+// from it), `agentRoot` the repository root where project agents live, `getParent`
+// resolves a session's parent id (undefined for a top-level session) and `log`
+// reports a failure that is otherwise swallowed.
+const createTracker = ({ directory, agentRoot, getParent, log }) => {
   const catalogs = new Map(); // sessionID -> Promise<string>
   const suggestions = new Map(); // sessionID -> Promise<string>
   const sessions = new Map(); // sessionID -> { worked, remind, delegated: id -> version }
@@ -138,16 +143,15 @@ export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
       child.stdin?.end(JSON.stringify({ prompt }));
     });
 
-  // Subagent (task) sessions hand their work and reviews to the parent:
+  // Subagent sessions hand their work and reviews to the parent:
   // flags always live on the top-level session so delegated edits still get
   // reviewed and subagent context is never polluted with the reminder.
   const parentOf = (id) => {
     if (!parents.has(id)) {
       parents.set(
         id,
-        client.session
-          .get({ path: { id } })
-          .then(({ data }) => data?.parentID)
+        Promise.resolve()
+          .then(() => getParent(id))
           .catch(() => undefined),
       );
       capped(parents);
@@ -156,19 +160,78 @@ export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
   };
   const ownerOf = async (id) => (await parentOf(id)) ?? id;
 
-  let warnedMissingSessionID = false;
+  return {
+    // The texts to add to `sessionID`'s system prompt for this model request.
+    system: async (sessionID) => {
+      if (!catalogs.has(sessionID)) {
+        catalogs.set(sessionID, loadCatalog(sessionID));
+        capped(catalogs);
+      }
+      const texts = [];
+      const catalog = await catalogs.get(sessionID);
+      if (catalog) texts.push(catalog);
+      const suggestion = await suggestions.get(sessionID);
+      if (suggestion) texts.push(suggestion);
+      const pending = sessions.get(sessionID);
+      if (pending?.remind) texts.push(reminderFor(pending.delegated));
+      return texts;
+    },
 
-  const handleEvent = async (event) => {
-    const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
-    if (!sessionID) return;
-    if (event.type === "session.deleted") {
-      sessions.delete(sessionID);
-      catalogs.delete(sessionID);
-      suggestions.delete(sessionID);
-      parents.delete(sessionID);
-      return;
-    }
-    if (event.type === "session.idle" || event.type === "session.error") {
+    // A new user message: look up the skills matching its text for this
+    // turn's system prompt. Subagent sessions get none (their prompt is the
+    // parent's delegation), and the lookup runs without holding up the
+    // message itself.
+    message: (sessionID, text) => {
+      if (!text) {
+        suggestions.delete(sessionID);
+        return;
+      }
+      suggestions.set(
+        sessionID,
+        parentOf(sessionID)
+          .then((parent) => (parent ? "" : loadSuggestions(text)))
+          .catch(() => ""),
+      );
+      capped(suggestions);
+    },
+
+    // A finished tool call: file edits, skill loads and delegations to managed
+    // agents are work; a report or publication reviews it.
+    toolDone: async (tool, sessionID, args) => {
+      if (typeof tool !== "string" || !sessionID) return;
+      const owner = await ownerOf(sessionID);
+      const s = state(owner);
+      if (WORK_TOOLS.has(tool)) s.worked = true;
+      // A subagent's own loads and reports are about its skills, not the parent's: only
+      // its file edits count toward the parent, so its reports never mark the parent
+      // reviewed and the delegation itself still gets reported.
+      if (sessionID !== owner) return;
+      if (tool.endsWith(LOAD_TOOL)) s.worked = true;
+      if (Object.hasOwn(DELEGATION_TOOLS, tool)) {
+        const id = args?.[DELEGATION_TOOLS[tool]];
+        const version = managedAgentVersion(agentRoot, id);
+        if (version !== null) {
+          s.worked = true;
+          s.delegated.set(id, version);
+        }
+      }
+      if (REVIEW_TOOLS.some((name) => tool.includes(name))) {
+        s.worked = false;
+        s.remind = false;
+        s.delegated.clear();
+      }
+    },
+
+    // A session's turn ended ("idle": done, "error": failed or aborted) or the
+    // session was deleted.
+    sessionEvent: async (kind, sessionID) => {
+      if (kind === "deleted") {
+        sessions.delete(sessionID);
+        catalogs.delete(sessionID);
+        suggestions.delete(sessionID);
+        parents.delete(sessionID);
+        return;
+      }
       // A subagent's own idle/error fires mid-parent-turn; only the top-level
       // session's events should judge and reset the shared flags.
       if (await parentOf(sessionID)) return;
@@ -178,20 +241,41 @@ export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
       // done after the last review (same ordering as the Stop hook) and earns a
       // reminder on the following turns. Error: aborted or failed turns are not
       // reviewed; a pending reminder survives either way.
-      if (event.type === "session.idle" && s.worked) s.remind = true;
+      if (kind === "idle" && s.worked) s.remind = true;
       else if (!s.remind) s.delegated.clear();
       s.worked = false;
-    }
+    },
   };
+};
 
-  // A throwing hook can break the OpenCode session: log and carry on instead.
-  const safe = (name, fn) => async (...args) => {
+// A throwing hook can break the OpenCode session: log and carry on instead.
+const guarded = (log, name, fn) => async (...args) => {
+  try {
+    return await fn(...args);
+  } catch (error) {
+    log("warn", `${name} failed: ${error?.message ?? error}`);
+  }
+};
+
+// OpenCode 1.x session events and the turn outcome each one reports.
+const V1_EVENTS = { "session.idle": "idle", "session.error": "error", "session.deleted": "deleted" };
+
+// OpenCode 1.x: the plugin function, returning its hooks.
+const server = async ({ client, directory, worktree }) => {
+  const log = (level, message) => {
     try {
-      return await fn(...args);
-    } catch (error) {
-      log("warn", `${name} failed: ${error?.message ?? error}`);
-    }
+      client.app.log({ body: { service: "skillvolution", level, message } })?.catch?.(() => {});
+    } catch {}
   };
+  const tracker = createTracker({
+    directory,
+    // OpenCode reports worktree "/" when the project is not a git repository.
+    agentRoot: worktree && worktree !== "/" ? worktree : directory,
+    getParent: (id) => client.session.get({ path: { id } }).then(({ data }) => data?.parentID),
+    log,
+  });
+  const safe = (name, fn) => guarded(log, name, fn);
+  let warnedMissingSessionID = false;
 
   return {
     "experimental.chat.system.transform": safe("system.transform", async ({ sessionID }, output) => {
@@ -204,22 +288,9 @@ export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
         }
         return;
       }
-      if (!catalogs.has(sessionID)) {
-        catalogs.set(sessionID, loadCatalog(sessionID));
-        capped(catalogs);
-      }
-      const catalog = await catalogs.get(sessionID);
-      if (catalog) output.system.push(catalog);
-      const suggestion = await suggestions.get(sessionID);
-      if (suggestion) output.system.push(suggestion);
-      const pending = sessions.get(sessionID);
-      if (pending?.remind) output.system.push(reminderFor(pending.delegated));
+      output.system.push(...(await tracker.system(sessionID)));
     }),
 
-    // A new user message: look up the skills matching its text for this
-    // turn's system prompt. Subagent sessions get none (their prompt is the
-    // parent's delegation), and the lookup runs without holding up the
-    // message itself.
     "chat.message": safe("chat.message", async ({ sessionID }, output) => {
       if (!sessionID) return;
       const text = (output?.parts ?? [])
@@ -227,50 +298,87 @@ export const SkillvolutionPlugin = async ({ client, directory, worktree }) => {
         .map((part) => part.text)
         .join("\n")
         .trim();
-      if (!text) {
-        suggestions.delete(sessionID);
-        return;
-      }
-      suggestions.set(
-        sessionID,
-        parentOf(sessionID)
-          .then((parent) => (parent ? "" : loadSuggestions(text)))
-          .catch(() => ""),
-      );
-      capped(suggestions);
+      tracker.message(sessionID, text);
     }),
 
-    "tool.execute.after": safe("tool.execute.after", async ({ tool, sessionID, args }, output) => {
-      if (typeof tool !== "string" || !sessionID) return;
-      const owner = await ownerOf(sessionID);
-      const s = state(owner);
-      if (WORK_TOOLS.has(tool)) s.worked = true;
-      // A subagent's own loads and reports are about its skills, not the parent's: only
-      // its file edits count toward the parent, so its reports never mark the parent
-      // reviewed and the delegation itself still gets reported.
-      if (sessionID !== owner) return;
-      if (tool.endsWith(LOAD_TOOL)) s.worked = true;
-      if (tool === "task") {
-        const id = (args ?? output?.args)?.subagent_type;
-        const version = managedAgentVersion(agentRoot, id);
-        if (version !== null) {
-          s.worked = true;
-          s.delegated.set(id, version);
-        }
-      }
-      if (REVIEW_TOOLS.some((name) => tool.includes(name))) {
-        s.worked = false;
-        s.remind = false;
-        s.delegated.clear();
-      }
-    }),
+    "tool.execute.after": safe("tool.execute.after", ({ tool, sessionID, args }, output) =>
+      tracker.toolDone(tool, sessionID, args ?? output?.args),
+    ),
 
     // Fire-and-forget: awaiting the parent lookup here would hold up event
     // delivery for unrelated sessions.
     event: ({ event }) => {
       try {
-        void handleEvent(event).catch((error) => log("warn", `event handling failed: ${error?.message}`));
+        const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
+        const kind = V1_EVENTS[event.type];
+        if (!sessionID || !kind) return;
+        void tracker.sessionEvent(kind, sessionID).catch((error) => log("warn", `event handling failed: ${error?.message}`));
       } catch {}
     },
   };
 };
+
+// OpenCode 2.x session events (payload in `data`) and the turn outcome each one
+// reports: an execution that succeeded is an idle turn.
+const V2_EVENTS = {
+  "session.execution.succeeded": "idle",
+  "session.execution.failed": "error",
+  "session.execution.interrupted": "error",
+  "session.deleted": "deleted",
+};
+
+// OpenCode 2.x: registers the hooks on the plugin context; the returned
+// cleanup ends the event subscription when the plugin unloads.
+const setup = async (context) => {
+  // 2.x plugins get no log API; stderr reaches OpenCode's own log.
+  const log = (level, message) => console.error(`skillvolution: ${level}: ${message}`);
+  const directory = context.location.directory;
+  const root = context.location.project?.directory;
+  const tracker = createTracker({
+    directory,
+    agentRoot: root && root !== "/" ? root : directory,
+    getParent: (id) => context.session.get({ sessionID: id }).then((info) => info?.parentID),
+    log,
+  });
+  const safe = (name, fn) => guarded(log, name, fn);
+
+  await context.session.hook(
+    "context",
+    safe("session.context", async (event) => {
+      if (!event?.sessionID || !Array.isArray(event.system)) return;
+      for (const text of await tracker.system(event.sessionID)) event.system.push({ type: "text", text });
+    }),
+  );
+  await context.session.hook(
+    "prompt",
+    safe("session.prompt", (event) => {
+      if (!event?.sessionID) return;
+      const text = event.prompt?.text;
+      tracker.message(event.sessionID, typeof text === "string" ? text.trim() : "");
+    }),
+  );
+  // A failed call (an unknown agent, a rejected edit) did no work.
+  await context.tool.hook(
+    "execute.after",
+    safe("tool.execute.after", (event) =>
+      event?.status === "error" ? undefined : tracker.toolDone(event?.tool, event?.sessionID, event?.input),
+    ),
+  );
+
+  const subscription = new AbortController();
+  void (async () => {
+    const events = context.event.subscribe({ types: Object.keys(V2_EVENTS), signal: subscription.signal });
+    for await (const event of events) {
+      const sessionID = event?.data?.sessionID;
+      const kind = V2_EVENTS[event?.type];
+      if (!sessionID || !kind) continue;
+      // Not awaited: a parent lookup must not hold up the events that follow.
+      void tracker.sessionEvent(kind, sessionID).catch((error) => log("warn", `event handling failed: ${error?.message}`));
+    }
+  })().catch((error) => {
+    if (!subscription.signal.aborted) log("warn", `event subscription ended: ${error?.message ?? error}`);
+  });
+  return () => subscription.abort();
+};
+
+export default { id: "skillvolution", server, setup };

@@ -72,7 +72,7 @@ sanitized directory name differs (see
   output, or a missing configured binary, is the usual cause; `doctor --fix` re-applies
   setup for that client.
 - For Claude Code the Stop hook only blocks when the transcript contains an
-  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call, a successful `get_skill`, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker) after the
+  `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call, a successful `get_skill`, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task` (1.x) / `subagent` (2.x); not `sv-*`; the generated file must carry the skillvolution marker) after the
   last *successful* `publish_skill`/`report_skill_outcome` — `Bash` and other tools
   don't count as work, a `get_skill` that returned an error (unknown id) doesn't count
   as a load, and a review call that returned an error doesn't count as a review.
@@ -117,9 +117,12 @@ correct. Check, in order:
   skills and project skills from another project are not visible either.
 - **The hook isn't installed.** Run `skillvolution doctor --fix` (or rerun
   `skillvolution setup`): configs written by an older binary have no `UserPromptSubmit`
-  (`BeforeAgent` for Gemini CLI) entry or plugin `chat.message` hook. Cursor never has
+  (`BeforeAgent` for Gemini CLI) entry or plugin `chat.message` hook (OpenCode 2.x: `session.hook("prompt")`). Cursor never has
   one, because `beforeSubmitPrompt` can't inject context. Subagent sessions in OpenCode
   get no suggestions either.
+- **OpenCode 2.x logs `Plugin must export a default definition`.** The plugin file predates
+  v0.6.1. Rerun `skillvolution setup` to install the new file (`skillvolution doctor --fix` also
+  refreshes a global install).
 - **Try it by hand**, with the same paths the config records:
   `echo '{"prompt":"debug docker buildx multiarch push"}' | skillvolution hook prompt`
   prints the `additionalContext` JSON when a skill matches and nothing otherwise;

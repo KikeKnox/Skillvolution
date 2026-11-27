@@ -1,8 +1,10 @@
 //! OpenCode plugin: end-to-end coverage of the `--project` propagation bug fix (a
 //! project-mode setup must pass the same project key to the plugin's catalog lookup that
 //! the MCP server itself was started with), a syntax sanity check on the installed
-//! file, and a run of the plugin's prompt-suggestion and review hooks under `node`. Placeholder-substitution and node-syntax unit tests live in `src/setup/plugin.rs`,
-//! next to the code they test.
+//! file, and runs of the plugin's catalog, prompt-suggestion, review and delegation hooks
+//! under `node`, once through a harness that loads it the way OpenCode 1.x does and once
+//! the way OpenCode 2.x does. Placeholder-substitution and node-syntax unit tests live in
+//! `src/setup/plugin.rs`, next to the code they test.
 
 use clap::Parser;
 use skillvolution::setup::{self, SetupArgs};
@@ -109,11 +111,38 @@ fn global_mode_plugin_leaves_project_key_null_for_runtime_detection() {
 }
 
 /// The driver for `plugin_injects_prompt_suggestions_and_treats_get_skill_as_work`: loads
-/// the plugin with a fake OpenCode client ("child" is a subagent of "top") and prints
-/// each session's system prompt as JSON.
+/// the plugin the way OpenCode 1.x does (`readV1Plugin` in detect mode, then the legacy
+/// named-export fallback), runs it with a fake OpenCode client ("child" is a subagent of
+/// "top") and prints each session's system prompt as JSON.
 #[cfg(unix)]
 const PLUGIN_DRIVER: &str = r#"
-const { SkillvolutionPlugin } = await import(process.argv[2]);
+const mod = await import(process.argv[2]);
+// OpenCode 2.x rejects anything but a default definition, so the file must carry no
+// other export for 1.x to pick up instead.
+if (JSON.stringify(Object.keys(mod)) !== '["default"]') throw new Error(`exports: ${Object.keys(mod)}`);
+// OpenCode 1.x (packages/opencode/src/plugin): readV1Plugin(mod, spec, "server", "detect"),
+// else every export is a legacy server function.
+const loadV1 = (mod) => {
+  const value = mod.default;
+  const record = value !== null && typeof value === "object" && !Array.isArray(value);
+  if (record && ("id" in value || "server" in value || "tui" in value)) {
+    if (value.server !== undefined && typeof value.server !== "function") throw new TypeError("invalid server export");
+    if (value.tui !== undefined && typeof value.tui !== "function") throw new TypeError("invalid tui export");
+    if (value.server !== undefined && value.tui !== undefined) throw new TypeError("server() or tui(), not both");
+    if (value.server === undefined) throw new TypeError("must default export an object with server()");
+    // A path plugin must carry an id (resolvePluginId for source "file").
+    if (typeof value.id !== "string" || !value.id.trim()) throw new TypeError("Path plugin must export id");
+    return [value.server];
+  }
+  return [...new Set(Object.values(mod))].map((entry) => {
+    if (typeof entry === "function") return entry;
+    if (entry && typeof entry === "object" && typeof entry.server === "function") return entry.server;
+    throw new TypeError("Plugin export is not a function");
+  });
+};
+const servers = loadV1(mod);
+if (servers.length !== 1) throw new Error(`expected one server plugin, got ${servers.length}`);
+const [SkillvolutionPlugin] = servers;
 const client = {
   app: { log: async () => {} },
   session: {
@@ -207,19 +236,19 @@ const nonGit = rootedOut.system;
 console.log(JSON.stringify({ workAfterReview, workBeforeReview, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
 "#;
 
-/// Drives the installed plugin in `node` with a fake `skillvolution` binary: a top-level
-/// user message gets the skills `hook prompt` printed for it in that turn's system
-/// prompt, a subagent's message gets none, and a `get_skill` call counts as work that
-/// earns the review reminder once the turn goes idle. Skipped (not failed) when `node`
-/// isn't on PATH; unix-only for the `#!/bin/sh` fake binary.
+/// Installs the plugin with a fake `skillvolution` binary (prints `CATALOG` for
+/// `hook session-start`, `SUGGESTED` for `hook prompt`, saving its stdin), lays out the
+/// managed and unmanaged agent fixtures, and runs `driver` in `node` on a `.mjs` copy of
+/// the installed file. Returns the project directory and the JSON the driver printed, or
+/// `None` (the caller skips) when `node` isn't on PATH. Unix-only for the `#!/bin/sh`
+/// fake binary.
 #[cfg(unix)]
-#[test]
-fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
+fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Value)> {
     use std::os::unix::fs::PermissionsExt;
 
     if Command::new("node").arg("--version").output().is_err() {
         eprintln!("skipping plugin run: node not found on PATH");
-        return;
+        return None;
     }
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path();
@@ -290,11 +319,11 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
         "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12 -->\nbody\n",
     )
     .unwrap();
-    let driver = project.join("driver.mjs");
-    fs::write(&driver, PLUGIN_DRIVER).unwrap();
+    let driver_path = project.join("driver.mjs");
+    fs::write(&driver_path, driver).unwrap();
 
     let output = Command::new("node")
-        .arg(&driver)
+        .arg(&driver_path)
         .arg(&plugin)
         .current_dir(project)
         .env("XDG_CONFIG_HOME", project.join("xdg"))
@@ -305,7 +334,22 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = serde_json::from_slice(&output.stdout).unwrap();
+    Some((temp, result))
+}
+
+/// Drives the installed plugin through the OpenCode 1.x loader: a top-level
+/// user message gets the skills `hook prompt` printed for it in that turn's system
+/// prompt, a subagent's message gets none, and a `get_skill` call counts as work that
+/// earns the review reminder once the turn goes idle. Skipped (not failed) when `node`
+/// isn't on PATH; unix-only for the `#!/bin/sh` fake binary.
+#[cfg(unix)]
+#[test]
+fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
+    let Some((temp, result)) = run_plugin_driver(PLUGIN_DRIVER) else {
+        return;
+    };
+    let stdin_log = temp.path().join("prompt-stdin.json");
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
     let reminded = result["after"].as_array().unwrap().iter().any(|text| {
@@ -377,5 +421,239 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
         )
     );
     let stdin: serde_json::Value = serde_json::from_slice(&fs::read(&stdin_log).unwrap()).unwrap();
+    assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
+}
+
+/// The driver for `plugin_loads_and_works_under_the_opencode_2_loader`: checks the module
+/// against OpenCode 2.x's plugin schema (`packages/core/src/plugin/module.ts`: a default
+/// export with a string `id` and an `effect` or `setup` function), calls `setup` with a
+/// fake promise-plugin context (`session.hook`, `tool.hook`, `event.subscribe`,
+/// `session.get`, `location`; "child" is a subagent of "top") and prints each session's
+/// system prompt as JSON.
+#[cfg(unix)]
+const PLUGIN_V2_DRIVER: &str = r#"
+const mod = await import(process.argv[2]);
+const definition = mod.default;
+if (
+  definition === null ||
+  typeof definition !== "object" ||
+  typeof definition.id !== "string" ||
+  (typeof definition.effect !== "function" && typeof definition.setup !== "function")
+)
+  throw new Error("Plugin must export a default definition with an id and an effect or setup function.");
+if (typeof definition.setup !== "function") throw new Error("expected the promise (setup) form");
+
+const hooks = new Map(); // "<domain>.<name>" -> callbacks
+const register = (domain) => async (name, callback) => {
+  const key = `${domain}.${name}`;
+  hooks.set(key, [...(hooks.get(key) ?? []), callback]);
+  return { dispose: async () => {} };
+};
+const trigger = async (domain, name, event) => {
+  for (const callback of hooks.get(`${domain}.${name}`) ?? []) await callback(event);
+  return event;
+};
+// The event bus: each subscription receives the published events of the types it asked for.
+const subscribers = new Set();
+let subscribedTypes = null;
+const subscribe = (options = {}) => ({
+  [Symbol.asyncIterator]() {
+    subscribedTypes = options.types ?? null;
+    const queue = [];
+    let wake;
+    let closed = false;
+    const push = (event) => {
+      if (options.types && !options.types.includes(event.type)) return;
+      queue.push(event);
+      wake?.();
+    };
+    const close = () => {
+      closed = true;
+      subscribers.delete(push);
+      wake?.();
+    };
+    subscribers.add(push);
+    options.signal?.addEventListener("abort", close, { once: true });
+    return {
+      next: async () => {
+        while (!queue.length) {
+          if (closed) return { done: true, value: undefined };
+          await new Promise((resolve) => (wake = resolve));
+          wake = undefined;
+        }
+        return { done: false, value: queue.shift() };
+      },
+      return: async () => {
+        close();
+        return { done: true, value: undefined };
+      },
+    };
+  },
+});
+const publish = async (type, sessionID) => {
+  for (const push of subscribers) push({ id: "evt", created: Date.now(), type, data: { sessionID } });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+};
+const parents = { child: "top", c3: "e2", c4: "l2" };
+const cwd = process.cwd();
+const cleanup = await definition.setup({
+  app: { name: "opencode", version: "2.2.5", channel: "latest" },
+  // Project agents live at the project root, not the directory the session runs in.
+  location: { directory: cwd + "/sub", project: { id: "p", directory: cwd, canonical: cwd } },
+  options: {},
+  session: {
+    hook: register("session"),
+    get: async ({ sessionID }) => ({ id: sessionID, parentID: parents[sessionID] }),
+  },
+  tool: { hook: register("tool") },
+  event: { subscribe },
+});
+await new Promise((resolve) => setTimeout(resolve, 50));
+
+// The system prompt the plugin leaves for `sessionID`'s next model request.
+const system = async (sessionID) => {
+  const event = { sessionID, agent: "build", model: {}, system: [{ type: "text", text: "BASE" }], messages: [], options: {}, tools: {} };
+  await trigger("session", "context", event);
+  return event.system.slice(1).map((part) => (part.type === "text" ? part.text : JSON.stringify(part)));
+};
+const prompt = (sessionID, text) =>
+  trigger("session", "prompt", { sessionID, messageID: "m", prompt: { text }, delivery: "steer" });
+const tool = (tool, sessionID, input, status = "completed") =>
+  trigger("tool", "execute.after", {
+    tool,
+    sessionID,
+    agent: "build",
+    messageID: "m",
+    id: "call",
+    input,
+    status,
+    ...(status === "error" ? { error: { message: "failed" } } : { result: { content: [] } }),
+  });
+const idle = async (sessionID) => {
+  await publish("session.execution.succeeded", sessionID);
+  return system(sessionID);
+};
+
+await prompt("top", "fix the flaky cargo tests");
+const top = await system("top");
+await prompt("child", "delegated task text");
+const child = await system("child");
+await tool("skillvolution_get_skill", "top", { id: "x" });
+const after = await idle("top");
+await tool("subagent", "u", { agent: "unmanaged", description: "d", prompt: "p" });
+const unmanaged = await idle("u");
+await tool("subagent", "m", { agent: "reviewer", description: "d", prompt: "p" });
+const managed = await idle("m");
+await tool("subagent", "g", { agent: "global-reviewer", description: "d", prompt: "p" });
+const global = await idle("g");
+// A delegation that failed (e.g. an unknown agent) is not owed a report.
+await tool("subagent", "f", { agent: "reviewer", description: "d", prompt: "p" }, "error");
+const failedDelegation = await idle("f");
+// OpenCode 2 renamed apply_patch/multiedit: its `patch` tool edits files too.
+await tool("patch", "p2", { patch: "x" });
+const patched = await idle("p2");
+// A subagent's edits count toward the parent; its skill loads do not.
+await tool("edit", "c3", { filePath: "a" });
+const childEdit = await idle("e2");
+await tool("skillvolution_get_skill", "c4", { id: "x" });
+const childLoad = await idle("l2");
+// Reporting clears the reminder.
+await tool("skillvolution_report_skill_outcome", "m", {});
+const reported = await system("m");
+// A failed or interrupted turn is not reviewed.
+await tool("write", "x1", { filePath: "a" });
+await publish("session.execution.failed", "x1");
+const failedTurn = await idle("x1");
+await tool("write", "x2", { filePath: "a" });
+await publish("session.execution.interrupted", "x2");
+const interruptedTurn = await idle("x2");
+// Deleting a session drops its pending reminder.
+await tool("write", "d1", { filePath: "a" });
+await publish("session.execution.succeeded", "d1");
+await publish("session.deleted", "d1");
+const deleted = await system("d1");
+// A hook that gets garbage must not throw.
+let threw = false;
+try {
+  await trigger("tool", "execute.after", {});
+  await trigger("session", "prompt", { sessionID: "z" });
+  await trigger("session", "context", { sessionID: undefined, system: [] });
+  for (const push of subscribers) push({ type: "session.deleted" });
+} catch { threw = true; }
+if (typeof cleanup === "function") await cleanup();
+console.log(JSON.stringify({ subscribedTypes, subscribers: subscribers.size, top, child, after, unmanaged, managed, global, failedDelegation, patched, childEdit, childLoad, reported, failedTurn, interruptedTurn, deleted, threw }));
+"#;
+
+/// Drives the installed plugin through the OpenCode 2.x loader: the same file that 1.x
+/// loads through `server` validates against 2.x's `{id, setup}` schema, and its `setup`
+/// injects the catalog (`session.hook("context")`), the prompt's suggestions
+/// (`session.hook("prompt")`), and the review reminder after work or a delegation to a
+/// managed agent through `subagent`/`agent` (`tool.hook("execute.after")`) once the
+/// session's execution succeeds (`event.subscribe`). Skipped (not failed) when `node`
+/// isn't on PATH; unix-only for the `#!/bin/sh` fake binary.
+#[cfg(unix)]
+#[test]
+fn plugin_loads_and_works_under_the_opencode_2_loader() {
+    let Some((temp, result)) = run_plugin_driver(PLUGIN_V2_DRIVER) else {
+        return;
+    };
+    let reminder = |key: &str| {
+        result[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key}: {result}"))
+            .iter()
+            .filter_map(|text| text.as_str())
+            .find(|text| text.starts_with("Skillvolution review:"))
+            .map(str::to_owned)
+    };
+    let delegated = |agents: &str| {
+        Some(format!(
+            "{}\nDelegated vault agents to report: {agents}.",
+            skillvolution::hook::STOP_REASON
+        ))
+    };
+    let mut types: Vec<String> = serde_json::from_value(result["subscribedTypes"].clone()).unwrap();
+    types.sort();
+    assert_eq!(
+        types,
+        [
+            "session.deleted",
+            "session.execution.failed",
+            "session.execution.interrupted",
+            "session.execution.succeeded",
+        ],
+        "{result}"
+    );
+    assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
+    assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
+    assert_eq!(
+        reminder("after").as_deref(),
+        Some(skillvolution::hook::STOP_REASON),
+        "{result}"
+    );
+    assert!(reminder("unmanaged").is_none(), "{result}");
+    assert_eq!(reminder("managed"), delegated("reviewer v1"), "{result}");
+    assert_eq!(
+        reminder("global"),
+        delegated("global-reviewer v1"),
+        "{result}"
+    );
+    assert!(reminder("failedDelegation").is_none(), "{result}");
+    assert!(reminder("patched").is_some(), "{result}");
+    assert!(reminder("childEdit").is_some(), "{result}");
+    assert!(reminder("childLoad").is_none(), "{result}");
+    assert!(reminder("reported").is_none(), "{result}");
+    assert!(reminder("failedTurn").is_none(), "{result}");
+    assert!(reminder("interruptedTurn").is_none(), "{result}");
+    assert_eq!(
+        result["deleted"],
+        serde_json::json!(["CATALOG"]),
+        "{result}"
+    );
+    assert_eq!(result["threw"], false);
+    // The cleanup `setup` returns ends the event subscription.
+    assert_eq!(result["subscribers"], 0, "{result}");
+    let stdin: serde_json::Value =
+        serde_json::from_slice(&fs::read(temp.path().join("prompt-stdin.json")).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
 }

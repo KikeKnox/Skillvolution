@@ -35,7 +35,7 @@ Retrieval happens in two hooks: `session-start` (catalog) and `prompt` (skills
 matching each submitted prompt, see
 [architecture.md](architecture.md#prompt-hook)). `prompt` is wired as
 `UserPromptSubmit` for Claude Code, Codex, and Devin, `BeforeAgent` for Gemini CLI,
-via the plugin's `chat.message` for OpenCode, and not at all for Cursor.
+via the plugin's `chat.message` for OpenCode 1.x (`session.hook("prompt")` on 2.x), and not at all for Cursor.
 
 All snippets below come from real `setup --dry-run` output with paths
 shortened to `BIN`/`DB`.
@@ -152,13 +152,18 @@ project is refused), `AGENTS.md` marker block,
 A legacy `instructions` entry pointing at the old skill path is dropped and
 never recreated.
 
+**OpenCode 1.x and 2.x**: the same `plugins/skillvolution.js` loads in both. 1.x runs its `server`
+hooks (`experimental.chat.system.transform`, `chat.message`, `tool.execute.after`, `event`). 2.x runs
+`setup`, which registers `session.hook("context")` (catalog), `session.hook("prompt")` (suggestions),
+`tool.hook("execute.after")` (work and delegations) and `event.subscribe` (turn ends). Behavior is the same.
+
 **Reminder behavior** (plugin, not hooks): the plugin injects the catalog
 into the system prompt, tracks work (`edit`, `write`, `multiedit`, `patch`,
-`apply_patch`, a tool ending in `get_skill`, or a `task` delegation to a managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)) and review tools (any tool containing
+`apply_patch`, a tool ending in `get_skill`, or a `task` (1.x) / `subagent` (2.x) delegation to a managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)) and review tools (any tool containing
 `publish_skill` or `report_skill_outcome`) per top-level session — a subagent session's
 file edits count toward the parent, but its own `get_skill` loads and reports do not (it reports
 its skills itself) — and appends a reminder to the next turn after unreviewed
-work. For each new user message, the `chat.message` hook runs `hook prompt` (the
+work. For each new user message, the `chat.message` hook (2.x: `session.hook("prompt")`) runs `hook prompt` (the
 message's non-synthetic text parts as `{"prompt": ...}` on stdin, `--project KEY` in
 project setups, a 15-second timeout) and the plugin appends the suggestions to that
 turn's system prompt; subagent sessions get none, and a failed lookup only costs that
@@ -367,8 +372,8 @@ and OpenCode only; `setup` itself does not write them and never syncs them (see
 - Every file starts (after the frontmatter) with the `skillvolution-managed:agent:` marker.
   `setup --remove` leaves these files and lists them; remove them with `agents remove <id>`.
 - After delegating to such an agent, the `evolution` skill has the orchestrator report its
-  id and version from the marker (not for `sv-*`). The OpenCode plugin counts a `task` call whose
-  `subagent_type` has a marked file in the project's `.opencode/agents/` (found under the plugin input's `worktree`, i.e. the repository root, else `directory`) or the per-user
+  id and version from the marker (not for `sv-*`). The OpenCode plugin counts a `task` (1.x) or `subagent` (2.x) call whose
+  `subagent_type` (1.x) / `agent` (2.x) has a marked file in the project's `.opencode/agents/` (found under the plugin input's `worktree`, i.e. the repository root, else `directory`) or the per-user
   `~/.config/opencode/agents/` (`XDG_CONFIG_HOME`) as work, like a `get_skill` load. Both the Claude Code hook and the plugin then end the reminder with a
   line `Delegated vault agents to report: <id> v<N>, ...` naming the delegated agents (version from the marker).
 
