@@ -603,18 +603,25 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
 /// upkeep for `project_dir` (`agent_session::upkeep`): with the agents block when the
 /// client has subagents, and recording a `session_start` event (the catalog size). An
 /// upkeep or agents-block failure is reported like a hook error and the skills catalog
-/// is still returned.
+/// is still returned. A `subagent` session (one a vault agent may be running in) gets
+/// the skills catalog only: no agents block, which would invite it to delegate, and no
+/// upkeep, which its parent session already ran.
 pub fn session_start_recorded(
     vault: &Vault,
     project: Option<&str>,
     project_dir: Option<&Path>,
     client: ClientKind,
+    subagent: bool,
 ) -> Result<String> {
     let mut report =
         |error: anyhow::Error| report_hook_error(vault, "session-start", client, &error);
-    let refreshed = agent_session::upkeep(vault, project, project_dir, &mut report);
+    let refreshed = if subagent {
+        Vec::new()
+    } else {
+        agent_session::upkeep(vault, project, project_dir, &mut report)
+    };
     let (mut text, visible) = catalog(vault, project)?;
-    if let Some(target) = Target::from_kind(client) {
+    if let Some(target) = Target::from_kind(client).filter(|_| !subagent) {
         match agent_session::catalog_block(vault, project, project_dir, target, &refreshed) {
             Ok(Some(block)) => text.push_str(&block),
             Ok(None) => {}

@@ -5,9 +5,11 @@
 //! An agent is a candidate when, within the window, it was used in at least `min_share`
 //! percent of the active projects (projects with any event in the window), in at least
 //! `min_projects` distinct projects, with a mean of at least `min_delegations`
-//! delegations per using project. Only delegations after the project's first
-//! `agent_install` of that agent count, so a project "uses" an agent when it delegated to
-//! it at least once after installing it.
+//! delegations per using project. In a project with an `agent_install` record of that
+//! agent, only the delegations after its first install record count; in a project with
+//! none (its install predates the events, or the record was pruned) every delegation in
+//! the window counts, since a client cannot delegate to a file that does not exist. A
+//! project "uses" an agent when at least one of its delegations counts.
 
 use super::Vault;
 use anyhow::{Result, ensure};
@@ -118,7 +120,8 @@ pub struct Evaluation {
 /// Evaluates `rows` against `settings`: `since` is the window's UTC start, `eligible`
 /// says which agent ids may be promoted (global-scope vault agents not promoted yet).
 /// `agent_install` rows count whenever they happened; every other row only within the
-/// window. Candidates are sorted by id.
+/// window. A delegation counts when it follows the project's first install record of the
+/// agent, or when the project has none. Candidates are sorted by id.
 pub fn evaluate(
     rows: &[UsageRow],
     since: &str,
@@ -154,10 +157,10 @@ pub fn evaluate(
             continue;
         };
         let project = row.project.as_str();
-        let Some(installed) = installs.get(&(agent, project)) else {
-            continue;
-        };
-        if (row.at.as_str(), row.id) > *installed {
+        let after_install = installs
+            .get(&(agent, project))
+            .is_none_or(|installed| (row.at.as_str(), row.id) > *installed);
+        if after_install {
             *usage.entry(agent).or_default().entry(project).or_default() += 1;
         }
     }
@@ -331,17 +334,32 @@ impl Vault {
     }
 
     /// Whether the automatic evaluation has yet to run today (UTC), claiming today's run
-    /// when it has: at most one evaluation a day, like events pruning. The day check is a
-    /// primary-key read; only the claim writes.
+    /// when it has: at most one evaluation a day, like events pruning. A primary-key read
+    /// answers most calls without the write lock; the claim itself is one conditional
+    /// upsert, so of two concurrent sessions only the one that changed the row runs it.
     pub fn claim_promotion_run(&self) -> Result<bool> {
-        let today: String =
-            self.conn
-                .query_row("SELECT strftime('%Y-%m-%d', 'now')", [], |row| row.get(0))?;
-        if meta(&self.conn, EVALUATED_KEY)?.as_deref() == Some(today.as_str()) {
+        let done_today: bool = self.conn.query_row(
+            "SELECT COALESCE((SELECT value FROM vault_meta WHERE key = ?1), '')
+                    = strftime('%Y-%m-%d', 'now')",
+            [EVALUATED_KEY],
+            |row| row.get(0),
+        )?;
+        if done_today {
             return Ok(false);
         }
-        set_meta(&self.conn, EVALUATED_KEY, &today)?;
-        Ok(true)
+        self.claim_today()
+    }
+
+    /// Sets the evaluation day to today in one statement, `true` only when this call
+    /// changed it.
+    fn claim_today(&self) -> Result<bool> {
+        let claimed = self.conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES (?1, strftime('%Y-%m-%d', 'now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE vault_meta.value <> excluded.value",
+            [EVALUATED_KEY],
+        )?;
+        Ok(claimed == 1)
     }
 }
 
@@ -465,12 +483,50 @@ mod tests {
     }
 
     #[test]
-    fn a_project_without_an_install_does_not_use_the_agent() {
+    fn a_project_without_an_install_record_counts_every_delegation_in_the_window() {
+        // No install record at all (installed before v0.7, or the record was pruned).
+        let mut rows = usage(6, 3, 0);
+        rows.retain(|r| r.kind != "agent_install");
+        assert_eq!(ids(&rows), ["reviewer"]);
+        // One project without a record, its delegations early in the window.
         let mut rows = usage(6, 3, 0);
         rows.retain(|r| !(r.kind == "agent_install" && r.project == "p0"));
+        for r in rows.iter_mut().filter(|r| r.project == "p0") {
+            r.at = "2026-11-01T00:00:00Z".to_owned();
+        }
+        let evaluation = evaluate(&rows, SINCE, &PromotionSettings::default(), &|_| true);
+        assert_eq!(evaluation.candidates[0].projects, 6);
+        assert_eq!(evaluation.candidates[0].delegations, 18);
+        // Delegations before the window still do not count.
+        for r in rows.iter_mut().filter(|r| r.project == "p0") {
+            r.at = "2026-10-01T00:00:00Z".to_owned();
+        }
+        assert!(ids(&rows).is_empty(), "p0 no longer uses it");
+    }
+
+    #[test]
+    fn a_project_with_an_install_record_counts_only_later_delegations() {
+        let mut rows = usage(6, 3, 0);
+        // p0's delegations all happened before its (re)install record.
+        for r in rows
+            .iter_mut()
+            .filter(|r| r.project == "p0" && r.kind == "delegation")
+        {
+            r.at = "2026-11-01T12:00:00Z".to_owned();
+        }
         let evaluation = evaluate(&rows, SINCE, &PromotionSettings::default(), &|_| true);
         assert!(evaluation.candidates.is_empty(), "only 5 projects count");
         assert_eq!(evaluation.active, 6, "p0 is still an active project");
+        // A later install record does not move the first one.
+        let mut rows = usage(6, 3, 0);
+        rows.push(row(
+            900,
+            "2026-11-20T00:00:00Z",
+            "agent_install",
+            "p0",
+            Some("reviewer"),
+        ));
+        assert_eq!(ids(&rows), ["reviewer"]);
     }
 
     #[test]
@@ -575,6 +631,17 @@ mod tests {
             )
             .unwrap();
         assert!(vault.claim_promotion_run().unwrap());
+        // Two sessions that both read an old day race to claim it: one wins.
+        vault
+            .conn
+            .execute(
+                "UPDATE vault_meta SET value = '2000-01-01' WHERE key = ?1",
+                [EVALUATED_KEY],
+            )
+            .unwrap();
+        let other = Vault::open(&dir.path().join("vault.db")).unwrap();
+        let claims = [vault.claim_today().unwrap(), other.claim_today().unwrap()];
+        assert_eq!(claims, [true, false], "only one claim per day");
         vault.mark_promoted("b").unwrap();
         vault.mark_promoted("a").unwrap();
         vault.mark_promoted("b").unwrap();

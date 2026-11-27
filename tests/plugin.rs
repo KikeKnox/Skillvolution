@@ -263,9 +263,10 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     fs::write(
         &bin,
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n\
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n\
              *\"hook prompt\"*) cat > '{}'; printf '%s' '{suggested}' ;;\n\
              *) printf '%s' '{catalog}' ;;\nesac\n",
+            project.join("args.log").display(),
             stdin_log.display()
         ),
     )
@@ -342,6 +343,45 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     Some((temp, result))
 }
 
+/// The arguments of every `hook session-start` the plugin ran (from the fake binary's
+/// log), after `--db <path>`.
+#[cfg(unix)]
+fn session_start_calls(temp: &tempfile::TempDir) -> Vec<String> {
+    fs::read_to_string(temp.path().join("args.log"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            line.split_once(" hook session-start")
+                .map(|(_, rest)| rest.trim().to_owned())
+        })
+        .collect()
+}
+
+/// A top-level session asks for the full catalog (skills and agents block, after the
+/// agent upkeep); a subagent's session asks for the skills only, so a vault agent running
+/// there is never invited to delegate.
+#[cfg(unix)]
+fn assert_child_sessions_get_no_agents_block(temp: &tempfile::TempDir) {
+    let calls = session_start_calls(temp);
+    let flags = |args: &String| {
+        args.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        calls
+            .iter()
+            .all(|args| flags(args).starts_with(&["--client".into(), "opencode".into()])),
+        "{calls:?}"
+    );
+    let subagent = calls
+        .iter()
+        .filter(|args| flags(args).contains(&"--subagent".to_owned()))
+        .count();
+    assert_eq!(subagent, 1, "only the child session: {calls:?}");
+    assert!(calls.len() > subagent, "{calls:?}");
+}
+
 /// Drives the installed plugin through the OpenCode 1.x loader: a top-level
 /// user message gets the skills `hook prompt` printed for it in that turn's system
 /// prompt, a subagent's message gets none, and a `get_skill` call counts as work that
@@ -356,6 +396,7 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     let stdin_log = temp.path().join("prompt-stdin.json");
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
+    assert_child_sessions_get_no_agents_block(&temp);
     let reminded = result["after"].as_array().unwrap().iter().any(|text| {
         text.as_str().unwrap().starts_with(
             "Skillvolution review: you edited files, loaded vault skills, or delegated",
@@ -631,6 +672,7 @@ fn plugin_loads_and_works_under_the_opencode_2_loader() {
     );
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
+    assert_child_sessions_get_no_agents_block(&temp);
     assert_eq!(
         reminder("after").as_deref(),
         Some(skillvolution::hook::STOP_REASON),

@@ -108,11 +108,14 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
     return stdout.trim();
   };
 
-  const loadCatalog = (sessionID) =>
+  // The catalog (skills and the agents block) comes from the binary, the single
+  // source for every client; `--client opencode` lists OpenCode's agents. A subagent
+  // session (`subagent`) gets the skills only: a vault agent running there must not be
+  // invited to delegate, and its parent already ran the agent upkeep.
+  const loadCatalog = (sessionID, subagent) =>
     new Promise((resolve) => {
-      // The catalog (skills and the agents block) comes from the binary, the single
-      // source for every client; `--client opencode` lists OpenCode's agents.
       const args = ["--db", DB, "hook", "session-start", "--client", "opencode"];
+      if (subagent) args.push("--subagent");
       if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
       execFile(BIN, args, options, (error, stdout) => {
@@ -167,7 +170,10 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
     // The texts to add to `sessionID`'s system prompt for this model request.
     system: async (sessionID) => {
       if (!catalogs.has(sessionID)) {
-        catalogs.set(sessionID, loadCatalog(sessionID));
+        catalogs.set(
+          sessionID,
+          parentOf(sessionID).then((parent) => loadCatalog(sessionID, parent !== undefined)),
+        );
         capped(catalogs);
       }
       const texts = [];

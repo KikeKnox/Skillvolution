@@ -253,9 +253,7 @@ fn session_start_updates_stale_managed_files_but_never_edited_ones() {
         "hand edits are kept"
     );
     assert!(
-        text.contains(
-            "Agent files updated to the vault's current version: reviewer v2 (Claude Code local).\n"
-        ),
+        text.contains("Agent files updated to the vault's current version: reviewer v2 (local).\n"),
         "{text}"
     );
     assert!(
@@ -276,6 +274,60 @@ fn session_start_updates_stale_managed_files_but_never_edited_ones() {
 }
 
 #[test]
+fn a_subagent_session_gets_no_agents_block_and_runs_no_upkeep() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("opencode");
+    sandbox.publish("reviewer", "mid", "Use when a diff needs review", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.publish("reviewer", "mid", "Use when a diff needs a review", true);
+    let path = sandbox.repo.join(".opencode/agents/reviewer.md");
+    let stale = read(&path);
+    let out = sandbox.run_in(
+        &sandbox.repo,
+        &[
+            "hook",
+            "session-start",
+            "--client",
+            "opencode",
+            "--subagent",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let output: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let text = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("Skillvolution vault"), "{text}");
+    assert!(!text.contains("Skillvolution agents"), "{text}");
+    assert!(!text.contains("install_agent"), "{text}");
+    assert_eq!(read(&path), stale, "no upkeep");
+    assert!(sandbox.events("agent_update").is_empty());
+    // The top-level session does both.
+    let text = sandbox.session_start("opencode");
+    assert!(text.contains("Skillvolution agents"), "{text}");
+    assert_eq!(marker_version(&path), "v2");
+}
+
+#[test]
+fn the_updated_line_names_only_the_session_clients_files() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code,opencode");
+    sandbox.publish("reviewer", "mid", "Use when a diff needs review", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.publish("reviewer", "mid", "Use when a diff needs a review", true);
+    let text = sandbox.session_start("claude-code");
+    assert!(
+        text.contains("Agent files updated to the vault's current version: reviewer v2 (local).\n"),
+        "{text}"
+    );
+    assert_eq!(
+        sandbox.events("agent_update").len(),
+        2,
+        "both clients' files"
+    );
+}
+
+#[test]
 fn an_update_tells_a_client_without_hot_reload_to_restart() {
     let sandbox = Sandbox::new();
     sandbox.setup("opencode");
@@ -288,7 +340,7 @@ fn an_update_tells_a_client_without_hot_reload_to_restart() {
         .unwrap();
     let text = sandbox.session_start("opencode");
     assert!(
-        text.contains("reviewer v2 (OpenCode local); restart OpenCode to load them.\n"),
+        text.contains("reviewer v2 (local); restart OpenCode to load them.\n"),
         "{text}"
     );
 }
@@ -338,6 +390,33 @@ fn a_heavily_used_agent_is_promoted_and_its_project_copies_retired_later() {
     assert_eq!(removed[0].project.as_deref(), Some(sandbox.key().as_str()));
     assert_eq!(removed[0].data["scope"], "project");
     assert_eq!(sandbox.events("agent_promote").len(), 1, "once a day");
+}
+
+#[test]
+fn a_stale_project_copy_of_a_promoted_agent_is_retired_not_rewritten() {
+    let sandbox = Sandbox::new();
+    sandbox.setup_global("claude-code");
+    sandbox.publish("reviewer", "mid", "Use when a diff needs review", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.usage("reviewer", 6, 3);
+    sandbox.session_start("claude-code");
+    assert!(sandbox.user_claude("reviewer").exists());
+    sandbox.publish("reviewer", "mid", "Use when a diff needs a review", true);
+    let text = sandbox.session_start("claude-code");
+    assert!(!sandbox.claude("reviewer").exists());
+    assert_eq!(marker_version(&sandbox.user_claude("reviewer")), "v2");
+    let updates = sandbox.events("agent_update");
+    assert!(
+        updates.iter().all(|e| e.data["scope"] == "global"),
+        "the project copy was retired, not rewritten: {:?}",
+        updates.iter().map(|e| &e.data).collect::<Vec<_>>()
+    );
+    assert!(
+        text.contains(
+            "Agent files updated to the vault's current version: reviewer v2 (global).\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]

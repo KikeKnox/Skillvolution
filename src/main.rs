@@ -1192,6 +1192,11 @@ enum HookEvent {
         /// opencode (its plugin). Defaults to claude-code.
         #[arg(long, value_enum, default_value_t = AnyClient::CLAUDE_CODE)]
         client: AnyClient,
+        /// The session is a subagent's (the OpenCode plugin passes it for child
+        /// sessions): print the skills catalog only, with no agents block and no agent
+        /// upkeep.
+        #[arg(long)]
+        subagent: bool,
     },
     /// Suggest the vault skills matching the submitted prompt (UserPromptSubmit, or
     /// Gemini CLI's BeforeAgent); prints nothing when none is relevant.
@@ -1354,7 +1359,11 @@ fn read_stdin() -> Result<String> {
 
 fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
     match event {
-        HookEvent::SessionStart { project, client } => {
+        HookEvent::SessionStart {
+            project,
+            client,
+            subagent,
+        } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
             let project_dir = hook_project_dir();
@@ -1363,6 +1372,7 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                 project.as_deref(),
                 project_dir.as_deref(),
                 client.0,
+                subagent,
             )?;
             print!("{}", client.session_context(context));
         }

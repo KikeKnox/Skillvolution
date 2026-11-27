@@ -25,16 +25,22 @@ fn log_changes(vault: &Vault, changes: &[AgentChange], scope: &str, project: Opt
     agents::log_agent_events(vault, changes, scope, project);
 }
 
-/// Session-start agent upkeep, in order: rewrite outdated managed files, retire the
-/// managed project copies of agents promoted earlier (copies of an agent promoted now are
-/// left until the next session there), then the daily promotion run. Never fails: each
-/// error goes to `report` and the rest still runs. Returns the files rewritten.
+/// Session-start agent upkeep, in order: retire the managed project copies of agents
+/// promoted earlier (first, so a stale copy about to go is not rewritten; copies of an
+/// agent promoted now are left until the next session there), rewrite outdated managed
+/// files, then the daily promotion run. Never fails: each error goes to `report` and the
+/// rest still runs. Returns the files rewritten.
 pub fn upkeep(
     vault: &Vault,
     project: Option<&str>,
     project_dir: Option<&Path>,
     report: &mut dyn FnMut(Error),
 ) -> Vec<Refreshed> {
+    if let Some(dir) = project_dir
+        && let Err(error) = retire(vault, project, dir)
+    {
+        report(error);
+    }
     let refreshed = match agents::refresh_outdated(vault, project, project_dir) {
         Ok(refreshed) => refreshed,
         Err(error) => {
@@ -44,11 +50,6 @@ pub fn upkeep(
     };
     for (change, scope) in &refreshed {
         log_changes(vault, std::slice::from_ref(change), scope, project);
-    }
-    if let Some(dir) = project_dir
-        && let Err(error) = retire(vault, project, dir)
-    {
-        report(error);
     }
     match vault.claim_promotion_run() {
         Ok(true) => match vault.promotion_status() {
@@ -145,9 +146,9 @@ fn agent_line(id: &str, version: Option<i64>, tier: Option<&str>) -> String {
 
 /// The catalog block for a session of `target`: the Skillvolution agents installed for it
 /// (local and global, with versions) and the vault agents visible from `project` that
-/// are not, at most `AGENT_CATALOG_LIMIT`, then one line naming the files `refreshed`
-/// rewrote. Ids, versions, tiers and descriptions only, never bodies. `None` when there
-/// are no agents and nothing was refreshed.
+/// are not, at most `AGENT_CATALOG_LIMIT`, then one line naming `target`'s files that
+/// `refreshed` rewrote. Ids, versions, tiers and descriptions only, never bodies. `None`
+/// when there are no agents and nothing of `target`'s was refreshed.
 pub fn catalog_block(
     vault: &Vault,
     project: Option<&str>,
@@ -255,26 +256,26 @@ pub fn catalog_block(
             )?;
         }
     }
-    if !refreshed.is_empty() {
-        let updated: Vec<String> = refreshed
-            .iter()
-            .map(|(change, scope)| {
-                let level = if *scope == "project" {
-                    "local"
-                } else {
-                    "global"
-                };
-                format!(
-                    "{} v{} ({} {level})",
-                    change.id,
-                    change.version.unwrap_or_default(),
-                    change.target.display_name()
-                )
-            })
-            .collect();
+    // Only this client's files: the others are not this session's concern.
+    let updated: Vec<String> = refreshed
+        .iter()
+        .filter(|(change, _)| change.target == target)
+        .map(|(change, scope)| {
+            let level = if *scope == "project" {
+                "local"
+            } else {
+                "global"
+            };
+            format!(
+                "{} v{} ({level})",
+                change.id,
+                change.version.unwrap_or_default()
+            )
+        })
+        .collect();
+    if !updated.is_empty() {
         // A client without hot reload read its agent files before this hook ran.
-        let restart = refreshed.iter().any(|(change, _)| change.target == target)
-            && !vault.client_caps(target.kind())?.hot_reload;
+        let restart = !vault.client_caps(target.kind())?.hot_reload;
         writeln!(
             text,
             "Agent files updated to the vault's current version: {}{}.",
