@@ -1,4 +1,7 @@
-use crate::vault::{SkillMetadata, Vault};
+use crate::{
+    clients::{ClientKind, HookSpec},
+    vault::{SkillMetadata, Vault},
+};
 use anyhow::Result;
 use serde_json::Value;
 use std::{
@@ -10,22 +13,17 @@ use std::{
 };
 
 const CATALOG_LIMIT: i64 = 30;
-pub const WORK_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
 // Loading a skill is work too: whoever applied it owes an outcome report. Matched by
 // suffix, like the review tools, since each client prefixes MCP tool names its own way.
 const LOAD_TOOL: &str = "get_skill";
-// Devin tool names are lowercase and its hook payloads carry no transcript path,
-// so the same worked/reviewed judgment is kept as per-session flags instead.
-pub const DEVIN_WORK_TOOLS: &[&str] = &["write", "edit", "apply_patch", "notebook_edit"];
-// The file-editing tool names of the other flag-tracked clients, as their
-// PostToolUse-style hook payloads report them in `tool_name`.
-pub const CODEX_WORK_TOOLS: &[&str] = &["apply_patch"];
-pub const GEMINI_WORK_TOOLS: &[&str] = &["write_file", "replace"];
-// Cursor's documented native tools are Shell, Read, Write, Grep, Delete, and Task; file
-// edits (not just whole-file writes) go through the same "Write" tool, with no separate
-// "Edit"/"MultiEdit" name. https://cursor.com/docs/hooks
-pub const CURSOR_WORK_TOOLS: &[&str] = &["Write"];
+// Each client's file-editing tool names, from its `HookSpec` in the registry
+// (`src/clients/`), which also holds its delegation tools.
+pub const WORK_TOOLS: &[&str] = ClientKind::ClaudeCode.spec().hooks.work_tools;
+pub const DEVIN_WORK_TOOLS: &[&str] = ClientKind::Devin.spec().hooks.work_tools;
+pub const CODEX_WORK_TOOLS: &[&str] = ClientKind::Codex.spec().hooks.work_tools;
+pub const GEMINI_WORK_TOOLS: &[&str] = ClientKind::Gemini.spec().hooks.work_tools;
+pub const CURSOR_WORK_TOOLS: &[&str] = ClientKind::Cursor.spec().hooks.work_tools;
 
 // Keep in sync with REVIEW_REMINDER in assets/opencode/skillvolution.js (a test in
 // setup/plugin.rs checks it).
@@ -570,14 +568,28 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     Ok(text)
 }
 
-/// Returns a reason to block the stop when the transcript shows work not
-/// followed by an outcome report or proposal. Each transcript span is judged
-/// once, and a stop already continued by this hook is never blocked.
+/// Claude Code Stop: `transcript_stop` with Claude Code's work and delegation tools.
 pub fn stop(
     vault: &Vault,
     input: &str,
     project: Option<&str>,
     agent_dirs: &[std::path::PathBuf],
+) -> Result<Option<Cow<'static, str>>> {
+    let hooks = &ClientKind::ClaudeCode.spec().hooks;
+    transcript_stop(vault, input, project, agent_dirs, hooks)
+}
+
+/// Returns a reason to block the stop when the transcript shows work not
+/// followed by an outcome report or proposal, judged with the work and delegation
+/// tools of `hooks` (the spec of the client that wrote the transcript). Each
+/// transcript span is judged once, and a stop already continued by this hook is
+/// never blocked.
+pub fn transcript_stop(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    agent_dirs: &[std::path::PathBuf],
+    hooks: &HookSpec,
 ) -> Result<Option<Cow<'static, str>>> {
     let input: Value = serde_json::from_str(input)?;
     let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
@@ -608,7 +620,7 @@ pub fn stop(
     if stop_hook_active {
         return Ok(None);
     }
-    let Some(delegated) = has_unreviewed_work(&bytes[..complete], |id| {
+    let Some(delegated) = has_unreviewed_work(&bytes[..complete], hooks, |id| {
         if !matches!(vault.get(id, None, project), Ok(view) if view.kind == "agent") {
             return None;
         }
@@ -636,15 +648,17 @@ fn reason_with_delegations(delegated: &[(String, i64)]) -> Cow<'static, str> {
 }
 
 /// Whether the transcript lines in `span` contain a work tool call after the
-/// last review tool call. Work is a file edit, a skill load (`get_skill`) or a
-/// delegation (`Agent`/`Task`) to a vault agent that has a generated file
-/// (`is_vault_agent`), whose outcome is owed. A review or load whose tool_result is an error (a rejected
-/// publish, an unknown skill id) did nothing, so it does not count.
+/// last review tool call. Work is a file edit (one of `hooks.work_tools`), a skill
+/// load (`get_skill`) or a delegation (one of `hooks.delegation_tools`) to a vault
+/// agent that has a generated file (`vault_agent_version`), whose outcome is owed.
+/// A review or load whose tool_result is an error (a rejected publish, an unknown
+/// skill id) did nothing, so it does not count.
 ///
 /// `None` when nothing is owed; otherwise the vault agents (id, installed version, in
 /// order of first delegation) delegated to since the last review.
 fn has_unreviewed_work(
     span: &[u8],
+    hooks: &HookSpec,
     vault_agent_version: impl Fn(&str) -> Option<i64>,
 ) -> Option<Vec<(String, i64)>> {
     let mut position = 0;
@@ -662,13 +676,15 @@ fn has_unreviewed_work(
                 position += 1;
                 let name = object["name"].as_str().unwrap_or_default();
                 let id = object["id"].as_str().unwrap_or_default();
-                if WORK_TOOLS.contains(&name) {
+                if hooks.work_tools.contains(&name) {
                     last_edit = Some(position);
                 } else if is_load_tool(name) {
                     loads.push((position, id.to_owned()));
-                } else if let Some((agent, version)) = matches!(name, "Agent" | "Task")
-                    .then(|| object["input"]["subagent_type"].as_str())
-                    .flatten()
+                } else if let Some((agent, version)) = hooks
+                    .delegation_tools
+                    .iter()
+                    .find(|delegation| delegation.tool == name)
+                    .and_then(|delegation| object["input"][delegation.agent_field].as_str())
                     .and_then(|agent| Some((agent, vault_agent_version(agent)?)))
                 {
                     loads.push((position, id.to_owned()));

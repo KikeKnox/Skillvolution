@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use skillvolution::{hook, setup, vault::Vault};
-use std::{io::Read, path::PathBuf};
+use skillvolution::{
+    clients::{ClientKind, ContinueOutput, HookCommand, HookCommands, SessionOutput, StopJudgment},
+    hook, setup,
+    vault::Vault,
+};
+use std::{io::Read, path::PathBuf, sync::LazyLock};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -766,40 +770,45 @@ fn print_skills(page: &skillvolution::vault::SearchPage, json: bool) -> Result<(
 /// `hookSpecificOutput.additionalContext` JSON on stdout; every other client
 /// tracks per-session flags from `tool-use` and asks to continue with its own
 /// JSON on stdout (`{"decision":"block"}` for Devin and Codex, `{"decision":"deny"}`
-/// for Gemini CLI's AfterAgent, `{"followup_message"}` for Cursor).
-#[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-enum HookClient {
-    #[default]
-    ClaudeCode,
-    Devin,
-    Codex,
-    Gemini,
-    Cursor,
-}
+/// for Gemini CLI's AfterAgent, `{"followup_message"}` for Cursor). Each of these
+/// conventions is read from the client's `HookSpec`; the accepted `--client` tokens
+/// are those of the clients whose hooks are `hook` commands (every client but
+/// OpenCode, whose plugin handles its own events).
+#[derive(Clone, Copy)]
+struct HookClient(ClientKind);
 
 impl HookClient {
+    const CLAUDE_CODE: Self = Self(ClientKind::ClaudeCode);
+    const DEVIN: Self = Self(ClientKind::Devin);
+
+    /// The `hook` commands of this client; every `HookClient` has them.
+    fn commands(self) -> &'static HookCommands {
+        self.0
+            .spec()
+            .hooks
+            .commands
+            .as_ref()
+            .expect("a HookClient's hooks are hook commands")
+    }
+
     /// The file-editing tool names `tool-use` counts as work for this client.
     fn work_tools(self) -> &'static [&'static str] {
-        match self {
-            Self::ClaudeCode => hook::WORK_TOOLS,
-            Self::Devin => hook::DEVIN_WORK_TOOLS,
-            Self::Codex => hook::CODEX_WORK_TOOLS,
-            Self::Gemini => hook::GEMINI_WORK_TOOLS,
-            Self::Cursor => hook::CURSOR_WORK_TOOLS,
-        }
+        self.0.spec().hooks.work_tools
     }
 
     /// The SessionStart output that injects `context` into this client's session.
     fn session_context(self, context: String) -> String {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex | Self::Gemini => serde_json::json!({
+        match self.commands().session_output {
+            SessionOutput::HookSpecificOutput => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
                     "additionalContext": context,
                 }
             })
             .to_string(),
-            Self::Cursor => serde_json::json!({ "additional_context": context }).to_string(),
+            SessionOutput::AdditionalContext => {
+                serde_json::json!({ "additional_context": context }).to_string()
+            }
         }
     }
 
@@ -808,22 +817,33 @@ impl HookClient {
     /// BeforeAgent for Gemini CLI. `None` for Cursor, whose beforeSubmitPrompt can only
     /// allow or block the prompt, not add context to it.
     fn prompt_event(self) -> Option<&'static str> {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex => Some("UserPromptSubmit"),
-            Self::Gemini => Some("BeforeAgent"),
-            Self::Cursor => None,
-        }
+        self.commands().event(HookCommand::Prompt)
+    }
+}
+
+/// The Stop output asking a flag-tracked client to continue with `reason`.
+fn continue_with(output: ContinueOutput, reason: &str) -> serde_json::Value {
+    match output {
+        ContinueOutput::Block => serde_json::json!({"decision": "block", "reason": reason}),
+        ContinueOutput::Deny => serde_json::json!({"decision": "deny", "reason": reason}),
+        ContinueOutput::FollowupMessage => serde_json::json!({ "followup_message": reason }),
+    }
+}
+
+impl clap::ValueEnum for HookClient {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: LazyLock<Vec<HookClient>> = LazyLock::new(|| {
+            ClientKind::ALL
+                .into_iter()
+                .filter(|kind| kind.spec().hooks.commands.is_some())
+                .map(HookClient)
+                .collect()
+        });
+        &VARIANTS
     }
 
-    /// The Stop output asking a flag-tracked client to continue with `reason`.
-    fn continue_with(self, reason: &str) -> serde_json::Value {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex => {
-                serde_json::json!({"decision": "block", "reason": reason})
-            }
-            Self::Gemini => serde_json::json!({"decision": "deny", "reason": reason}),
-            Self::Cursor => serde_json::json!({ "followup_message": reason }),
-        }
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.0.token()))
     }
 }
 
@@ -838,7 +858,7 @@ enum HookEvent {
         project: Option<String>,
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
         client: HookClient,
     },
     /// Suggest the vault skills matching the submitted prompt (UserPromptSubmit, or
@@ -851,7 +871,7 @@ enum HookEvent {
         project: Option<String>,
         /// The client emitting the hook: claude-code, devin, codex, or gemini (cursor
         /// cannot inject prompt context). Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
         client: HookClient,
     },
     /// Record work/review tool calls for a session (PostToolUse of the flag-tracked
@@ -859,7 +879,7 @@ enum HookEvent {
     ToolUse {
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to devin.
-        #[arg(long, value_enum, default_value_t = HookClient::Devin)]
+        #[arg(long, value_enum, default_value_t = HookClient::DEVIN)]
         client: HookClient,
     },
     /// Ask for an evolution review after unreviewed work.
@@ -870,7 +890,7 @@ enum HookEvent {
         project: Option<String>,
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
         client: HookClient,
     },
     /// Drop a session's hook state (Devin SessionEnd).
@@ -970,8 +990,8 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
         HookEvent::Stop { project, client } => {
             let input = read_stdin()?;
             validate_project(&project)?;
-            match client {
-                HookClient::ClaudeCode => {
+            match client.commands().stop {
+                StopJudgment::Transcript => {
                     let project = resolve_project(project)?;
                     let cwd = std::env::current_dir().ok();
                     let project_dir = cwd
@@ -983,7 +1003,9 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                                 .map(PathBuf::from)
                         });
                     let dirs = skillvolution::agents::claude_agent_dirs(project_dir.as_deref());
-                    if let Some(reason) = hook::stop(&open(db)?, &input, project.as_deref(), &dirs)?
+                    let hooks = &client.0.spec().hooks;
+                    if let Some(reason) =
+                        hook::transcript_stop(&open(db)?, &input, project.as_deref(), &dirs, hooks)?
                     {
                         // additionalContext on stdout (exit 0) makes Claude continue the
                         // same turn, like decision:block, and the continued stop arrives
@@ -1000,9 +1022,9 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                         );
                     }
                 }
-                flagged => {
+                StopJudgment::Flags(output) => {
                     if let Some(reason) = hook::devin_stop(&open(db)?, &input)? {
-                        println!("{}", flagged.continue_with(reason));
+                        println!("{}", continue_with(output, reason));
                     }
                 }
             }
@@ -1302,4 +1324,22 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookClient;
+    use clap::ValueEnum;
+
+    #[test]
+    fn hook_clients_are_the_registry_clients_with_hook_commands() {
+        let tokens: Vec<String> = HookClient::value_variants()
+            .iter()
+            .map(|client| client.to_possible_value().unwrap().get_name().to_owned())
+            .collect();
+        assert_eq!(
+            tokens,
+            ["claude-code", "devin", "codex", "gemini", "cursor"]
+        );
+    }
 }

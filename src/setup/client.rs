@@ -1,107 +1,38 @@
 //! The AI clients setup can configure, sets of them, and where their files go.
 
-use super::{Change, Edit, claude, claude_cli, codex, cursor, devin, gemini, opencode};
+use super::{Change, Edit, claude_cli};
+pub(crate) use crate::clients::ClientKind;
 use anyhow::{Result, bail, ensure};
 use std::path::{Path, PathBuf};
 
-/// One AI coding client setup knows how to configure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClientKind {
-    ClaudeCode,
-    OpenCode,
-    Devin,
-    Codex,
-    Gemini,
-    Cursor,
-}
-
+/// What setup does with each client, read from its `ClientSpec`.
 impl ClientKind {
-    /// Every client, in the stable order setup lists, prompts for, and configures them.
-    pub(crate) const ALL: [ClientKind; 6] = [
-        Self::ClaudeCode,
-        Self::OpenCode,
-        Self::Devin,
-        Self::Codex,
-        Self::Gemini,
-        Self::Cursor,
-    ];
-
-    /// The `--client` token.
-    pub(crate) fn token(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::OpenCode => "opencode",
-            Self::Devin => "devin",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::Cursor => "cursor",
-        }
-    }
-
-    pub(crate) fn display_name(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "Claude Code",
-            Self::OpenCode => "OpenCode",
-            Self::Devin => "Devin CLI",
-            Self::Codex => "Codex CLI",
-            Self::Gemini => "Gemini CLI",
-            Self::Cursor => "Cursor",
-        }
-    }
-
-    /// Whether the client looks installed: its CLI is on `PATH` or its global config
-    /// directory already exists.
+    /// Whether the client looks installed: one of its CLIs is on `PATH` or its global
+    /// config directory already exists.
     pub(crate) fn detect(self) -> bool {
-        let clis: &[&str] = match self {
-            Self::ClaudeCode => &["claude"],
-            Self::OpenCode => &["opencode"],
-            Self::Devin => &["devin"],
-            Self::Codex => &["codex"],
-            Self::Gemini => &["gemini"],
-            Self::Cursor => &["cursor-agent", "cursor"],
-        };
-        clis.iter()
+        self.spec()
+            .clis
+            .iter()
             .any(|cli| claude_cli::find_on_path(cli).is_some())
             || self.global_dir().is_ok_and(|dir| dir.exists())
     }
 
     /// The client's per-user config directory, where global setup writes.
     pub(crate) fn global_dir(self) -> Result<PathBuf> {
-        match self {
-            Self::ClaudeCode => claude::global_dir(),
-            Self::OpenCode => opencode::global_dir(),
-            Self::Devin => devin::global_dir(),
-            Self::Codex => codex::global_dir(),
-            Self::Gemini => gemini::global_dir(),
-            Self::Cursor => cursor::global_dir(),
-        }
+        (self.spec().setup.global_dir)()
     }
 
     /// Every file this client's setup writes in `scope`, with its new content. Only
     /// reads: nothing is written until the caller passes the result to `write_all`.
     pub(crate) fn changes(self, scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
-        match self {
-            Self::ClaudeCode => claude::changes(scope, bin, db),
-            Self::OpenCode => opencode::changes(scope, bin, db),
-            Self::Devin => devin::changes(scope, bin, db),
-            Self::Codex => codex::changes(scope, bin, db),
-            Self::Gemini => gemini::changes(scope, bin, db),
-            Self::Cursor => cursor::changes(scope, bin, db),
-        }
+        (self.spec().setup.changes)(scope, bin, db)
     }
 
     /// Every edit that undoes this client's `changes` in `scope` (see `remove`'s module
     /// doc comment for what a client's `removals` must do). `notes` collects anything
     /// worth telling the user that isn't a file edit.
     pub(crate) fn removals(self, scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
-        match self {
-            Self::ClaudeCode => claude::removals(scope, notes),
-            Self::OpenCode => opencode::removals(scope, notes),
-            Self::Devin => devin::removals(scope, notes),
-            Self::Codex => codex::removals(scope, notes),
-            Self::Gemini => gemini::removals(scope, notes),
-            Self::Cursor => cursor::removals(scope, notes),
-        }
+        (self.spec().setup.removals)(scope, notes)
     }
 }
 

@@ -14,7 +14,7 @@
 //! Codex's hook payloads carry a `session_id` but no `stop_hook_active` field, so, like
 //! Devin, the review reminder is driven by PostToolUse flag tracking rather than
 //! transcript scanning. `apply_patch` is confirmed as Codex's file-editing tool name in
-//! `tool_name` (`CODEX_WORK_TOOLS` in `hook.rs`), and its MCP tool calls are reported as
+//! `tool_name` (its `work_tools` in `clients/codex.rs`), and its MCP tool calls are reported as
 //! `mcp__skillvolution__<tool>`, which already matches `is_review_tool`'s suffix check
 //! with no change needed there.
 //!
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// The per-user config directory: `$CODEX_HOME`, else `~/.codex`.
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     common::env_dir("CODEX_HOME")
         .or_else(|| common::home().map(|home| home.join(".codex")))
         .context("set HOME")
@@ -46,7 +46,7 @@ const PROJECT_TRUST_NOTE: &str = "# Skillvolution: Codex only loads this project
 config once you trust the project (accept the trust prompt the first time you run \
 `codex` here).\n";
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".codex")),
         Scope::Global => {
@@ -75,7 +75,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 /// The removal counterpart of `changes`: deletes the managed skill file, strips our
 /// `mcp_servers.skillvolution` table from `config.toml` (keeping every other key and the
 /// user's formatting), our hooks from `hooks.json`, and our trigger block from AGENTS.md.
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".codex")),
         Scope::Global => {
@@ -121,7 +121,11 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
     let session_start_extra = format!("{client_flag}{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
         "^({}|mcp__skillvolution__.*)$",
-        crate::hook::CODEX_WORK_TOOLS.join("|")
+        crate::clients::ClientKind::Codex
+            .spec()
+            .hooks
+            .work_tools
+            .join("|")
     );
     let entries = [
         (

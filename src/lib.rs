@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod clients;
 pub mod doctor;
 pub mod hook;
 pub mod mcp;

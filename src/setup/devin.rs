@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The documented locations: `~/.config/devin` on Unix, `%APPDATA%\devin` on
 /// Windows (`XDG_CONFIG_HOME` is not documented for Devin, so it is not honored
 /// here).
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     let dir = common::env_dir("APPDATA").map(|dir| dir.join("devin"));
     #[cfg(not(windows))]
@@ -25,7 +25,7 @@ pub(super) fn global_dir() -> Result<PathBuf> {
     dir.context("set HOME or APPDATA")
 }
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".devin")),
         Scope::Global => {
@@ -59,7 +59,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 /// `config.json` (keeping `run_subagent`/`read_subagent`), and removes our trigger block
 /// from AGENTS.md (shared with OpenCode; deleted here only if that empties it, same as
 /// `changes` writes it either way regardless of which client's setup ran first).
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".devin")),
         Scope::Global => {
@@ -112,7 +112,11 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
     let session_start_extra = format!(" --client devin{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
         "^({}|mcp__skillvolution__.*)$",
-        crate::hook::DEVIN_WORK_TOOLS.join("|")
+        crate::clients::ClientKind::Devin
+            .spec()
+            .hooks
+            .work_tools
+            .join("|")
     );
     let entries = [
         (
