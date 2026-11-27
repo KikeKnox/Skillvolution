@@ -16,11 +16,12 @@ const DEVIN_ALLOW: [&str; 3] = ["run_subagent", "read_subagent", "mcp__skillvolu
 
 /// OpenCode exposes MCP tools as `<server>_<tool>`; each is allowed explicitly
 /// since permission keys are tool ids, not globs.
-const OPENCODE_MCP_TOOLS: [&str; 4] = [
+const OPENCODE_MCP_TOOLS: [&str; 5] = [
     "skillvolution_search_skills",
     "skillvolution_get_skill",
     "skillvolution_report_skill_outcome",
     "skillvolution_publish_skill",
+    "skillvolution_usage_report",
 ];
 
 /// Cursor `permissions.allow` rule: every vault MCP tool, via Cursor's

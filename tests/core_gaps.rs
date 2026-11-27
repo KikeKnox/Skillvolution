@@ -147,7 +147,7 @@ fn an_unknown_method_returns_method_not_found() {
 }
 
 #[test]
-fn tools_list_returns_exactly_the_four_tools_in_order() {
+fn tools_list_returns_exactly_the_vault_tools_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("skills.db");
     let mut server = McpServer::spawn(&db, None);
@@ -165,7 +165,8 @@ fn tools_list_returns_exactly_the_four_tools_in_order() {
             "search_skills",
             "get_skill",
             "report_skill_outcome",
-            "publish_skill"
+            "publish_skill",
+            "usage_report"
         ]
     );
 }

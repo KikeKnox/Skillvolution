@@ -364,6 +364,7 @@ fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
         "skillvolution_get_skill",
         "skillvolution_report_skill_outcome",
         "skillvolution_publish_skill",
+        "skillvolution_usage_report",
     ] {
         assert_eq!(oc["permission"][tool], "allow", "{tool}");
     }

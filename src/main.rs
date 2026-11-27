@@ -19,6 +19,44 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum TelemetryCommand {
+    /// Summarize usage: searches without results, skills loaded without a report, usage by
+    /// client, agent and model, and errors, over all projects.
+    ///
+    /// --json prints one object: since (UTC start of the window), events, searches,
+    /// searches_empty, searches_without_results [{name, count}], loaded_without_report
+    /// [{id, version, unreported, loaded}], usage {sessions_by_client, loads_by_client,
+    /// delegations_by_agent, delegations_by_model, delegations_by_client} (each
+    /// [{name, count}]), and errors [{kind, source, class, count}]. Each list keeps its top 10.
+    Summary {
+        /// Window start: YYYY-MM-DD, or a number of days such as 7d.
+        #[arg(long, default_value = skillvolution::vault::DEFAULT_SINCE, value_name = "DATE|Nd")]
+        since: String,
+        /// Print the summary as JSON instead of the readable form.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List recorded events, newest first.
+    ///
+    /// --json prints an array of {at, kind, client, client_version, project, session,
+    /// subject, version, data}.
+    Events {
+        /// Only events of this kind (search, suggest, load, delegation, mcp_error, ...).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only events since YYYY-MM-DD or a number of days such as 7d.
+        #[arg(long, value_name = "DATE|Nd")]
+        since: Option<String>,
+        /// Most events to list.
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+        /// Print the events as JSON instead of one line each.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Start the MCP server on stdio.
     Serve {
@@ -64,6 +102,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read the local usage telemetry (nothing is ever sent anywhere).
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
     /// Hook entry points for Claude Code, Devin CLI, Codex CLI, Gemini CLI, and Cursor.
     #[command(subcommand)]
     Hook(HookEvent),
@@ -1413,6 +1454,29 @@ fn main() -> Result<()> {
                         s.loaded,
                         s.unreported
                     );
+                }
+            }
+        }
+        Command::Telemetry(TelemetryCommand::Summary { since, json }) => {
+            let report = open(&cli.db)?.usage_report(&since)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", report.render());
+            }
+        }
+        Command::Telemetry(TelemetryCommand::Events {
+            kind,
+            since,
+            limit,
+            json,
+        }) => {
+            let events = open(&cli.db)?.list_events(kind.as_deref(), since.as_deref(), limit)?;
+            if json {
+                print_json(&events)?;
+            } else {
+                for event in events {
+                    println!("{}", event.render());
                 }
             }
         }

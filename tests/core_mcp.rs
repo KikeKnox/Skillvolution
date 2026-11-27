@@ -131,7 +131,8 @@ fn tools_list_exposes_the_four_tools() {
             "search_skills",
             "get_skill",
             "report_skill_outcome",
-            "publish_skill"
+            "publish_skill",
+            "usage_report"
         ]
     );
 }

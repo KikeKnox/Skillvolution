@@ -181,6 +181,24 @@ session.
 
 Errors: `unknown skill: ID` (exit 1).
 
+## telemetry
+
+```
+skillvolution telemetry summary [--since DATE|Nd] [--json]
+skillvolution telemetry events [--kind K] [--since DATE|Nd] [--limit N] [--json]
+```
+
+Reads the local usage events (nothing is sent anywhere). `--since` takes `YYYY-MM-DD` or a
+number of days such as `7d`; `summary` defaults to `30d`, `events` to no window and
+`--limit 100`, newest first. `summary` covers all projects: searches without results (top
+queries), skills loaded without a report (same rule as `outcomes --unreported`, within the
+window), sessions, loads and delegations by client, delegations by agent and model, and
+errors by tool or hook and class. `summary --json` is one object: `since`, `events`,
+`searches`, `searches_empty`, `searches_without_results[{name,count}]`,
+`loaded_without_report[{id,version,unreported,loaded}]`, `usage{sessions_by_client,
+loads_by_client, delegations_by_agent, delegations_by_model, delegations_by_client}`
+(each `[{name,count}]`), `errors[{kind,source,class,count}]`; lists keep their top 10.
+
 ## hook
 
 Entry points the clients' lifecycle hooks call. Every `hook` subcommand reads the
@@ -656,6 +674,14 @@ outcomes --unreported`; a failure to record it never fails the call. A deprecate
 Returns `{"recorded": true}`. Only recordable against a published revision visible to
 this project (`no published revision ID version N visible to this project`). One report
 per revision, project, and UTC day; a repeat that day replaces it.
+
+### usage_report
+
+| Param | Type | Constraint |
+|---|---|---|
+| `since` | string | `YYYY-MM-DD` or days like `7d`; default `30d` |
+
+Read-only; returns the same object as `telemetry summary --json`, over all projects.
 
 ### publish_skill
 

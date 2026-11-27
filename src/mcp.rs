@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
 
 use crate::vault::{
-    Event, MAX_REASON_CHARS, Proposal, Vault, error_class, scrub_text, search_query_for_event,
+    DEFAULT_SINCE, Event, MAX_REASON_CHARS, Proposal, Vault, error_class, scrub_text,
+    search_query_for_event,
 };
 
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -86,6 +87,18 @@ fn tools() -> Value {
                 "additionalProperties": false
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
+        },
+        {
+            "name": "usage_report",
+            "description": "Read-only summary of local Skillvolution usage telemetry over all projects (not just this one), for when the user asks how Skillvolution is performing or after repeated failures. Returns `since`, `events`, `searches`/`searches_empty`, `searches_without_results` (top queries that found nothing), `loaded_without_report` (skills loaded with get_skill and never reported, per id and version), `usage` (sessions, loads and delegations by client, delegations by agent and model) and `errors` (mcp_error/hook_error by tool or hook and class). Counts only: never prompt text. `since` is YYYY-MM-DD or a number of days like 30d (default 30d).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": {"type": "string", "maxLength": 16, "default": "30d", "description": "Window start: YYYY-MM-DD or a number of days such as 7d"}
+                },
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true}
         }
     ])
 }
@@ -103,6 +116,12 @@ struct SearchArgs {
 
 fn default_limit() -> i64 {
     20
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageArgs {
+    since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +428,11 @@ impl Server {
                         .data(json!({"result": args.result})),
                 );
                 Ok(json!({"recorded": true}))
+            }
+            "usage_report" => {
+                let args: UsageArgs = serde_json::from_value(arguments).map_err(parse_error)?;
+                let since = args.since.as_deref().unwrap_or(DEFAULT_SINCE);
+                Ok(serde_json::to_value(self.vault.usage_report(since)?)?)
             }
             "publish_skill" => {
                 let args: PublishArgs = serde_json::from_value(arguments).map_err(parse_error)?;

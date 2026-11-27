@@ -5,6 +5,7 @@ mod location;
 mod outcomes;
 mod revisions;
 mod search;
+mod telemetry;
 mod transfer;
 
 pub use agent::{
@@ -18,6 +19,7 @@ pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
 pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
 pub use search::{SearchPage, SkillMetadata};
+pub use telemetry::{DEFAULT_SINCE, EventRecord, UsageReport};
 pub use transfer::{ImportReport, PurgeReport};
 
 use anyhow::{Result, bail, ensure};
