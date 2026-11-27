@@ -76,8 +76,9 @@ fn retire(vault: &Vault, project: Option<&str>, project_dir: &Path) -> Result<()
 /// Installs each of `candidates` in the per-user directory of every client set up per
 /// user, through the same path as `agents add --global`, recording the `agent_*` events
 /// and `agent_promote`, and marks it promoted. Project copies are left alone. A failed
-/// install goes to `report` and the agent stays a candidate. Returns the agents
-/// promoted; none when no client with agents is set up per user.
+/// install goes to `report` and the agent stays a candidate, as does one whose every
+/// per-user copy is edited by hand (skipped, so nothing per user is ours). Returns the
+/// agents promoted; none when no client with agents is set up per user.
 pub fn promote(
     vault: &Vault,
     candidates: &[Candidate],
@@ -96,7 +97,14 @@ pub fn promote(
                 continue;
             }
         };
-        let Some(version) = installed.files.first().map(|f| f.version) else {
+        // Only a per-user copy that is ours (added, updated, overwritten or already
+        // current) makes the agent promoted; retiring the project copies depends on it.
+        let Some(version) = installed
+            .files
+            .iter()
+            .find(|f| f.status != "edited")
+            .map(|f| f.version)
+        else {
             continue;
         };
         log_changes(vault, &installed.changes, "global", None);

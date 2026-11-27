@@ -492,7 +492,20 @@ fn apply(fix: &Fix, db: &Path) -> Result<String> {
             if let Some(error) = errors.into_iter().next() {
                 return Err(error);
             }
-            Ok(format!("installed per user: {}", promoted.join(", ")))
+            let left: Vec<&str> = status
+                .candidates
+                .iter()
+                .map(|c| c.id.as_str())
+                .filter(|id| !promoted.iter().any(|p| p == id))
+                .collect();
+            let mut message = format!("installed per user: {}", promoted.join(", "));
+            if !left.is_empty() {
+                message.push_str(&format!(
+                    "; still candidates (no per-user copy of ours: edited by hand, or no client set up per user): {}",
+                    left.join(", ")
+                ));
+            }
+            Ok(message)
         }
         Fix::Manual(guidance) => Ok((*guidance).to_owned()),
     }

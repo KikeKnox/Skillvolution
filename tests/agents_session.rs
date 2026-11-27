@@ -490,6 +490,28 @@ fn an_edited_project_copy_of_a_promoted_agent_is_kept() {
 }
 
 #[test]
+fn an_agent_whose_per_user_copy_is_edited_is_not_promoted() {
+    let sandbox = Sandbox::new();
+    sandbox.setup_global("claude-code");
+    sandbox.publish("reviewer", "mid", "Use when a diff needs review", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.ok(&["agents", "add", "--global", "reviewer"]);
+    let edited = read(&sandbox.user_claude("reviewer")).replace("Reviews diffs.", "Mine.");
+    fs::write(sandbox.user_claude("reviewer"), &edited).unwrap();
+    sandbox.usage("reviewer", 6, 3);
+
+    sandbox.session_start("claude-code");
+    sandbox.session_start("claude-code");
+    assert_eq!(read(&sandbox.user_claude("reviewer")), edited);
+    assert!(sandbox.events("agent_promote").is_empty());
+    assert!(sandbox.vault().promoted_agents().unwrap().is_empty());
+    assert!(sandbox.claude("reviewer").exists(), "the project copy stays");
+    assert!(sandbox.events("agent_remove").is_empty());
+    let status = sandbox.ok(&["agents", "promotion"]);
+    assert!(status.contains("Candidates: reviewer"), "{status}");
+}
+
+#[test]
 fn project_scoped_and_lightly_used_agents_are_never_promoted() {
     let sandbox = Sandbox::new();
     sandbox.setup_global("claude-code");
