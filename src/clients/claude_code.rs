@@ -2,10 +2,12 @@
 //! transcript, so the review judgment scans it instead of keeping per-session flags.
 
 use super::{
-    ClientSpec, DelegationTool, HookCommand, HookCommands, HookSpec, SessionOutput, SetupSpec,
-    StopJudgment,
+    AgentSpec, ClientSpec, DelegationTool, FrontMatter, HookCommand, HookCommands, HookSpec,
+    ModelChoice, ModelRefFormat, SessionOutput, SetupSpec, StopJudgment,
 };
-use crate::setup::claude;
+use crate::{agents::Agent, setup::claude, skill_file::yaml_scalar};
+use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 pub(super) const SPEC: ClientSpec = ClientSpec {
     token: "claude-code",
@@ -38,4 +40,57 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             stop: StopJudgment::Transcript,
         }),
     },
+    agents: Some(AgentSpec {
+        dirs,
+        render,
+        // The `Agent` tool's `model` input takes only an alias.
+        per_call_model: ModelRefFormat::Alias,
+        hot_reload: true,
+        default_models: &[
+            ("high", "opus", Some("high")),
+            ("mid", "sonnet", Some("medium")),
+            ("low", "haiku", Some("low")),
+        ],
+    }),
 };
+
+fn dirs(project: Option<&Path>) -> Result<PathBuf> {
+    Ok(match project {
+        Some(dir) => dir.join(".claude").join("agents"),
+        None => claude::global_dir()?.join("agents"),
+    })
+}
+
+fn render(agent: &Agent, model: Option<&ModelChoice>) -> FrontMatter {
+    let meta = &agent.meta;
+    let mut front = vec![
+        format!("name: {}", yaml_scalar(&agent.id)),
+        format!("description: {}", yaml_scalar(&agent.description)),
+    ];
+    let mapped_effort = model.and_then(|(_, effort)| effort.clone());
+    if let Some((model, _)) = model {
+        front.push(format!("model: {}", yaml_scalar(model)));
+    }
+    if let Some(effort) = meta.effort.clone().or(mapped_effort) {
+        front.push(format!("effort: {}", yaml_scalar(&effort)));
+    }
+    let mut tools = Vec::new();
+    for (tool, names) in [
+        ("edit", "Edit, Write, NotebookEdit, MultiEdit"),
+        ("shell", "Bash, PowerShell, Monitor"),
+        ("web", "WebFetch, WebSearch"),
+        ("mcp", "mcp__*"),
+    ] {
+        if !meta.allows(tool) {
+            tools.push(names);
+        }
+    }
+    // A restricted agent must not delegate to an unrestricted subagent.
+    if meta.tools.is_some() {
+        tools.push("Agent, Task");
+    }
+    if !tools.is_empty() {
+        front.push(format!("disallowedTools: {}", tools.join(", ")));
+    }
+    (front, Vec::new())
+}

@@ -3,6 +3,7 @@
 //! that works on every client iterates `ClientKind::ALL` and reads each client's spec
 //! instead of matching on the client itself.
 
+use crate::agents::Agent;
 use crate::setup::{Change, Edit, Scope};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,13 @@ impl ClientKind {
     pub fn display_name(self) -> &'static str {
         self.spec().display_name
     }
+
+    /// Every client that supports subagents, in registry order.
+    pub fn with_agents() -> impl Iterator<Item = ClientKind> {
+        Self::ALL
+            .into_iter()
+            .filter(|kind| kind.spec().agents.is_some())
+    }
 }
 
 /// Everything Skillvolution needs to know about one client.
@@ -68,6 +76,9 @@ pub struct ClientSpec {
     pub clis: &'static [&'static str],
     pub(crate) setup: SetupSpec,
     pub hooks: HookSpec,
+    /// How the client's subagent files are generated. `None` for a client without
+    /// subagents.
+    pub agents: Option<AgentSpec>,
 }
 
 /// How setup configures a client: the code in `setup/<client>.rs`.
@@ -78,6 +89,41 @@ pub(crate) struct SetupSpec {
     pub(crate) changes: fn(Scope, &Path, &Path) -> Result<Vec<Change>>,
     /// Every edit that undoes `changes` in a scope, plus notes for the user.
     pub(crate) removals: fn(Scope, &mut Vec<String>) -> Result<Vec<Edit>>,
+}
+
+/// The `(model, effort)` a generated agent file gets.
+pub type ModelChoice = (String, Option<String>);
+
+/// A client's rendered front matter lines and the warnings about what it cannot express.
+pub type FrontMatter = (Vec<String>, Vec<String>);
+
+/// How a client names a model in a delegation call (`Agent`'s `model` input, `subagent`'s).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelRefFormat {
+    /// The delegation call cannot pick a model.
+    None,
+    /// Only an alias (`opus`, `sonnet`, ...).
+    Alias,
+    /// `provider/model[#variant]`.
+    ProviderModel,
+}
+
+/// How a client's subagent files are generated: the part of `agents.rs` that differs per
+/// client. The marker, hash, file states, `sync` and `import` are shared there.
+pub struct AgentSpec {
+    /// Where the client reads agents: the project's own directory, or the per-user one when
+    /// `None`.
+    pub dirs: fn(Option<&Path>) -> Result<PathBuf>,
+    /// The front matter lines (without the `---` fences) for an agent and its model, and
+    /// warnings about what the client cannot express.
+    pub render: fn(&Agent, Option<&ModelChoice>) -> FrontMatter,
+    /// How a delegation call can name a model. Data only until the model selection in
+    /// Phase 4 reads it.
+    pub per_call_model: ModelRefFormat,
+    /// Whether the client picks up agent file changes without a restart. Data only for now.
+    pub hot_reload: bool,
+    /// The `(tier, model, effort)` compiled in; stored `agent_models` rows override them.
+    pub default_models: &'static [(&'static str, &'static str, Option<&'static str>)],
 }
 
 /// What a client's hooks report and how Skillvolution answers them.
@@ -215,6 +261,25 @@ mod tests {
                 "{token}: no global config dir"
             );
 
+            if let Some(agents) = &spec.agents {
+                assert!(
+                    (agents.dirs)(None).is_ok_and(|dir| dir.ends_with("agents")),
+                    "{token}: no global agents dir"
+                );
+                let project = Path::new("/project");
+                let dir = (agents.dirs)(Some(project)).unwrap();
+                assert!(
+                    dir.starts_with(project) && dir.ends_with("agents"),
+                    "{token}: the project agents dir is not inside the project"
+                );
+                let tiers: Vec<&str> = agents.default_models.iter().map(|(t, ..)| *t).collect();
+                assert_unique("default model tier", tiers.iter().copied());
+                assert!(
+                    tiers.iter().all(|t| crate::vault::TIERS.contains(t)),
+                    "{token}: a default model for an unknown tier"
+                );
+            }
+
             let hooks = &spec.hooks;
             assert!(!hooks.work_tools.is_empty(), "{token}: no work tools");
             assert_unique("work tool", hooks.work_tools.iter().copied());
@@ -276,6 +341,20 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn only_clients_with_agents_accept_model_config() {
+        let with_agents: Vec<&str> = ClientKind::with_agents().map(ClientKind::token).collect();
+        assert_eq!(with_agents, ["claude-code", "opencode"]);
+        let dir = tempfile::tempdir().unwrap();
+        let vault = crate::vault::Vault::open(&dir.path().join("skills.db")).unwrap();
+        for kind in ClientKind::ALL {
+            let accepted = vault
+                .set_agent_model(kind.token(), "mid", "some-model", None)
+                .is_ok();
+            assert_eq!(accepted, kind.spec().agents.is_some(), "{}", kind.token());
         }
     }
 

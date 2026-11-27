@@ -7,6 +7,7 @@
 //! edit is detected and never overwritten.
 
 use crate::{
+    clients::AgentSpec,
     project,
     setup::{self, ClientKind, Edit, MANAGED_MARKER, Scope},
     skill_file,
@@ -31,59 +32,63 @@ const SKILLS_LINE: &str = "Before starting, load these vault skills with get_ski
 const REPORT_LINE: &str = "Before returning, call report_skill_outcome once for each of them (helped, failed with the wrong step, or not_applicable).";
 const MARKER_PREFIX: &str = "<!-- skillvolution-managed:agent:";
 
+/// A client that supports subagents: a `ClientKind` whose spec has an `AgentSpec`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Target {
-    ClaudeCode,
-    OpenCode,
-}
+pub struct Target(ClientKind);
 
+#[allow(non_upper_case_globals)]
 impl Target {
-    pub const ALL: [Target; 2] = [Target::ClaudeCode, Target::OpenCode];
+    pub const ClaudeCode: Target = Target(ClientKind::ClaudeCode);
+    pub const OpenCode: Target = Target(ClientKind::OpenCode);
 
-    pub fn token(self) -> &'static str {
-        match self {
-            Target::ClaudeCode => "claude-code",
-            Target::OpenCode => "opencode",
-        }
+    /// Every client with subagents, in registry order.
+    pub fn all() -> impl Iterator<Item = Target> {
+        ClientKind::with_agents().map(Target)
     }
 
     pub fn from_token(token: &str) -> Option<Target> {
-        Target::ALL.into_iter().find(|t| t.token() == token)
+        Target::all().find(|t| t.token() == token)
+    }
+
+    pub fn from_kind(kind: ClientKind) -> Option<Target> {
+        Target::all().find(|t| t.0 == kind)
+    }
+
+    pub fn token(self) -> &'static str {
+        self.0.token()
     }
 
     pub fn display_name(self) -> &'static str {
-        match self {
-            Target::ClaudeCode => "Claude Code",
-            Target::OpenCode => "OpenCode",
-        }
+        self.0.display_name()
     }
 
     fn kind(self) -> ClientKind {
-        match self {
-            Target::ClaudeCode => ClientKind::ClaudeCode,
-            Target::OpenCode => ClientKind::OpenCode,
-        }
+        self.0
+    }
+
+    fn spec(self) -> &'static AgentSpec {
+        self.0
+            .spec()
+            .agents
+            .as_ref()
+            .expect("a Target is a client with an AgentSpec")
     }
 
     /// Where this client reads agents: the project's own directory, or the per-user one
     /// when `project` is `None`.
     pub fn dir(self, project: Option<&Path>) -> Result<PathBuf> {
-        Ok(match (self, project) {
-            (Target::ClaudeCode, Some(dir)) => dir.join(".claude").join("agents"),
-            (Target::OpenCode, Some(dir)) => dir.join(".opencode").join("agents"),
-            (_, None) => self.kind().global_dir()?.join("agents"),
-        })
+        (self.spec().dirs)(project)
     }
 }
 
 /// Tier model compiled in for `target`; stored `agent_models` rows override it.
 fn default_model(target: Target, tier: &str) -> Option<(&'static str, &'static str)> {
-    match (target, tier) {
-        (Target::ClaudeCode, "high") => Some(("opus", "high")),
-        (Target::ClaudeCode, "mid") => Some(("sonnet", "medium")),
-        (Target::ClaudeCode, "low") => Some(("haiku", "low")),
-        _ => None,
-    }
+    target
+        .spec()
+        .default_models
+        .iter()
+        .find(|(t, ..)| *t == tier)
+        .and_then(|(_, model, effort)| Some((*model, (*effort)?)))
 }
 
 /// The `(model, effort)` generated files get for `tier` on `target`.
@@ -123,8 +128,8 @@ pub fn model_warning(client: &str, model: &str) -> Option<String> {
 /// The `agents models` table: a header, then one aligned line per client and tier.
 pub fn models_table(stored: &[AgentModel]) -> Vec<String> {
     let mut rows = vec![["client", "tier", "model", "effort", "origin"].map(str::to_owned)];
-    for client in vault::MODEL_CLIENTS {
-        let target = Target::from_token(client);
+    for kind in ClientKind::with_agents() {
+        let (client, target) = (kind.token(), Target::from_kind(kind));
         for tier in TIERS {
             let set = stored.iter().any(|m| m.client == client && m.tier == tier);
             let mapped = target.and_then(|t| model_for(stored, t, tier));
@@ -351,83 +356,15 @@ pub fn render(
     agent: &Agent,
     model: Option<(String, Option<String>)>,
 ) -> (String, Vec<String>) {
-    let scalar = skill_file::yaml_scalar;
-    let mut warnings = Vec::new();
-    let mut front = Vec::new();
-    let meta = &agent.meta;
-    let denied = |tool: &str| !meta.allows(tool);
-    match target {
-        Target::ClaudeCode => {
-            front.push(format!("name: {}", scalar(&agent.id)));
-            front.push(format!("description: {}", scalar(&agent.description)));
-            let mapped_effort = model.as_ref().and_then(|(_, effort)| effort.clone());
-            if let Some((model, _)) = &model {
-                front.push(format!("model: {}", scalar(model)));
-            }
-            if let Some(effort) = meta.effort.clone().or(mapped_effort) {
-                front.push(format!("effort: {}", scalar(&effort)));
-            }
-            let mut tools = Vec::new();
-            for (tool, names) in [
-                ("edit", "Edit, Write, NotebookEdit, MultiEdit"),
-                ("shell", "Bash, PowerShell, Monitor"),
-                ("web", "WebFetch, WebSearch"),
-                ("mcp", "mcp__*"),
-            ] {
-                if denied(tool) {
-                    tools.push(names);
-                }
-            }
-            // A restricted agent must not delegate to an unrestricted subagent.
-            if meta.tools.is_some() {
-                tools.push("Agent, Task");
-            }
-            if !tools.is_empty() {
-                front.push(format!("disallowedTools: {}", tools.join(", ")));
-            }
-        }
-        Target::OpenCode => {
-            front.push(format!("description: {}", scalar(&agent.description)));
-            front.push("mode: subagent".into());
-            if let Some((model, _)) = &model {
-                front.push(format!("model: {}", scalar(model)));
-            }
-            // OpenCode merges a user-level file with a project one of the same name, so
-            // every tool is written explicitly: an omitted key would be inherited.
-            front.push("permission:".into());
-            for (tool, key) in [
-                ("edit", "edit"),
-                ("shell", "bash"),
-                ("web", "webfetch"),
-                ("web", "websearch"),
-            ] {
-                let rule = if denied(tool) { "deny" } else { "allow" };
-                front.push(format!("  {key}: {rule}"));
-            }
-            front.push(format!(
-                "  task: {}",
-                if meta.tools.is_some() {
-                    "deny"
-                } else {
-                    "allow"
-                }
-            ));
-            if denied("mcp") {
-                warnings.push("OpenCode cannot block MCP tools by kind; not enforced".into());
-            }
-            if meta.effort.is_some() {
-                warnings.push("effort is not written for OpenCode".into());
-            }
-        }
-    }
+    let (front, mut warnings) = (target.spec().render)(agent, model.as_ref());
     if model.is_none() {
         warnings.push(format!(
             "no {} model for tier {}; the client inherits its own (set one with \
              `skillvolution agents models set {} {} <model>`)",
             target.display_name(),
-            meta.tier,
+            agent.meta.tier,
             target.token(),
-            meta.tier
+            agent.meta.tier
         ));
     }
     let front = front.join("\n");
@@ -564,8 +501,7 @@ fn plan(
 }
 
 fn configured_targets(project_dir: Option<&Path>) -> Vec<Target> {
-    Target::ALL
-        .into_iter()
+    Target::all()
         .filter(|t| setup::client_configured(t.kind(), project_dir))
         .collect()
 }
@@ -772,7 +708,7 @@ pub fn remove(ids: &[String], project_dir: Option<&Path>) -> Result<(Vec<String>
     for id in ids {
         validate_id(id)?;
         let (mut found, mut removed) = (false, false);
-        for target in Target::ALL {
+        for target in Target::all() {
             let path = target.dir(project_dir)?.join(format!("{id}.md"));
             let name = target.display_name();
             match file_state(&path)? {
@@ -1049,7 +985,7 @@ pub fn sync(
 
 /// A note for `setup --remove`: managed agent files its client leaves in `scope`.
 pub(crate) fn left_behind_note(kind: ClientKind, scope: Scope) -> Option<String> {
-    let target = Target::ALL.into_iter().find(|t| t.kind() == kind)?;
+    let target = Target::from_kind(kind)?;
     let dir = target
         .dir(match scope {
             Scope::Project { dir, .. } => Some(dir),
@@ -1421,7 +1357,7 @@ mod tests {
     fn rendered_files_are_managed_and_every_builtin_parses() {
         for (id, _) in BUILTINS {
             let agent = builtin(id).unwrap();
-            for target in Target::ALL {
+            for target in Target::all() {
                 let (text, _) = render(target, &agent, None);
                 let marker = parse_marker(&text, id).unwrap();
                 assert_eq!(marker.hash, hash8(&text));

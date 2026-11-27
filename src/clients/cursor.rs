@@ -33,4 +33,5 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             stop: StopJudgment::Flags(ContinueOutput::FollowupMessage),
         }),
     },
+    agents: None,
 };

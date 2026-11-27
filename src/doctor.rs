@@ -172,7 +172,7 @@ fn agent_checks(db: &Path) -> Vec<Check> {
         });
     let (mut checks, mut seen) = (Vec::new(), Vec::new());
     let mut catalog = Vec::new();
-    for target in Target::ALL {
+    for target in Target::all() {
         let name = format!("agents: {}", target.display_name());
         let mut no_model: Vec<(usize, String, Vec<String>)> = Vec::new();
         let mut user_ids: Vec<String> = Vec::new();

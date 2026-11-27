@@ -2,6 +2,7 @@
 //! the machine-local tier-to-model mapping (`agent_models`).
 
 use super::{Vault, validate_id, validate_single_line};
+use crate::clients::ClientKind;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -39,8 +40,6 @@ pub fn reserved_agent_id(id: &str) -> Option<&'static str> {
         None
     }
 }
-/// Clients `agent_models` can hold a mapping for.
-pub const MODEL_CLIENTS: [&str; 2] = ["claude-code", "opencode"];
 /// Headings an agent body may use, in this order; only `## Output contract`
 /// is required (it is what the orchestrator gets back).
 pub const AGENT_SECTIONS: [&str; 4] =
@@ -266,9 +265,12 @@ impl Vault {
         effort: Option<&str>,
     ) -> Result<()> {
         ensure!(
-            MODEL_CLIENTS.contains(&client),
+            ClientKind::with_agents().any(|kind| kind.token() == client),
             "client must be one of {}",
-            MODEL_CLIENTS.join(", ")
+            ClientKind::with_agents()
+                .map(ClientKind::token)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         ensure!(
             TIERS.contains(&tier),
@@ -299,9 +301,12 @@ impl Vault {
     /// default (or to none); `false` when there was no row.
     pub fn unset_agent_model(&self, client: &str, tier: &str) -> Result<bool> {
         ensure!(
-            MODEL_CLIENTS.contains(&client),
+            ClientKind::with_agents().any(|kind| kind.token() == client),
             "client must be one of {}",
-            MODEL_CLIENTS.join(", ")
+            ClientKind::with_agents()
+                .map(ClientKind::token)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         ensure!(
             TIERS.contains(&tier),

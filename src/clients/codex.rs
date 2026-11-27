@@ -32,4 +32,5 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             stop: StopJudgment::Flags(ContinueOutput::Block),
         }),
     },
+    agents: None,
 };

@@ -6,9 +6,9 @@ mod search;
 mod transfer;
 
 pub use agent::{
-    AGENT_SECTIONS, AgentMeta, AgentModel, EFFORTS, MODEL_CLIENTS, TIERS, TOOLS,
-    agent_content_problems, agent_meta_problems, agent_section_problems, reserved_agent_id,
-    skill_deprecated, skill_unavailable,
+    AGENT_SECTIONS, AgentMeta, AgentModel, EFFORTS, TIERS, TOOLS, agent_content_problems,
+    agent_meta_problems, agent_section_problems, reserved_agent_id, skill_deprecated,
+    skill_unavailable,
 };
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
