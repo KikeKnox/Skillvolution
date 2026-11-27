@@ -223,6 +223,9 @@ impl Vault {
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<EventRecord>> {
+        if limit < 1 {
+            bail!("invalid --limit {limit}: must be at least 1");
+        }
         let cutoff = match since {
             Some(since) => self.since_cutoff(since)?,
             None => String::new(),

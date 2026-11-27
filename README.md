@@ -64,7 +64,7 @@ flowchart LR
     subgraph bin["skillvolution binary"]
         direction TB
         hooks["hook session-start, prompt,<br/>tool-use, stop, ..."]
-        mcp["serve: MCP over stdio<br/>4 tools"]
+        mcp["serve: MCP over stdio<br/>5 tools"]
         cli["CLI: setup, doctor,<br/>publish, curation"]
     end
     clients -- "hooks or OpenCode plugin" --> hooks
@@ -81,6 +81,7 @@ flowchart LR
 | `get_skill` | Loads a skill's body plus a `next` reminder to report the outcome; the load is recorded |
 | `report_skill_outcome` | Records `helped`, `failed` (naming the wrong step), or `not_applicable` for the loaded version |
 | `publish_skill` | Publishes a new skill or version after a `keep global` / `keep project` verdict |
+| `usage_report` | Read-only summary of local usage telemetry (searches without results, loads without report, usage by client/agent/model, errors) |
 
 Full parameter reference: [docs/cli.md#mcp-tools](docs/cli.md#mcp-tools).
 

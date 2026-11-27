@@ -90,7 +90,7 @@ pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
 
 /// Sets `mcpServers.skillvolution.trust: true` unless the entry already has a `trust`
 /// value: the only way Gemini's config exposes to skip the tool-confirmation prompt for
-/// just our server's tools (search_skills/get_skill/report_skill_outcome/publish_skill),
+/// just our server's tools (search_skills/get_skill/report_skill_outcome/publish_skill/usage_report),
 /// without touching any other server or granting the broader `trust` any server can set.
 /// Only sets it when absent, like `merge_opencode`'s permission grants, so a user who
 /// explicitly turned it off (`trust: false`) keeps that choice across global reruns (a

@@ -172,7 +172,7 @@ failures, and strips an inherited `CLAUDE_PROJECT_DIR` from the child environmen
 
 **`setup --remove`**: deletes the three skill files and the plugin (and emptied skill
 directories; a skill file without its marker is skipped with a note), strips the `mcp`
-entry, the four `skillvolution_*` grants, `task` if setup set it, and the
+entry, the five `skillvolution_*` grants, `task` if setup set it, and the
 AGENTS.md block.
 
 ## Devin CLI

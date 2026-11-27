@@ -607,7 +607,7 @@ The vault is only read, never migrated, for these checks.
 line on stdout. `initialize` negotiates the protocol version (`2025-06-18`,
 `2025-03-26`, `2024-11-05` supported; an unrecognized version falls back to the newest)
 and returns `capabilities.tools` plus `instructions` for the agent. `ping` returns `{}`,
-`tools/list` returns the four tools below, `tools/call` dispatches by `name`.
+`tools/list` returns the five tools below, `tools/call` dispatches by `name`.
 
 Protocol errors are JSON-RPC errors on the same `id`:
 
