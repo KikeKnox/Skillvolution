@@ -1454,9 +1454,9 @@ fn a_symlinked_home_still_counts_as_the_user_dir() {
 }
 
 #[test]
-fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_nothing() {
+fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_only_delegation() {
     let sandbox = Sandbox::new();
-    sandbox.setup("claude-code");
+    sandbox.setup("claude-code,opencode");
     sandbox.publish("[read]", "", false);
     sandbox.ok(&["agents", "add", "reviewer", "sv-mid"]);
     let claude = read(&sandbox.claude("reviewer"));
@@ -1465,8 +1465,18 @@ fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_nothing() {
             == "disallowedTools: Edit, Write, NotebookEdit, MultiEdit, Bash, PowerShell, Monitor, WebFetch, WebSearch, mcp__*, Agent, Task"),
         "{claude}"
     );
+    // An agent with every tool still never delegates.
     let mid = read(&sandbox.claude("sv-mid"));
-    assert!(!mid.contains("disallowedTools"), "{mid}");
+    assert!(
+        mid.lines().any(|l| l == "disallowedTools: Agent, Task"),
+        "{mid}"
+    );
+    let mid = read(&sandbox.opencode("sv-mid"));
+    assert!(
+        mid.contains("  edit: allow\n") && mid.contains("  task: deny\n"),
+        "{mid}"
+    );
+    assert!(!mid.contains("task: allow"), "{mid}");
 }
 
 /// Skill `helper` v1 and an agent `reviewer` using it, added to the sandbox.

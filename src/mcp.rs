@@ -702,8 +702,8 @@ impl Server {
             )?),
             Some(other) => anyhow::bail!("scope must be global or project, not {other:?}"),
         };
-        // An agent published over MCP must declare its tools: only then do the generated
-        // files deny delegation (`disallowedTools: Agent, Task`, OpenCode `task: deny`).
+        // An agent published over MCP must declare its tools, so a model cannot publish an
+        // agent with every tool. (Generated files always deny delegation regardless.)
         // The user's own `skillvolution publish` of an AGENT.md may still omit them.
         if meta.is_some_and(|meta| meta.tools.as_ref().is_none_or(Vec::is_empty)) {
             anyhow::bail!(

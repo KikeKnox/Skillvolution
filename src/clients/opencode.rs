@@ -105,14 +105,8 @@ fn render(agent: &Agent, model: Option<&ModelChoice>) -> FrontMatter {
         let rule = if meta.allows(tool) { "allow" } else { "deny" };
         front.push(format!("  {key}: {rule}"));
     }
-    front.push(format!(
-        "  task: {}",
-        if meta.tools.is_some() {
-            "deny"
-        } else {
-            "allow"
-        }
-    ));
+    // A Skillvolution agent never delegates to other subagents.
+    front.push("  task: deny".into());
     if !meta.allows("mcp") {
         warnings.push("OpenCode cannot block MCP tools by kind; not enforced".into());
     }

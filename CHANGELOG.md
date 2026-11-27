@@ -58,6 +58,9 @@ agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill 
 - `publish_agent` counts as a review for the Stop hook and the OpenCode plugin, and the review
   reminder names `agent-evaluation` and `publish_agent`.
 - `hook session-start --client` accepts `opencode`, which the plugin now uses for its catalog.
+- Generated agent files always deny delegation (Claude Code `disallowedTools: Agent, Task`,
+  OpenCode `task: deny`), not only when the agent declares `tools`; files regenerate on the next
+  sync or session start.
 
 ## [v0.6.1]
 

@@ -370,14 +370,14 @@ session-start note asks for a restart after a refresh.
 
 - **Claude Code**: `.claude/agents/<id>.md` (global `$CLAUDE_CONFIG_DIR/agents`). Frontmatter `name`,
   `description`, `model` (`opus|sonnet|haiku` by tier), `effort`, and `disallowedTools` derived
-  from the denied abstract tools (`shell` denies `Bash, PowerShell, Monitor`). An agent with a
-  `tools` restriction also denies `Agent, Task`, so it cannot delegate to an unrestricted
-  subagent such as `general-purpose`. Cursor also reads this directory and may not accept the model
+  from the denied abstract tools (`shell` denies `Bash, PowerShell, Monitor`). Every generated
+  file also denies `Agent, Task`, so no Skillvolution agent can delegate to another subagent
+  (such as `general-purpose`). Cursor also reads this directory and may not accept the model
   aliases.
 - **OpenCode**: `.opencode/agents/<id>.md` (global `~/.config/opencode/agents`). `mode: subagent`,
   `model` only if configured with `agents models add opencode ...` (or `set`), and `permission` entries
-  set to `deny` for edit, bash, webfetch, websearch, and `task: deny` for a restricted agent
-  (`task: allow` otherwise, so a user-level file cannot leak a deny). OpenCode can deny MCP tools
+  set to `allow` or `deny` for edit, bash, webfetch and websearch, and always `task: deny`, so no
+  Skillvolution agent can delegate to another subagent. OpenCode can deny MCP tools
   only per server with a wildcard (`<server>_*`); skillvolution does not write those because it
   does not know your servers, so a denied `mcp` is not enforced (it warns). Effort is not written
   because markdown agents do not document it.

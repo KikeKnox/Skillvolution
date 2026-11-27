@@ -550,9 +550,9 @@ skillvolution agents import PATH [-o DIR]
   changes the file, and the subagent is told to pass only the number) and the
   subagent is told to load exactly that version; a newer version reaches the agent only through
   `agents sync --apply`, after you have seen the `! skill ... -> ...` flag. `add` prints a note
-  when an agent with shell or edit tools lists skills. A restricted agent (`tools` set) also
-  denies delegation (Claude Code `Agent, Task`; OpenCode `task: deny`), and the Claude Code
-  `shell` tool covers `Bash, PowerShell, Monitor`. Hand edits are detected by a hash that skips
+  when an agent with shell or edit tools lists skills. Every generated file denies delegation
+  (Claude Code `Agent, Task`; OpenCode `task: deny`) whatever the agent's `tools`, and the
+  Claude Code `shell` tool covers `Bash, PowerShell, Monitor`. Hand edits are detected by a hash that skips
   only the marker line right after the frontmatter, so an extra marker-looking line counts as an
   edit.
 - OpenCode files carry an explicit allow/deny `permission:` map. OpenCode merges same-named

@@ -101,12 +101,8 @@ fn render(agent: &Agent, model: Option<&ModelChoice>) -> FrontMatter {
             tools.push(names);
         }
     }
-    // A restricted agent must not delegate to an unrestricted subagent.
-    if meta.tools.is_some() {
-        tools.push("Agent, Task");
-    }
-    if !tools.is_empty() {
-        front.push(format!("disallowedTools: {}", tools.join(", ")));
-    }
+    // A Skillvolution agent never delegates to other subagents.
+    tools.push("Agent, Task");
+    front.push(format!("disallowedTools: {}", tools.join(", ")));
     (front, Vec::new())
 }

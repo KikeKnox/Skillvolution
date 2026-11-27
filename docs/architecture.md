@@ -329,10 +329,10 @@ models need the agent reinstalled with `install_agent`.
 **Generation** (`agents add`/`sync`), one file per agent and configured client:
 - Claude Code (`.claude/agents/<id>.md`, global `$CLAUDE_CONFIG_DIR/agents`): frontmatter `name`,
   `description`, `model`, `effort`, `disallowedTools` built from the denied abstract tools
-  (edit -> `Edit, Write, NotebookEdit, MultiEdit`; shell -> `Bash, PowerShell, Monitor`; web -> `WebFetch, WebSearch`; mcp -> `mcp__*`; a restricted agent also denies `Agent, Task`).
+  (edit -> `Edit, Write, NotebookEdit, MultiEdit`; shell -> `Bash, PowerShell, Monitor`; web -> `WebFetch, WebSearch`; mcp -> `mcp__*`; every file also denies `Agent, Task`, so no generated agent delegates).
 - OpenCode (`.opencode/agents/<id>.md`, global `~/.config/opencode/agents`): `description`,
   `mode: subagent`, `model`, and a `permission` block with `deny` for edit, bash, webfetch and
-  websearch, plus `task: deny` (restricted) or `task: allow`. MCP tools can only be denied per server
+  websearch, plus `task: deny` always (no generated agent delegates). MCP tools can only be denied per server
   (`<server>_*`), which we do not write, so a denied `mcp` is not enforced (warning);
   effort is not written (warning).
 - The body is the content plus a line telling the agent to load its `skills` with `get_skill` at the pinned versions (`id vN (#hash)`, resolved when the file is rendered; the hash is a content digest for change detection, and skills not available from the agent's scope are left out, along with the report line when none remains), and a second line asking it to call `report_skill_outcome` for each before returning (`import` strips both).

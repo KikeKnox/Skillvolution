@@ -229,7 +229,7 @@ The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`)
   then only after a backup.
 - **Pinned skills.** Listed skills are pinned to the version seen when the file was
   generated; `agents sync` flags newer ones.
-- **No nesting.** A restricted agent cannot delegate to other subagents.
+- **No nesting.** A Skillvolution agent can never delegate to other subagents.
 
 See [docs/cli.md#agents](docs/cli.md#agents) and
 [docs/architecture.md#agents](docs/architecture.md#agents).
