@@ -256,8 +256,8 @@ field and runs, in `hook.rs`:
 Cursor is not wired: its `beforeSubmitPrompt` can only allow or block the prompt, with
 no field that adds context, so `hook prompt --client cursor` fails (stderr, exit 0,
 like every hook). OpenCode has no hook config; its plugin calls `hook prompt` from the
-`chat.message` hook for each top-level user message and appends the result to that
-turn's system prompt. Devin's `UserPromptSubmit` payload follows its docs but is
+`chat.message` hook for each top-level user message (as `--client opencode`) and appends
+the result to that turn's system prompt. Devin's `UserPromptSubmit` payload follows its docs but is
 unverified against a live session.
 
 ## MCP tool changes for accountability
@@ -392,7 +392,8 @@ The `events` table records, locally, what the vault was used for: `session_start
 carries the client and its stored version, the project key, the session when the client gives
 one, a subject (a skill or agent id) and a small JSON `data`. Never stored: prompt text,
 transcripts, file contents or absolute paths; queries are truncated and run through the credential
-detector. Recording never fails the operation that triggered it. The table is never exported and
+detector. OpenCode's delegations and fired reminders come from its plugin, through
+`hook delegation` and `hook reminder`. Recording never fails the operation that triggered it. The table is never exported and
 nothing is sent anywhere. Access: `skillvolution telemetry summary|events` and the read-only MCP
 tool `usage_report`, which the `evolution` skill tells agents to use for questions about vault use.
 

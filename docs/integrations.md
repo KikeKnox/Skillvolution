@@ -175,6 +175,9 @@ project setups, a 15-second timeout) and the plugin appends the suggestions to t
 turn's system prompt; subagent sessions get none, and a failed lookup only costs that
 turn's suggestions. The plugin never spawns its own prompt turn, retries catalog-load
 failures, and strips an inherited `CLAUDE_PROJECT_DIR` from the child environment.
+Every call names `--client opencode`, so the telemetry attributes it to OpenCode: each
+top-level `task`/`subagent` delegation is recorded through `hook delegation` and each
+reminder that fires through `hook reminder`, both fire and forget.
 
 **`setup --remove`**: deletes the four skill files and the plugin (and emptied skill
 directories; a skill file without its marker is skipped with a note), strips the `mcp`

@@ -830,6 +830,50 @@ fn record_delegation(
     );
 }
 
+/// A delegation a client's plugin saw (the OpenCode plugin's `hook delegation`):
+/// `{"agent": id, "model"?: model, "session"?: id}` in `input`, recorded as a
+/// `delegation` event exactly like the ones the Claude Code Stop hook records.
+pub fn plugin_delegation(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<()> {
+    let input: Value = serde_json::from_str(input)?;
+    let agent = input["agent"]
+        .as_str()
+        .filter(|agent| !agent.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("delegation input needs an `agent` string"))?;
+    record_delegation(
+        vault,
+        project,
+        Some(client),
+        input["session"].as_str(),
+        agent,
+        input["model"].as_str(),
+    );
+    Ok(())
+}
+
+/// A review reminder a client's plugin added (the OpenCode plugin's `hook reminder`):
+/// `{"session"?: id}` in `input`, recorded as a `fired` `review_reminder` event.
+pub fn plugin_reminder(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<()> {
+    let input: Value = serde_json::from_str(input)?;
+    log_reminder(
+        vault,
+        Some(client),
+        project,
+        input["session"].as_str(),
+        "fired",
+    );
+    Ok(())
+}
+
 /// What one transcript span shows, for telemetry.
 struct SpanScan {
     /// Successful delegations (agent, model named in the call), in order.

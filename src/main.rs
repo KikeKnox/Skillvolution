@@ -1146,6 +1146,16 @@ impl AnyClient {
         })
         .to_string()
     }
+
+    /// The prompt-submit event `hook prompt` names in its output: the client's own
+    /// (`HookClient::prompt_event`), or `UserPromptSubmit` for a client whose hooks are not
+    /// `hook` commands (the OpenCode plugin reads only `additionalContext`).
+    fn prompt_event(self) -> Option<&'static str> {
+        if self.0.spec().hooks.commands.is_some() {
+            return HookClient(self.0).prompt_event();
+        }
+        Some("UserPromptSubmit")
+    }
 }
 
 impl clap::ValueEnum for AnyClient {
@@ -1206,10 +1216,30 @@ enum HookEvent {
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
-        /// The client emitting the hook: claude-code, devin, codex, or gemini (cursor
-        /// cannot inject prompt context). Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
-        client: HookClient,
+        /// The client emitting the hook: claude-code, devin, codex, gemini, or opencode
+        /// (its plugin); cursor cannot inject prompt context. Defaults to claude-code.
+        #[arg(long, value_enum, default_value_t = AnyClient::CLAUDE_CODE)]
+        client: AnyClient,
+    },
+    /// Record a delegation a client's plugin saw (the OpenCode plugin): reads
+    /// `{"agent", "model"?, "session"?}` JSON on stdin and prints nothing.
+    Delegation {
+        /// Project key. Detected like `hook prompt` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// The client whose plugin saw the delegation (opencode).
+        #[arg(long, value_enum)]
+        client: AnyClient,
+    },
+    /// Record a review reminder a client's plugin added (the OpenCode plugin): reads
+    /// `{"session"?}` JSON on stdin and prints nothing.
+    Reminder {
+        /// Project key. Detected like `hook prompt` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// The client whose plugin added the reminder (opencode).
+        #[arg(long, value_enum)]
+        client: AnyClient,
     },
     /// Record work/review tool calls for a session (PostToolUse of the flag-tracked
     /// clients: Devin, Codex, Gemini CLI, Cursor).
@@ -1242,6 +1272,8 @@ impl HookEvent {
         match self {
             HookEvent::SessionStart { client, .. } => ("session-start", Some(client.0)),
             HookEvent::Prompt { client, .. } => ("prompt", Some(client.0)),
+            HookEvent::Delegation { client, .. } => ("delegation", Some(client.0)),
+            HookEvent::Reminder { client, .. } => ("reminder", Some(client.0)),
             HookEvent::ToolUse { client } => ("tool-use", Some(client.0)),
             HookEvent::Stop { client, .. } => ("stop", Some(client.0)),
             HookEvent::SessionEnd => ("session-end", None),
@@ -1398,6 +1430,18 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                     })
                 );
             }
+        }
+        HookEvent::Delegation { project, client } => {
+            let input = read_stdin()?;
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            hook::plugin_delegation(&open(db)?, project.as_deref(), &input, client.0)?;
+        }
+        HookEvent::Reminder { project, client } => {
+            let input = read_stdin()?;
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            hook::plugin_reminder(&open(db)?, project.as_deref(), &input, client.0)?;
         }
         HookEvent::ToolUse { client } => {
             hook::tool_use(&open(db)?, &read_stdin()?, client.work_tools())?

@@ -49,6 +49,8 @@ agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill 
   shows and sets the thresholds (default: 30 days, 75% of active projects, more than 5 projects,
   3 delegations each); `doctor` reports candidates and promotes them with `--fix`.
 - `publish_rejected` events are also recorded for refused `publish_skill` calls.
+- `hook delegation` and `hook reminder`: the OpenCode plugin records its delegations and fired
+  review reminders through them, so OpenCode delegations count toward promotion.
 
 ### Changed
 
@@ -57,7 +59,8 @@ agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill 
   back out. This applies to `agents add/remove/sync` too, so those commands now edit that file.
 - `publish_agent` counts as a review for the Stop hook and the OpenCode plugin, and the review
   reminder names `agent-evaluation` and `publish_agent`.
-- `hook session-start --client` accepts `opencode`, which the plugin now uses for its catalog.
+- `hook session-start --client` and `hook prompt --client` accept `opencode`, which the
+  plugin now passes, so OpenCode's catalog and `suggest` events are its own.
 - Generated agent files always deny delegation (Claude Code `disallowedTools: Agent, Task`,
   OpenCode `task: deny`), not only when the agent declares `tools`; files regenerate on the next
   sync or session start.

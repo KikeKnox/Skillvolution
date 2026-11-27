@@ -496,3 +496,124 @@ fn opening_the_vault_drops_events_past_the_retention() {
     let kept = events(&db, None);
     assert_eq!(kept.len(), 1, "{kept:?}");
 }
+
+#[test]
+fn opencode_plugin_hooks_record_delegations_reminders_and_suggestions_as_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_with_skill(dir.path());
+    let mut vault = Vault::open(&db).unwrap();
+    Draft::new("reviewer").publish_agent(&mut vault);
+    drop(vault);
+    let delegate = |project: &str, input: Value| {
+        let out = hook_cmd(
+            &db,
+            &["delegation", "--client", "opencode", "--project", project],
+            &input.to_string(),
+        );
+        assert!(out.status.success(), "{}", support::stderr(&out));
+        assert!(out.stdout.is_empty());
+    };
+
+    delegate("p0", json!({"agent": "reviewer", "session": "o1"}));
+    delegate(
+        "p0",
+        json!({"agent": "sv-low", "model": "ollama/llama3", "session": "o1"}),
+    );
+    delegate("p0", json!({"agent": "general"}));
+    let seen: Vec<_> = events(&db, Some("delegation"))
+        .iter()
+        .map(|e| {
+            (
+                e.client.clone().unwrap(),
+                e.subject.clone().unwrap(),
+                e.version,
+                e.session.clone(),
+                e.data.clone(),
+            )
+        })
+        .collect();
+    let opencode = || "opencode".to_owned();
+    assert_eq!(
+        seen,
+        [
+            (
+                opencode(),
+                "reviewer".to_owned(),
+                Some(1),
+                Some("o1".to_owned()),
+                json!({"source": "vault", "level": "mid", "model": null})
+            ),
+            (
+                opencode(),
+                "sv-low".to_owned(),
+                None,
+                Some("o1".to_owned()),
+                json!({"source": "builtin", "level": "low", "model": "ollama/llama3"})
+            ),
+            (
+                opencode(),
+                "general".to_owned(),
+                None,
+                None,
+                json!({"source": "other", "level": null, "model": null})
+            ),
+        ]
+    );
+
+    // The plugin's delegations count toward promotion like Claude Code's.
+    for project in 1..6 {
+        for _ in 0..3 {
+            delegate(&format!("p{project}"), json!({"agent": "reviewer"}));
+        }
+    }
+    delegate("p0", json!({"agent": "reviewer"}));
+    delegate("p0", json!({"agent": "reviewer"}));
+    let status = Vault::open(&db).unwrap().promotion_status().unwrap();
+    let ids: Vec<_> = status.candidates.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["reviewer"], "{status:?}");
+
+    let out = hook_cmd(
+        &db,
+        &["reminder", "--client", "opencode", "--project", "p0"],
+        &json!({"session": "o1"}).to_string(),
+    );
+    assert!(out.status.success() && out.stdout.is_empty());
+    let reminder = only(events(&db, Some("review_reminder")));
+    assert_eq!(reminder.client.as_deref(), Some("opencode"));
+    assert_eq!(reminder.session.as_deref(), Some("o1"));
+    assert_eq!(reminder.data, json!({"state": "fired"}));
+
+    // `hook prompt --client opencode` prints what the plugin has always read and
+    // records the suggestion as OpenCode's.
+    let prompt =
+        json!({"session_id": "o1", "prompt": "sqlite database locked concurrent writers"})
+            .to_string();
+    let as_opencode = hook_cmd(
+        &db,
+        &["prompt", "--client", "opencode", "--project", "p0"],
+        &prompt,
+    );
+    let as_claude = hook_cmd(&db, &["prompt", "--project", "p0"], &prompt);
+    assert!(as_opencode.status.success(), "{as_opencode:?}");
+    assert_eq!(as_opencode.stdout, as_claude.stdout);
+    let printed: Value = serde_json::from_slice(&as_opencode.stdout).unwrap();
+    assert_eq!(
+        printed["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    let suggests = events(&db, Some("suggest"));
+    let clients: Vec<_> = suggests.iter().map(|e| e.client.as_deref()).collect();
+    assert_eq!(clients, [Some("opencode"), Some("claude-code")]);
+    assert_eq!(suggests[0].session.as_deref(), Some("o1"));
+
+    // A payload without an agent is a hook error, never a failed hook.
+    let bad = hook_cmd(
+        &db,
+        &["delegation", "--client", "opencode"],
+        &json!({"session": "o1"}).to_string(),
+    );
+    assert!(bad.status.success());
+    let error = only(events(&db, Some("hook_error")));
+    assert_eq!(error.client.as_deref(), Some("opencode"));
+    assert_eq!(error.data["hook"], "delegation");
+}

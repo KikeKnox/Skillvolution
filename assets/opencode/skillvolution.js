@@ -4,6 +4,7 @@
 // that did work (file edits or get_skill loads) ends without a report or
 // publication, adds a review reminder to the system prompt of the following
 // turns until the work is reviewed. It never prompts the session itself, so no extra turn is spent.
+// Delegations and fired reminders are recorded in the local telemetry through the binary.
 // One default export loads in both plugin systems: OpenCode 1.x calls `server`
 // (its hooks object), OpenCode 2.x calls `setup` (hooks registered on its context)
 // and ignores the other key.
@@ -133,9 +134,9 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
   // `hook prompt` reads the prompt from stdin and prints the matching skills,
   // or nothing when none is relevant. A failure only costs this turn's
   // suggestions, like a failed catalog load.
-  const loadSuggestions = (prompt) =>
+  const loadSuggestions = (prompt, sessionID) =>
     new Promise((resolve) => {
-      const args = ["--db", DB, "hook", "prompt"];
+      const args = ["--db", DB, "hook", "prompt", "--client", "opencode"];
       if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
       const child = execFile(BIN, args, options, (error, stdout) => {
@@ -146,8 +147,25 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
         resolve(contextText(stdout));
       });
       child.stdin?.on("error", () => {});
-      child.stdin?.end(JSON.stringify({ prompt }));
+      child.stdin?.end(JSON.stringify({ prompt, session_id: sessionID }));
     });
+
+  // `hook delegation` and `hook reminder` record a telemetry event for OpenCode from
+  // the JSON on their stdin. Fire and forget: a failure only loses that event.
+  const record = (hook, payload) => {
+    try {
+      const args = ["--db", DB, "hook", hook, "--client", "opencode"];
+      if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
+      const options = { cwd: directory, env, timeout: 15000 };
+      const child = execFile(BIN, args, options, (error) => {
+        if (error) log("warn", `${hook} event not recorded: ${error.message}`);
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(JSON.stringify(payload));
+    } catch (error) {
+      log("warn", `${hook} event not recorded: ${error?.message ?? error}`);
+    }
+  };
 
   // Subagent sessions hand their work and reviews to the parent:
   // flags always live on the top-level session so delegated edits still get
@@ -198,7 +216,7 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       suggestions.set(
         sessionID,
         parentOf(sessionID)
-          .then((parent) => (parent ? "" : loadSuggestions(text)))
+          .then((parent) => (parent ? "" : loadSuggestions(text, sessionID)))
           .catch(() => ""),
       );
       capped(suggestions);
@@ -218,6 +236,13 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       if (tool.endsWith(LOAD_TOOL)) s.worked = true;
       if (Object.hasOwn(DELEGATION_TOOLS, tool)) {
         const id = args?.[DELEGATION_TOOLS[tool]];
+        // Every delegation is recorded (the binary tells built-in, vault and other
+        // agents apart), like the Claude Code Stop hook does.
+        if (typeof id === "string" && id) {
+          const delegation = { agent: id, session: sessionID };
+          if (typeof args?.model === "string") delegation.model = args.model;
+          record("delegation", delegation);
+        }
         const version = managedAgentVersion(agentRoot, id);
         if (version !== null) {
           s.worked = true;
@@ -250,8 +275,10 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       // done after the last review (same ordering as the Stop hook) and earns a
       // reminder on the following turns. Error: aborted or failed turns are not
       // reviewed; a pending reminder survives either way.
-      if (kind === "idle" && s.worked) s.remind = true;
-      else if (!s.remind) s.delegated.clear();
+      if (kind === "idle" && s.worked) {
+        s.remind = true;
+        record("reminder", { session: sessionID });
+      } else if (!s.remind) s.delegated.clear();
       s.worked = false;
     },
   };

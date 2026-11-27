@@ -221,6 +221,8 @@ await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad1", args: { sub
 const misplaced = await idle("bad1");
 await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad2", args: { subagent_type: "wrongid" } });
 const wrongId = await idle("bad2");
+// A subagent's own delegation is not the top-level session's: not recorded.
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "child", args: { subagent_type: "nested" } });
 // A hook that gets garbage must not throw.
 let threw = false;
 try {
@@ -265,9 +267,12 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n\
              *\"hook prompt\"*) cat > '{}'; printf '%s' '{suggested}' ;;\n\
+             *\"hook delegation\"*) printf 'delegation %s\\n' \"$(cat)\" >> '{events}' ;;\n\
+             *\"hook reminder\"*) printf 'reminder %s\\n' \"$(cat)\" >> '{events}' ;;\n\
              *) printf '%s' '{catalog}' ;;\nesac\n",
             project.join("args.log").display(),
-            stdin_log.display()
+            stdin_log.display(),
+            events = project.join("events.log").display(),
         ),
     )
     .unwrap();
@@ -355,6 +360,67 @@ fn session_start_calls(temp: &tempfile::TempDir) -> Vec<String> {
                 .map(|(_, rest)| rest.trim().to_owned())
         })
         .collect()
+}
+
+/// The events the plugin recorded through the fake binary (`hook delegation` and `hook
+/// reminder`), each as (hook, stdin JSON), sorted: the calls are fire and forget, so
+/// they can land in any order. Also checks that every one named `--client opencode` and
+/// the setup's project key.
+#[cfg(unix)]
+fn recorded_events(temp: &tempfile::TempDir) -> Vec<(String, serde_json::Value)> {
+    let args = fs::read_to_string(temp.path().join("args.log")).unwrap();
+    let calls: Vec<&str> = args
+        .lines()
+        .filter(|line| line.contains(" hook delegation") || line.contains(" hook reminder"))
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .all(|line| line.contains(" --client opencode") && line.contains(" --project ")),
+        "{calls:?}"
+    );
+    let log = fs::read_to_string(temp.path().join("events.log")).unwrap_or_default();
+    let mut events: Vec<(String, serde_json::Value)> = log
+        .lines()
+        .map(|line| {
+            let (hook, json) = line.split_once(' ').unwrap();
+            (hook.to_owned(), serde_json::from_str(json).unwrap())
+        })
+        .collect();
+    assert_eq!(events.len(), calls.len(), "{events:?} {calls:?}");
+    events.sort_by_key(event_order);
+    events
+}
+
+/// Orders recorded events by hook, then agent, session and model (the JSON key order
+/// differs between the plugin and the test).
+#[cfg(unix)]
+fn event_order((hook, json): &(String, serde_json::Value)) -> (String, String, String, String) {
+    let field = |key: &str| json[key].as_str().unwrap_or_default().to_owned();
+    (hook.clone(), field("agent"), field("session"), field("model"))
+}
+
+/// `(hook, stdin)` pairs as `recorded_events` returns them, from (hook, agent or "", session,
+/// model) tuples.
+#[cfg(unix)]
+fn expected_events(
+    events: &[(&str, &str, &str, Option<&str>)],
+) -> Vec<(String, serde_json::Value)> {
+    let mut expected: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .map(|(hook, agent, session, model)| {
+            let mut json = serde_json::json!({ "session": session });
+            if !agent.is_empty() {
+                json["agent"] = (*agent).into();
+            }
+            if let Some(model) = model {
+                json["model"] = (*model).into();
+            }
+            ((*hook).to_owned(), json)
+        })
+        .collect();
+    expected.sort_by_key(event_order);
+    expected
 }
 
 /// A top-level session asks for the full catalog (skills and agents block, after the
@@ -468,6 +534,45 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     );
     let stdin: serde_json::Value = serde_json::from_slice(&fs::read(&stdin_log).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
+    assert_eq!(stdin["session_id"], "top");
+    assert_prompt_names_opencode(&temp);
+    // Every top-level delegation is recorded (the binary tells the kinds apart), and
+    // every reminder that fired.
+    assert_eq!(
+        recorded_events(&temp),
+        expected_events(&[
+            ("delegation", "unmanaged", "u", None),
+            ("delegation", "reviewer", "m", None),
+            ("delegation", "global-reviewer", "g", None),
+            ("delegation", "reviewer", "m2", None),
+            ("delegation", "global-reviewer", "m2", None),
+            ("delegation", "reviewer", "m2", None),
+            ("delegation", "misplaced", "bad1", None),
+            ("delegation", "wrongid", "bad2", None),
+            ("delegation", "nogit-agent", "n1", None),
+            ("reminder", "", "top", None),
+            ("reminder", "", "m", None),
+            ("reminder", "", "g", None),
+            ("reminder", "", "m2", None),
+            ("reminder", "", "e2", None),
+            ("reminder", "", "o1", None),
+            ("reminder", "", "p6", None),
+            ("reminder", "", "n1", None),
+        ])
+    );
+}
+
+/// The plugin's `hook prompt` calls name OpenCode, so its suggestions are recorded as
+/// OpenCode's.
+#[cfg(unix)]
+fn assert_prompt_names_opencode(temp: &tempfile::TempDir) {
+    let args = fs::read_to_string(temp.path().join("args.log")).unwrap();
+    let prompts: Vec<&str> = args.lines().filter(|l| l.contains(" hook prompt")).collect();
+    assert!(!prompts.is_empty());
+    assert!(
+        prompts.iter().all(|l| l.contains(" hook prompt --client opencode")),
+        "{prompts:?}"
+    );
 }
 
 /// The driver for `plugin_loads_and_works_under_the_opencode_2_loader`: checks the module
@@ -595,6 +700,9 @@ const global = await idle("g");
 // A delegation that failed (e.g. an unknown agent) is not owed a report.
 await tool("subagent", "f", { agent: "reviewer", description: "d", prompt: "p" }, "error");
 const failedDelegation = await idle("f");
+// A per-call model is recorded with the delegation.
+await tool("subagent", "sm", { agent: "sv-low", model: "ollama/llama3", description: "d", prompt: "p" });
+await idle("sm");
 // OpenCode 2 renamed apply_patch/multiedit: its `patch` tool edits files too.
 await tool("patch", "p2", { patch: "x" });
 const patched = await idle("p2");
@@ -703,4 +811,21 @@ fn plugin_loads_and_works_under_the_opencode_2_loader() {
     let stdin: serde_json::Value =
         serde_json::from_slice(&fs::read(temp.path().join("prompt-stdin.json")).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
+    assert_prompt_names_opencode(&temp);
+    // The failed delegation is not recorded; the built-in one carries its model.
+    assert_eq!(
+        recorded_events(&temp),
+        expected_events(&[
+            ("delegation", "unmanaged", "u", None),
+            ("delegation", "reviewer", "m", None),
+            ("delegation", "global-reviewer", "g", None),
+            ("delegation", "sv-low", "sm", Some("ollama/llama3")),
+            ("reminder", "", "top", None),
+            ("reminder", "", "m", None),
+            ("reminder", "", "g", None),
+            ("reminder", "", "p2", None),
+            ("reminder", "", "e2", None),
+            ("reminder", "", "d1", None),
+        ])
+    );
 }

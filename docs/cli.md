@@ -272,11 +272,12 @@ is `Skillvolution: vault skills matching this request:`, one
 and call `report_skill_outcome` afterwards. Prints nothing when no skill is relevant.
 
 `--client` (default `claude-code`) picks `EVENT`: `UserPromptSubmit` for `claude-code`,
-`codex`, and `devin`; `BeforeAgent` for `gemini`. `cursor` is rejected (`this client's
+`codex`, `devin` and `opencode`; `BeforeAgent` for `gemini`. `cursor` is rejected (`this client's
 prompt hook cannot inject context` on stderr, exit 0), since Cursor's
 `beforeSubmitPrompt` cannot add context. `--project` resolves like `serve`'s. The
-OpenCode plugin calls this subcommand itself with `{"prompt": …}` on stdin. Exit code is
-always `0`.
+OpenCode plugin calls this subcommand itself as `--client opencode` with
+`{"prompt": …, "session_id": …}` on stdin, so its `suggest` events are OpenCode's. Exit
+code is always `0`.
 
 ### hook tool-use
 
@@ -311,6 +312,30 @@ consumes the session's worked/reviewed flags and prints the client's continue fo
 `{"decision":"block","reason":…}` (`devin`, `codex`), `{"decision":"deny","reason":…}`
 (`gemini`), `{"followup_message":…}` (`cursor`). Prints nothing when there is nothing
 unreviewed.
+
+### hook delegation
+
+```
+skillvolution hook delegation --client CLIENT [--project KEY]
+```
+
+Records a `delegation` event for a delegation a client's plugin saw (the OpenCode plugin
+calls it, fire and forget, as `--client opencode` for every `task`/`subagent` call of a
+top-level session). Reads `{"agent": ID, "model"?: MODEL, "session"?: ID}` on stdin and
+records the same fields as the Claude Code Stop hook: the agent, `source` (`builtin` for
+`sv-*`, `vault` for a vault agent visible from the project, with its tier and version,
+else `other`) and the model when the call named one. Prints nothing; a payload without an
+`agent` is a hook error (exit 0).
+
+### hook reminder
+
+```
+skillvolution hook reminder --client CLIENT [--project KEY]
+```
+
+Records a `review_reminder` event with state `fired` for a reminder a client's plugin
+added (the OpenCode plugin, once per turn that ends with unreviewed work). Reads
+`{"session"?: ID}` on stdin. Prints nothing.
 
 ### hook session-end
 
