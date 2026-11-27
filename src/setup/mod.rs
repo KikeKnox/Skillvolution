@@ -17,6 +17,7 @@ mod plugin;
 mod prompt;
 mod remove;
 
+pub(crate) use claude_cli::find_on_path;
 pub(crate) use client::{ClientKind, Clients, Scope};
 pub(crate) use inspect::{
     claude_mcp_registered, configured_bin, double_install_warning, is_configured,
@@ -132,7 +133,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
             hooks::require_utf8(&db, "--db")?;
             // Before any client config is written, so an unusable --db leaves no config
             // pointing at it.
-            Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+            let vault = Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
             crate::vault::warn_if_unsafe(&db);
             let clients = if args.client.is_empty() {
                 Clients::all()
@@ -140,6 +141,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
                 Clients::parse(&args.client)?
             };
             run_project(project, clients, &bin, &db, args.project_key.as_deref())?;
+            record_client_versions(&vault, clients);
         }
         None => {
             let clients = if args.client.is_empty() {
@@ -151,6 +153,31 @@ pub fn run(args: SetupArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stores the version each client in `clients` reports (`<cli> --version`, detected here
+/// and in `doctor` only) so hooks can read it from the vault. A client whose CLI is
+/// missing or unrecognised has nothing stored: its latest known version is assumed. Never
+/// fails setup; a version newer than the last tested is noted on stderr.
+fn record_client_versions(vault: &Vault, clients: Clients) {
+    for kind in clients.iter() {
+        let Some(version) = kind.detect_version() else {
+            continue;
+        };
+        if let Err(error) = vault.record_client_version(kind, version) {
+            eprintln!(
+                "Could not record the {} version: {error:#}",
+                kind.display_name()
+            );
+        }
+        if kind.is_unverified(version) {
+            eprintln!(
+                "Note: {} {version} is newer than the last version tested with Skillvolution; \
+                 it is unverified.",
+                kind.display_name()
+            );
+        }
+    }
 }
 
 /// `--dry-run` without `--remove`: computes exactly the edits a real run would write and

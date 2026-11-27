@@ -722,3 +722,180 @@ fn without_fix_nothing_is_written() {
     assert!(!stdout.contains("[fixed]"), "{stdout}");
     assert!(before == snapshot(), "doctor without --fix must not write");
 }
+
+// --- client versions ------------------------------------------------------
+//
+// Fake CLIs on a private PATH print the version a test wants, so nothing here depends on
+// which clients are installed on the machine running it.
+
+/// A directory with one fake CLI per `(name, version output)`; with an empty output the
+/// CLI prints nothing, which is not a recognisable version.
+#[cfg(unix)]
+fn fake_clis(dir: &Path, clis: &[(&str, &str)]) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    for (name, version) in clis {
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '{version}'; fi\nexit 0\n"
+        );
+        write_executable(&dir.join(name), &script);
+    }
+    dir.to_owned()
+}
+
+#[cfg(unix)]
+fn stored_version(db: &Path, client: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT version FROM client_versions WHERE client = ?1",
+        [client],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_records_the_version_each_detected_client_reports() {
+    let env = Env::new();
+    let bin_dir = fake_clis(
+        &env.home.path().join("bin"),
+        &[
+            ("claude", "2.1.332 (Claude Code)"),
+            ("opencode", "opencode v2.2.5"),
+            ("devin", ""),
+        ],
+    );
+    let output = env
+        .setup()
+        .args(["--client", "claude-code,opencode,devin"])
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert_eq!(
+        stored_version(&env.db, "claude-code").as_deref(),
+        Some("2.1.332")
+    );
+    assert_eq!(
+        stored_version(&env.db, "opencode").as_deref(),
+        Some("2.2.5")
+    );
+    // No recognisable output: nothing stored, the latest known version is assumed.
+    assert_eq!(stored_version(&env.db, "devin"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_warns_when_a_version_changed_since_setup_and_fix_records_it() {
+    let env = Env::new();
+    let bin_dir = fake_clis(
+        &env.home.path().join("bin"),
+        &[("claude", ""), ("opencode", "opencode v2.2.4")],
+    );
+    assert_success(
+        &env.setup()
+            .args(["--client", "opencode"])
+            .env("PATH", &bin_dir)
+            .output()
+            .unwrap(),
+    );
+    let healthy = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    let stdout = String::from_utf8(healthy.stdout).unwrap();
+    assert!(stdout.contains("[ok] OpenCode version: 2.2.4"), "{stdout}");
+
+    fake_clis(&bin_dir, &[("opencode", "opencode v2.2.5")]);
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[warn] OpenCode version: 2.2.5: changed since setup (was 2.2.4)"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stored_version(&env.db, "opencode").as_deref(),
+        Some("2.2.4")
+    );
+
+    let fixed = env
+        .doctor()
+        .arg("--fix")
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(fixed.stdout).unwrap();
+    assert!(
+        stdout.contains("[fixed] OpenCode version: recorded OpenCode 2.2.5"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stored_version(&env.db, "opencode").as_deref(),
+        Some("2.2.5")
+    );
+    let again = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    let stdout = String::from_utf8(again.stdout).unwrap();
+    assert!(stdout.contains("[ok] OpenCode version: 2.2.5"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_flags_a_version_newer_than_the_last_tested_as_unverified() {
+    let env = Env::new();
+    let bin_dir = fake_clis(
+        &env.home.path().join("bin"),
+        &[("opencode", "opencode v9.0.0")],
+    );
+    let setup = env
+        .setup()
+        .args(["--client", "opencode"])
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    assert_success(&setup);
+    assert!(
+        String::from_utf8_lossy(&setup.stderr).contains("unverified"),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[warn] OpenCode version: 9.0.0: newer than the last version tested"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("changed since setup"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_says_not_detected_for_a_cli_without_a_version_instead_of_failing() {
+    let env = Env::new();
+    let bin_dir = fake_clis(&env.home.path().join("bin"), &[("opencode", "")]);
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] OpenCode version: not detected"),
+        "{stdout}"
+    );
+}
+
+// A CLI that never answers must not hang setup or doctor: detection kills it after its
+// time limit and carries on.
+#[cfg(unix)]
+#[test]
+fn a_hanging_cli_does_not_hang_detection() {
+    let env = Env::new();
+    let bin_dir = env.home.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(&bin_dir.join("opencode"), "#!/bin/sh\nexec /bin/sleep 60\n");
+    let started = std::time::Instant::now();
+    let output = env.doctor().env("PATH", &bin_dir).output().unwrap();
+    assert_success(&output);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[ok] OpenCode version: not detected"),
+        "{stdout}"
+    );
+}

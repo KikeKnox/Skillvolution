@@ -2,8 +2,8 @@
 //! prompt hook and AfterAgent its Stop.
 
 use super::{
-    ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput, SetupSpec,
-    StopJudgment,
+    ANY, Caps, ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput,
+    SetupSpec, StopJudgment, VersionRange, VersionSpec,
 };
 use crate::setup::gemini;
 
@@ -31,6 +31,15 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             session_output: SessionOutput::HookSpecificOutput,
             stop: StopJudgment::Flags(ContinueOutput::Deny),
         }),
+    },
+    versions: VersionSpec {
+        // No capability of this client changes with its version yet.
+        ranges: &[VersionRange {
+            min: ANY,
+            max: None,
+            caps: Caps::NONE,
+        }],
+        last_tested: None,
     },
     agents: None,
 };

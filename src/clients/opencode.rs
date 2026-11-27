@@ -3,12 +3,25 @@
 //! keeps its own copy of the tool names below (a test checks they match).
 
 use super::{
-    AgentSpec, ClientSpec, DelegationTool, FrontMatter, HookSpec, ModelChoice, ModelRefFormat,
-    SetupSpec,
+    ANY, AgentSpec, Caps, ClientSpec, DelegationTool, FrontMatter, HookSpec, ModelChoice,
+    ModelRefFormat, PluginFormat, SetupSpec, Version, VersionRange, VersionSpec,
 };
 use crate::{agents::Agent, setup::opencode, skill_file::yaml_scalar};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+
+/// OpenCode 2.x starts here; 1.x is everything before.
+const V2: Version = Version(2, 0, 0);
+/// 1.x delegates with `task`/`subagent_type`.
+const TASK: DelegationTool = DelegationTool {
+    tool: "task",
+    agent_field: "subagent_type",
+};
+/// 2.x delegates with `subagent`/`agent`.
+const SUBAGENT: DelegationTool = DelegationTool {
+    tool: "subagent",
+    agent_field: "agent",
+};
 
 pub(super) const SPEC: ClientSpec = ClientSpec {
     token: "opencode",
@@ -23,27 +36,42 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
         // Built-in tool ids that edit files: 1.x has edit, write, multiedit, patch and
         // apply_patch; 2.x has edit, write and patch.
         work_tools: &["edit", "write", "multiedit", "patch", "apply_patch"],
-        // `task`/`subagent_type` in 1.x, `subagent`/`agent` in 2.x.
-        delegation_tools: &[
-            DelegationTool {
-                tool: "task",
-                agent_field: "subagent_type",
+        // Both versions' tools: the plugin tells them apart by name.
+        delegation_tools: &[TASK, SUBAGENT],
+        commands: None,
+    },
+    versions: VersionSpec {
+        ranges: &[
+            // 1.x (up to 1.19.x): `task`, plugin as `{id, server}` (or named exports),
+            // no model per delegation call, agent config cached until restart.
+            VersionRange {
+                min: ANY,
+                max: Some(V2),
+                caps: Caps {
+                    delegation: &[TASK],
+                    plugin: PluginFormat::ServerExport,
+                    per_call_model: ModelRefFormat::None,
+                    hot_reload: false,
+                },
             },
-            DelegationTool {
-                tool: "subagent",
-                agent_field: "agent",
+            // 2.x: `subagent`, plugin as `{id, setup}`, `provider/model[#variant]` per
+            // call, agent files watched. The plugin exports both shapes.
+            VersionRange {
+                min: V2,
+                max: None,
+                caps: Caps {
+                    delegation: &[SUBAGENT],
+                    plugin: PluginFormat::SetupExport,
+                    per_call_model: ModelRefFormat::ProviderModel,
+                    hot_reload: true,
+                },
             },
         ],
-        commands: None,
+        last_tested: Some(Version(2, 2, 5)),
     },
     agents: Some(AgentSpec {
         dirs,
         render,
-        // 1.x delegation calls cannot pick a model; 2.x takes `provider/model[#variant]`
-        // and reloads agent files while running. The version-dependent values arrive with
-        // the per-client versions of Phase 2; these are the 1.x ones.
-        per_call_model: ModelRefFormat::None,
-        hot_reload: false,
         default_models: &[],
     }),
 };

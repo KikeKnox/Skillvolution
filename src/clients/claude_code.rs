@@ -2,12 +2,25 @@
 //! transcript, so the review judgment scans it instead of keeping per-session flags.
 
 use super::{
-    AgentSpec, ClientSpec, DelegationTool, FrontMatter, HookCommand, HookCommands, HookSpec,
-    ModelChoice, ModelRefFormat, SessionOutput, SetupSpec, StopJudgment,
+    ANY, AgentSpec, Caps, ClientSpec, DelegationTool, FrontMatter, HookCommand, HookCommands,
+    HookSpec, ModelChoice, ModelRefFormat, PluginFormat, SessionOutput, SetupSpec, StopJudgment,
+    Version, VersionRange, VersionSpec,
 };
 use crate::{agents::Agent, setup::claude, skill_file::yaml_scalar};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+
+/// `Agent` delegates to a subagent; `Task` is its name in older releases.
+const DELEGATION: &[DelegationTool] = &[
+    DelegationTool {
+        tool: "Agent",
+        agent_field: "subagent_type",
+    },
+    DelegationTool {
+        tool: "Task",
+        agent_field: "subagent_type",
+    },
+];
 
 pub(super) const SPEC: ClientSpec = ClientSpec {
     token: "claude-code",
@@ -20,16 +33,7 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
     },
     hooks: HookSpec {
         work_tools: &["Edit", "Write", "MultiEdit", "NotebookEdit"],
-        delegation_tools: &[
-            DelegationTool {
-                tool: "Agent",
-                agent_field: "subagent_type",
-            },
-            DelegationTool {
-                tool: "Task",
-                agent_field: "subagent_type",
-            },
-        ],
+        delegation_tools: DELEGATION,
         commands: Some(HookCommands {
             events: &[
                 ("SessionStart", HookCommand::SessionStart),
@@ -40,12 +44,24 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             stop: StopJudgment::Transcript,
         }),
     },
+    versions: VersionSpec {
+        // The `Agent` tool's `model` input takes only an alias; agent files reload while
+        // running.
+        ranges: &[VersionRange {
+            min: ANY,
+            max: None,
+            caps: Caps {
+                delegation: DELEGATION,
+                plugin: PluginFormat::None,
+                per_call_model: ModelRefFormat::Alias,
+                hot_reload: true,
+            },
+        }],
+        last_tested: Some(Version(2, 1, 332)),
+    },
     agents: Some(AgentSpec {
         dirs,
         render,
-        // The `Agent` tool's `model` input takes only an alias.
-        per_call_model: ModelRefFormat::Alias,
-        hot_reload: true,
         default_models: &[
             ("high", "opus", Some("high")),
             ("mid", "sonnet", Some("medium")),

@@ -2,8 +2,8 @@
 //! the review judgment keeps per-session worked/reviewed flags instead.
 
 use super::{
-    ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput, SetupSpec,
-    StopJudgment,
+    ANY, Caps, ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput,
+    SetupSpec, StopJudgment, Version, VersionRange, VersionSpec,
 };
 use crate::setup::devin;
 
@@ -32,6 +32,15 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             session_output: SessionOutput::HookSpecificOutput,
             stop: StopJudgment::Flags(ContinueOutput::Block),
         }),
+    },
+    versions: VersionSpec {
+        // No capability of this client changes with its version yet.
+        ranges: &[VersionRange {
+            min: ANY,
+            max: None,
+            caps: Caps::NONE,
+        }],
+        last_tested: Some(Version(3000, 11, 3)),
     },
     agents: None,
 };

@@ -8,6 +8,7 @@
 //! then every check runs again.
 
 use crate::agents::{self, FileState, Target};
+use crate::clients::Version;
 use crate::setup::{self, Change, ClientKind, Edit, Scope};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
@@ -60,6 +61,11 @@ enum Fix {
         changes: Vec<Change>,
     },
     RegisterClaudeMcp(PathBuf),
+    /// Store the version the client reports now as the one setup saw.
+    RecordVersion {
+        kind: ClientKind,
+        version: Version,
+    },
     /// Not auto-fixable; `--fix` prints this guidance instead.
     Manual(&'static str),
 }
@@ -162,14 +168,7 @@ fn agent_checks(db: &Path) -> Vec<Check> {
     let cwd = std::env::current_dir().ok();
     let project_dir = cwd.as_deref().and_then(crate::project::repo_dir);
     let key = cwd.as_deref().and_then(crate::project::detect);
-    let conn = db
-        .is_file()
-        .then(|| open_readonly(db).ok())
-        .flatten()
-        .filter(|conn| {
-            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .is_ok_and(|v| v == vault::schema_version())
-        });
+    let conn = current_schema_conn(db);
     let (mut checks, mut seen) = (Vec::new(), Vec::new());
     let mut catalog = Vec::new();
     for target in Target::all() {
@@ -432,6 +431,11 @@ fn apply(fix: &Fix, db: &Path) -> Result<String> {
             Ok(done)
         }
         Fix::RegisterClaudeMcp(bin) => setup::register_claude_code_mcp(bin, db),
+        Fix::RecordVersion { kind, version } => {
+            let vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            vault.record_client_version(*kind, *version)?;
+            Ok(format!("recorded {} {version}", kind.display_name()))
+        }
         Fix::Manual(guidance) => Ok((*guidance).to_owned()),
     }
 }
@@ -615,7 +619,7 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
     if !kind.detect() {
         return Ok((vec![Check::ok(display, "not installed")], false));
     }
-    let mut checks = Vec::new();
+    let mut checks = version_check(kind, db).into_iter().collect::<Vec<_>>();
     // The binary the client stays configured with when it still exists, else this
     // one (global setup's own default), so a fix never points at a missing binary.
     let mut bin = bin.to_owned();
@@ -692,6 +696,61 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         );
     }
     Ok((checks, configured || mismatched.is_empty()))
+}
+
+/// A read-only connection to `db` when it exists and is at the current schema (never
+/// `Vault::open`, which migrates).
+fn current_schema_conn(db: &Path) -> Option<Connection> {
+    db.is_file()
+        .then(|| open_readonly(db).ok())
+        .flatten()
+        .filter(|conn| {
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .is_ok_and(|v| v == vault::schema_version())
+        })
+}
+
+/// The check of an installed client's version against the one setup stored and the last
+/// one tested: warns when it changed since setup (`--fix` records the new one) or is
+/// newer than tested. Detects with `<cli> --version`, as setup does; a client whose CLI
+/// is missing is "not detected", not a failure.
+fn version_check(kind: ClientKind, db: &Path) -> Option<Check> {
+    let name = format!("{} version", kind.display_name());
+    let Some(version) = kind.detect_version() else {
+        return Some(Check::ok(
+            name,
+            "not detected (no `--version` output); assuming the latest known version",
+        ));
+    };
+    let stored = current_schema_conn(db)
+        .and_then(|conn| vault::stored_client_version(&conn, kind).ok())
+        .map(|stored| stored.map(|stored| stored.version));
+    let mut problems = Vec::new();
+    let mut fix = None;
+    match stored {
+        Some(Some(saved)) if saved != version => {
+            problems.push(format!(
+                "changed since setup (was {saved}); `doctor --fix` records it, rerun setup to refresh the client's files"
+            ));
+            fix = Some(Fix::RecordVersion { kind, version });
+        }
+        Some(None) => fix = Some(Fix::RecordVersion { kind, version }),
+        _ => {}
+    }
+    if kind.is_unverified(version) {
+        problems.push("newer than the last version tested with Skillvolution (unverified)".into());
+    }
+    let check = if problems.is_empty() {
+        let note = if matches!(stored, Some(None)) {
+            " (not recorded yet)"
+        } else {
+            ""
+        };
+        Check::ok(name, format!("{version}{note}"))
+    } else {
+        Check::warn(name, format!("{version}: {}", problems.join("; ")))
+    };
+    Some(check.with_fix(fix))
 }
 
 /// Compares every `changes()` path against the file on disk. Returns the paths

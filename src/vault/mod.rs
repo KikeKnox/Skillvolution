@@ -1,4 +1,5 @@
 mod agent;
+mod client_version;
 mod location;
 mod outcomes;
 mod revisions;
@@ -10,6 +11,7 @@ pub use agent::{
     agent_meta_problems, agent_section_problems, reserved_agent_id, skill_deprecated,
     skill_unavailable,
 };
+pub use client_version::{StoredVersion, stored_client_version};
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
 pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
@@ -201,6 +203,12 @@ const MIGRATIONS: &[&str] = &[
         model TEXT NOT NULL,
         effort TEXT,
         PRIMARY KEY (client, tier)
+    );",
+    // v7: the version each client reported at its last setup.
+    "CREATE TABLE client_versions (
+        client TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;

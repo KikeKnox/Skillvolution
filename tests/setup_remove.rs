@@ -285,7 +285,8 @@ fn rollback_restores_earlier_edits_on_a_failing_write() {
 
 /// A `#!/bin/sh` script; unix-only, like the one test that calls it (unregistering
 /// needs a `claude` that can actually be run, and a shebang script isn't a valid
-/// executable on Windows).
+/// executable on Windows). `claude --version`, which setup runs to record the version,
+/// is not logged: the log is the `mcp` calls.
 #[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -294,7 +295,10 @@ fn write_fake_claude(dir: &Path, log: &Path) {
     let claude = dir.join("claude");
     fs::write(
         &claude,
-        format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\necho \"$@\" >> {}\nexit 0\n",
+            log.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();

@@ -44,7 +44,7 @@ pub fn resolve() -> Option<PathBuf> {
 /// named `name` in a `PATH` entry. Shared with `detect`, which uses it to look for other
 /// clients' CLIs (e.g. `opencode`). On Windows each `PATHEXT` extension is tried first,
 /// since npm-installed CLIs are `name.cmd` shims and native ones `name.exe`.
-pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let names = executable_names(name);
     std::env::split_paths(&path).find_map(|dir| {

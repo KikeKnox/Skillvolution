@@ -2,8 +2,8 @@
 //! `beforeSubmitPrompt` can only allow or block the prompt, not add context to it.
 
 use super::{
-    ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput, SetupSpec,
-    StopJudgment,
+    ANY, Caps, ClientSpec, ContinueOutput, HookCommand, HookCommands, HookSpec, SessionOutput,
+    SetupSpec, StopJudgment, VersionRange, VersionSpec,
 };
 use crate::setup::cursor;
 
@@ -32,6 +32,15 @@ pub(super) const SPEC: ClientSpec = ClientSpec {
             session_output: SessionOutput::AdditionalContext,
             stop: StopJudgment::Flags(ContinueOutput::FollowupMessage),
         }),
+    },
+    versions: VersionSpec {
+        // No capability of this client changes with its version yet.
+        ranges: &[VersionRange {
+            min: ANY,
+            max: None,
+            caps: Caps::NONE,
+        }],
+        last_tested: None,
     },
     agents: None,
 };

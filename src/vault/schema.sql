@@ -122,3 +122,12 @@ CREATE TABLE agent_models (
     effort TEXT,
     PRIMARY KEY (client, tier)
 );
+
+-- The version each client reported when setup last ran, so hooks can pick version-
+-- dependent behavior without running the client's CLI. Machine-local: not exported or
+-- imported.
+CREATE TABLE client_versions (
+    client TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);

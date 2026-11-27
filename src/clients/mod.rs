@@ -14,6 +14,9 @@ mod cursor;
 mod devin;
 mod gemini;
 mod opencode;
+mod version;
+
+pub use version::{ANY, Caps, PluginFormat, Version, VersionRange, VersionSpec};
 
 /// One AI coding client Skillvolution knows how to configure. A closed enum, so adding
 /// a client makes the compiler point at every place that still has to handle it.
@@ -76,6 +79,8 @@ pub struct ClientSpec {
     pub clis: &'static [&'static str],
     pub(crate) setup: SetupSpec,
     pub hooks: HookSpec,
+    /// The client's known versions and what differs between them.
+    pub versions: VersionSpec,
     /// How the client's subagent files are generated. `None` for a client without
     /// subagents.
     pub agents: Option<AgentSpec>,
@@ -117,11 +122,6 @@ pub struct AgentSpec {
     /// The front matter lines (without the `---` fences) for an agent and its model, and
     /// warnings about what the client cannot express.
     pub render: fn(&Agent, Option<&ModelChoice>) -> FrontMatter,
-    /// How a delegation call can name a model. Data only until the model selection in
-    /// Phase 4 reads it.
-    pub per_call_model: ModelRefFormat,
-    /// Whether the client picks up agent file changes without a restart. Data only for now.
-    pub hot_reload: bool,
     /// The `(tier, model, effort)` compiled in; stored `agent_models` rows override them.
     pub default_models: &'static [(&'static str, &'static str, Option<&'static str>)],
 }
@@ -143,6 +143,7 @@ pub struct HookSpec {
 }
 
 /// A tool that delegates to a subagent.
+#[derive(Clone, Copy, Debug)]
 pub struct DelegationTool {
     /// The tool name, as the client reports it.
     pub tool: &'static str,

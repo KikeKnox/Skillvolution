@@ -170,7 +170,9 @@ fn write_fake_claude_already_registered(
     )
 }
 
-/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`.
+/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`. `claude --version` (run
+/// by setup to record the client's version) answers nothing and is not logged: the logs
+/// are the `mcp` calls setup makes.
 #[cfg(unix)]
 fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -178,7 +180,11 @@ fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> Path
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     let body = body_template.replace("{log}", &log.display().to_string());
-    fs::write(&claude, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::write(
+        &claude,
+        format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\n{body}"),
+    )
+    .unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_owned()
 }
