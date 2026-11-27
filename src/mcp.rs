@@ -25,7 +25,7 @@ const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 /// tag (tags additionally cap at 32 bytes and 8 items — see `validate_tags`).
 const ID_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     json!([
         {
             "name": "search_skills",
@@ -769,4 +769,55 @@ fn write_message(output: &mut impl Write, message: &Value) -> Result<()> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `enum` of `property` in the input schema of `tool`.
+    fn schema_enum(tool: &str, property: &str) -> Vec<String> {
+        let tools = tools();
+        let tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == tool)
+            .unwrap_or_else(|| panic!("no tool {tool}"));
+        let property = &tool["inputSchema"]["properties"][property];
+        let values = property["enum"]
+            .as_array()
+            .or_else(|| property["items"]["enum"].as_array())
+            .unwrap_or_else(|| panic!("no enum: {property}"));
+        values
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn owned(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn schema_enums_match_the_values_the_server_accepts() {
+        let agent_clients: Vec<&str> = ClientKind::with_agents().map(ClientKind::token).collect();
+        assert_eq!(schema_enum("list_models", "client"), owned(&agent_clients));
+        assert_eq!(
+            schema_enum("list_models", "tier"),
+            owned(&crate::vault::TIERS)
+        );
+        assert_eq!(
+            schema_enum("publish_agent", "tier"),
+            owned(&crate::vault::TIERS)
+        );
+        assert_eq!(
+            schema_enum("publish_agent", "tools"),
+            owned(&crate::vault::TOOLS)
+        );
+        assert_eq!(
+            schema_enum("publish_agent", "effort"),
+            owned(&crate::vault::EFFORTS)
+        );
+    }
 }

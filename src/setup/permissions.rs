@@ -251,6 +251,20 @@ mod tests {
     }
 
     #[test]
+    fn opencode_grants_exactly_the_servers_tools() {
+        let mut served: Vec<String> = crate::mcp::tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| format!("skillvolution_{}", tool["name"].as_str().unwrap()))
+            .collect();
+        let mut granted: Vec<String> = OPENCODE_MCP_TOOLS.map(str::to_owned).to_vec();
+        served.sort();
+        granted.sort();
+        assert_eq!(granted, served);
+    }
+
+    #[test]
     fn opencode_merge_sets_missing_keys_and_respects_explicit_choices() {
         let mut config = json!({"permission": {"task": "ask", "edit": "deny"}});
         merge_opencode(&mut config).unwrap();
