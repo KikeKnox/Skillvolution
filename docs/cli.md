@@ -802,6 +802,11 @@ hand-edited copy carries an older version), `total`,
 description or tier, more matching words first. `installed` looks at the server
 client's directories (every agent client's without `--client`).
 
+A server whose `--client` has no subagents (Codex, Gemini CLI, Cursor, Devin) gets a
+successful answer with a `note` (`this client has no subagents: …`) from all three agent
+tools, not an error: `search_agents` returns no agents, `install_agent` writes nothing
+and `list_models` returns no models. No `mcp_error` is recorded.
+
 ### install_agent
 
 | Param | Type | Constraint |

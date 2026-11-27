@@ -404,13 +404,36 @@ fn install_agent_accepts_only_models_of_the_agent_tier() {
 }
 
 #[test]
-fn install_agent_refuses_a_client_without_subagents() {
+fn agent_tools_answer_a_client_without_subagents_with_a_note_not_an_error() {
     let sandbox = Sandbox::new("claude-code");
-    let refused = sandbox
-        .one(Some("codex"), "install_agent", json!({"id": "reviewer"}))
-        .unwrap_err();
-    assert!(refused.contains("Codex"), "{refused}");
+    let results = sandbox.mcp(
+        Some("codex"),
+        &[
+            ("search_agents", json!({"query": "review"})),
+            ("install_agent", json!({"id": "reviewer"})),
+            ("list_models", json!({"tier": "mid"})),
+        ],
+    );
+    let [search, install, models] = [&results[0], &results[1], &results[2]]
+        .map(|result| result.clone().unwrap_or_else(|e| panic!("tool error: {e}")));
+    assert_eq!(search["agents"], json!([]), "{search}");
+    assert_eq!(search["total"], 0);
+    let note = search["note"].as_str().unwrap();
+    assert!(
+        note.starts_with("this client has no subagents") && note.contains("Codex"),
+        "{note}"
+    );
+    let result = install["result"].as_str().unwrap();
+    assert!(
+        result.starts_with("reviewer was not installed: this client has no subagents"),
+        "{result}"
+    );
+    assert_eq!(install["restart_needed"], false);
     assert!(!sandbox.claude("reviewer").exists());
+    assert_eq!(models["models"], json!([]), "{models}");
+    assert!(models["note"].as_str().unwrap().contains("no subagents"));
+    assert!(events(&sandbox.db, Some("mcp_error")).is_empty());
+    assert!(events(&sandbox.db, Some("agent_install")).is_empty());
 }
 
 #[test]

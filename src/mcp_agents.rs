@@ -21,18 +21,30 @@ pub struct Scope<'a> {
     pub client: Option<ClientKind>,
 }
 
+/// Why `kind` gets no agents: it has no subagents.
+fn no_subagents(kind: ClientKind) -> String {
+    format!(
+        "this client has no subagents: {} cannot delegate to agent files; agent tools work for {}",
+        kind.display_name(),
+        Target::all()
+            .map(Target::display_name)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    )
+}
+
 /// The subagent client for `kind`, or why it has none.
 fn target_of(kind: ClientKind) -> Result<Target> {
-    Target::from_kind(kind).with_context(|| {
-        format!(
-            "{} has no subagents; agent tools work for {}",
-            kind.display_name(),
-            Target::all()
-                .map(Target::display_name)
-                .collect::<Vec<_>>()
-                .join(" and ")
-        )
-    })
+    Target::from_kind(kind).with_context(|| no_subagents(kind))
+}
+
+/// The server's client when it is known to have no subagents. The agent tools answer such
+/// a client successfully with a note (`evolution` sends every client to `search_agents`),
+/// so the call is not recorded as an `mcp_error`.
+fn without_subagents(scope: &Scope) -> Option<ClientKind> {
+    scope
+        .client
+        .filter(|kind| Target::from_kind(*kind).is_none())
 }
 
 /// The agents visible from the project (vault ones, then the built-in tier agents) whose
@@ -46,6 +58,14 @@ pub fn search(vault: &Vault, scope: &Scope, query: &str, limit: i64, offset: i64
         "query must be at most 512 UTF-8 bytes without NUL"
     );
     let (limit, offset) = (limit as usize, offset as usize);
+    if let Some(kind) = without_subagents(scope) {
+        return Ok(json!({
+            "has_more": false,
+            "agents": [],
+            "total": 0,
+            "note": no_subagents(kind),
+        }));
+    }
     let targets: Vec<Target> = match scope.client {
         Some(kind) => vec![target_of(kind)?],
         None => Target::all().collect(),
@@ -152,6 +172,13 @@ fn install_state(
 /// without one), as `agents add` does, and records the `agent_*` events. One line per
 /// client: path, version, how to delegate, and whether the client must restart.
 pub fn install(vault: &Vault, scope: &Scope, id: &str, model: Option<&str>) -> Result<Value> {
+    if let Some(kind) = without_subagents(scope) {
+        return Ok(json!({
+            "result": format!("{id} was not installed: {}", no_subagents(kind)),
+            "restart_needed": false,
+            "notes": [],
+        }));
+    }
     let options = InstallOptions {
         force: false,
         client: scope.client.map(target_of).transpose()?,
@@ -247,6 +274,13 @@ pub fn list_models(
     let kind = client.or(scope.client).context(
         "this server was started without --client; pass `client` (claude-code or opencode)",
     )?;
+    if Target::from_kind(kind).is_none() {
+        return Ok(json!({
+            "client": kind.token(),
+            "models": [],
+            "note": no_subagents(kind),
+        }));
+    }
     let target = target_of(kind)?;
     let caps = vault.client_caps(kind)?;
     let version = vault.client_version(kind)?.map(|v| v.version);
