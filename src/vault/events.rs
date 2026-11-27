@@ -106,10 +106,16 @@ impl Vault {
     /// kept in `vault_meta`): it runs on every open, and the day check is a primary-key
     /// read, while a DELETE would take the write lock.
     pub(super) fn prune_events(&self, older_than_days: i64) -> Result<()> {
+        self.prune_events_on(older_than_days, None)
+    }
+
+    /// `prune_events` as if the UTC day were `today` (`YYYY-MM-DD`; `None` is the real
+    /// one), so tests do not depend on when they run.
+    fn prune_events_on(&self, older_than_days: i64, today: Option<&str>) -> Result<()> {
         let done_today: bool = self.conn.query_row(
             "SELECT COALESCE((SELECT value FROM vault_meta WHERE key = 'events_pruned_on'), '')
-                    = strftime('%Y-%m-%d', 'now')",
-            [],
+                    = COALESCE(?1, strftime('%Y-%m-%d', 'now'))",
+            [today],
             |row| row.get(0),
         )?;
         if done_today {
@@ -120,17 +126,24 @@ impl Vault {
             [format!("-{older_than_days} days")],
         )?;
         self.conn.execute(
-            "INSERT INTO vault_meta (key, value) VALUES ('events_pruned_on', strftime('%Y-%m-%d', 'now'))
+            "INSERT INTO vault_meta (key, value)
+             VALUES ('events_pruned_on', COALESCE(?1, strftime('%Y-%m-%d', 'now')))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [],
+            [today],
         )?;
         Ok(())
     }
 }
 
+/// Whether `token` holds an absolute path: the whole token, or any part of it after an
+/// `=` or `:` (`--db=/home/u/x`, `path:/home/u`, `file:///home/u`).
+fn looks_like_path(token: &str) -> bool {
+    is_absolute_path(token) || token.split(['=', ':']).any(is_absolute_path)
+}
+
 /// Whether `token` looks like an absolute path (POSIX, home-relative, Windows drive or
 /// UNC), ignoring the quotes and brackets it may be wrapped in.
-fn looks_like_path(token: &str) -> bool {
+fn is_absolute_path(token: &str) -> bool {
     let token = token.trim_start_matches(['(', '[', '{', '"', '\'', '`', '<', '=']);
     let mut chars = token.chars();
     let drive = matches!(
@@ -199,6 +212,22 @@ mod tests {
     }
 
     #[test]
+    fn scrubbing_drops_paths_after_an_equals_sign_or_a_colon() {
+        assert_eq!(
+            scrub_text(
+                "run --db=/home/u/x path:/home/u/y file:///home/u/z key=C:\\Users\\u ok",
+                200
+            ),
+            "run ok"
+        );
+        // Not paths: kept.
+        assert_eq!(
+            scrub_text("std::fs::read at 12:30 mode=fast", 200),
+            "std::fs::read at 12:30 mode=fast"
+        );
+    }
+
+    #[test]
     fn a_query_with_a_credential_is_dropped() {
         assert_eq!(
             search_query_for_event("sqlite busy timeout").as_deref(),
@@ -240,7 +269,9 @@ mod tests {
     #[test]
     fn pruning_runs_at_most_once_per_day() {
         let (_dir, vault) = vault();
-        vault.prune_events(180).unwrap();
+        // A pinned day: the test does not depend on midnight UTC passing while it runs.
+        let day = Some("2000-01-01");
+        vault.prune_events_on(180, day).unwrap();
         vault
             .conn
             .execute(
@@ -248,7 +279,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        vault.prune_events(180).unwrap();
+        vault.prune_events_on(180, day).unwrap();
         let count = || -> i64 {
             vault
                 .conn
@@ -256,11 +287,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(count(), 1, "already pruned today: left alone");
-        vault
-            .conn
-            .execute("UPDATE vault_meta SET value = '2000-01-01'", [])
-            .unwrap();
-        vault.prune_events(180).unwrap();
-        assert_eq!(count(), 0);
+        vault.prune_events_on(180, Some("2000-01-02")).unwrap();
+        assert_eq!(count(), 0, "the next day prunes again");
     }
 }

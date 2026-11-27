@@ -6,18 +6,34 @@
 //! the way OpenCode 2.x does. Placeholder-substitution and node-syntax unit tests live in
 //! `src/setup/plugin.rs`, next to the code they test.
 
-use clap::Parser;
-use skillvolution::setup::{self, SetupArgs};
 use std::{
     fs,
     path::Path,
     process::{Command, Output},
 };
 
-#[derive(Parser)]
-struct Cli {
-    #[command(flatten)]
-    setup: SetupArgs,
+/// Runs `skillvolution setup ARGS` as a child process with HOME, the config directories
+/// and an empty PATH inside `sandbox`, so it never reads the developer's config or runs
+/// the host's client CLIs (setup runs `<cli> --version` for every client it configures).
+fn setup_in(sandbox: &Path, args: &[String]) {
+    let empty_path = sandbox.join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("setup")
+        .args(args)
+        .env("HOME", sandbox.join("home"))
+        .env("APPDATA", sandbox.join("home/AppData"))
+        .env("XDG_CONFIG_HOME", sandbox.join("home/xdg-config"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .env("PATH", &empty_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Runs `node --check` on `path`, skipping (not failing) when `node` isn't on PATH.
@@ -46,7 +62,6 @@ fn project_mode_plugin_gets_the_same_project_key_as_the_mcp_server() {
     let db = project.join("vault.sqlite3");
 
     let argv = vec![
-        "setup".to_owned(),
         "--project".to_owned(),
         project.to_string_lossy().into_owned(),
         "--project-key".to_owned(),
@@ -58,7 +73,8 @@ fn project_mode_plugin_gets_the_same_project_key_as_the_mcp_server() {
         "--db".to_owned(),
         db.to_string_lossy().into_owned(),
     ];
-    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let sandbox = tempfile::tempdir().unwrap();
+    setup_in(sandbox.path(), &argv);
 
     let plugin_path = project.join(".opencode/plugins/skillvolution.js");
     let plugin = fs::read_to_string(&plugin_path).unwrap();
@@ -278,7 +294,6 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     .unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
     let argv = vec![
-        "setup".to_owned(),
         "--project".to_owned(),
         project.to_string_lossy().into_owned(),
         "--client".to_owned(),
@@ -288,7 +303,8 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
         "--db".to_owned(),
         project.join("vault.sqlite3").to_string_lossy().into_owned(),
     ];
-    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let sandbox = tempfile::tempdir().unwrap();
+    setup_in(sandbox.path(), &argv);
     // `.mjs` so node loads the plugin as an ES module wherever it sits.
     let plugin = project.join("plugin.mjs");
     fs::copy(project.join(".opencode/plugins/skillvolution.js"), &plugin).unwrap();

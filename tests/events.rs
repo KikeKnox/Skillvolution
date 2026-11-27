@@ -426,19 +426,20 @@ fn flag_tracked_clients_record_the_reminder_lifecycle() {
     assert_eq!(reminders(dir.path()), ["fired", "ignored"]);
 }
 
+/// Opening the vault prunes again once the day it last pruned is past. That it prunes at
+/// most once a day is `pruning_runs_at_most_once_per_day` in `src/vault/events.rs`, with a
+/// pinned day: here the real day would make the result depend on midnight UTC passing
+/// between the two opens.
 #[test]
-fn retention_runs_once_a_day_not_on_every_open() {
+fn retention_runs_on_open_once_the_recorded_day_is_past() {
     let dir = tempfile::tempdir().unwrap();
     let db = db_with_skill(dir.path());
     rusqlite::Connection::open(&db)
         .unwrap()
-        .execute_batch("INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search');")
-        .unwrap();
-    drop(Vault::open(&db).unwrap());
-    assert_eq!(events(&db, None).len(), 1, "already pruned today");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("UPDATE vault_meta SET value = '2000-01-01';")
+        .execute_batch(
+            "INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search');
+             UPDATE vault_meta SET value = '2000-01-01' WHERE key = 'events_pruned_on';",
+        )
         .unwrap();
     drop(Vault::open(&db).unwrap());
     assert!(events(&db, None).is_empty());

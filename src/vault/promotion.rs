@@ -338,26 +338,33 @@ impl Vault {
     /// answers most calls without the write lock; the claim itself is one conditional
     /// upsert, so of two concurrent sessions only the one that changed the row runs it.
     pub fn claim_promotion_run(&self) -> Result<bool> {
+        self.claim_promotion_run_on(None)
+    }
+
+    /// `claim_promotion_run` as if the UTC day were `today` (`YYYY-MM-DD`; `None` is the
+    /// real one), so tests do not depend on when they run.
+    fn claim_promotion_run_on(&self, today: Option<&str>) -> Result<bool> {
         let done_today: bool = self.conn.query_row(
             "SELECT COALESCE((SELECT value FROM vault_meta WHERE key = ?1), '')
-                    = strftime('%Y-%m-%d', 'now')",
-            [EVALUATED_KEY],
+                    = COALESCE(?2, strftime('%Y-%m-%d', 'now'))",
+            params![EVALUATED_KEY, today],
             |row| row.get(0),
         )?;
         if done_today {
             return Ok(false);
         }
-        self.claim_today()
+        self.claim_day(today)
     }
 
-    /// Sets the evaluation day to today in one statement, `true` only when this call
-    /// changed it.
-    fn claim_today(&self) -> Result<bool> {
+    /// Sets the evaluation day to `today` (`None`: the real one) in one statement, `true`
+    /// only when this call changed it.
+    fn claim_day(&self, today: Option<&str>) -> Result<bool> {
         let claimed = self.conn.execute(
-            "INSERT INTO vault_meta (key, value) VALUES (?1, strftime('%Y-%m-%d', 'now'))
+            "INSERT INTO vault_meta (key, value)
+             VALUES (?1, COALESCE(?2, strftime('%Y-%m-%d', 'now')))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value
              WHERE vault_meta.value <> excluded.value",
-            [EVALUATED_KEY],
+            params![EVALUATED_KEY, today],
         )?;
         Ok(claimed == 1)
     }
@@ -621,26 +628,16 @@ mod tests {
     fn the_automatic_run_is_claimed_once_a_day_and_promotions_persist() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(&dir.path().join("vault.db")).unwrap();
-        assert!(vault.claim_promotion_run().unwrap());
-        assert!(!vault.claim_promotion_run().unwrap());
-        vault
-            .conn
-            .execute(
-                "UPDATE vault_meta SET value = '2000-01-01' WHERE key = ?1",
-                [EVALUATED_KEY],
-            )
-            .unwrap();
+        // Pinned days: the test does not depend on midnight UTC passing while it runs.
+        let (day, next) = (Some("2000-01-01"), Some("2000-01-02"));
+        assert!(vault.claim_promotion_run_on(day).unwrap());
+        assert!(!vault.claim_promotion_run_on(day).unwrap());
+        assert!(vault.claim_promotion_run_on(next).unwrap());
+        // The real day is never one of the pinned ones: the public entry point claims it.
         assert!(vault.claim_promotion_run().unwrap());
         // Two sessions that both read an old day race to claim it: one wins.
-        vault
-            .conn
-            .execute(
-                "UPDATE vault_meta SET value = '2000-01-01' WHERE key = ?1",
-                [EVALUATED_KEY],
-            )
-            .unwrap();
         let other = Vault::open(&dir.path().join("vault.db")).unwrap();
-        let claims = [vault.claim_today().unwrap(), other.claim_today().unwrap()];
+        let claims = [vault.claim_day(day).unwrap(), other.claim_day(day).unwrap()];
         assert_eq!(claims, [true, false], "only one claim per day");
         vault.mark_promoted("b").unwrap();
         vault.mark_promoted("a").unwrap();
