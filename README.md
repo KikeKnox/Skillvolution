@@ -149,7 +149,7 @@ Windows x86_64 (MSVC). A release is published only after CI passes.
 | Client | `--client` | Session catalog | Per-prompt suggestions | Review reminder | Verified live |
 |---|---|---|---|---|---|
 | Claude Code | `claude-code` | `SessionStart` hook | `UserPromptSubmit` | Stop hook continues the turn | catalog and reminder |
-| OpenCode | `opencode` | plugin | plugin (`chat.message`) | added to later turns' system prompt; never blocks | — |
+| OpenCode | `opencode` | plugin | plugin (`chat.message` on 1.x, `session.hook("prompt")` on 2.x) | added to later turns' system prompt; never blocks | — |
 | Devin CLI | `devin` | `SessionStart` hook | `UserPromptSubmit` | `{"decision":"block"}` | — |
 | Codex CLI | `codex` | `SessionStart` hook | `UserPromptSubmit` | `{"decision":"block"}` | — |
 | Gemini CLI | `gemini` | `SessionStart` hook | `BeforeAgent` | `{"decision":"deny"}` | — |
@@ -168,8 +168,8 @@ Every client gets the three managed skills (`evolution`, `skill-evaluation`,
 
 | Client | Files and entries | Review reminder | Notes |
 |---|---|---|---|
-| Claude Code | `SessionStart`/`UserPromptSubmit`/`Stop` hooks and `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` (skipped when an identical registration already exists) | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`), `get_skill` loads, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker) after the last successful review call. It returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). The prompt hook adds suggestions as `additionalContext`. If `claude` isn't on `PATH`, setup prints the `mcp add-json` command for you to run |
-| OpenCode | `mcp.skillvolution` entry and `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, `plugins/skillvolution.js` | The plugin injects the catalog and the skills matching each user message into the system prompt. When a turn that edited files, loaded a skill, or delegated to a managed vault agent goes idle without a review, it adds a reminder to later turns' system prompts | Never blocks a turn and spends no extra model turn. Suggestions come from `hook prompt` via the `chat.message` hook |
+| Claude Code | `SessionStart`/`UserPromptSubmit`/`Stop` hooks and `permissions.allow` (`Agent`, `Task`, `mcp__skillvolution`) in `settings.json`; MCP registered via `claude mcp add-json --scope user` (skipped when an identical registration already exists) | `hook stop` scans the session transcript for file edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`), `get_skill` loads, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task` (1.x) / `subagent` (2.x); not `sv-*`; the generated file must carry the skillvolution marker) after the last successful review call. It returns `additionalContext` JSON, which makes Claude continue the turn | Blocking verified live (Claude Code 2.1.283). The prompt hook adds suggestions as `additionalContext`. If `claude` isn't on `PATH`, setup prints the `mcp add-json` command for you to run |
+| OpenCode | `mcp.skillvolution` entry and `permission` allows (`task`, each `skillvolution_*` tool) in `opencode.json`/`opencode.jsonc`, `AGENTS.md` marker block, `plugins/skillvolution.js` | The plugin injects the catalog and the skills matching each user message into the system prompt. When a turn that edited files, loaded a skill, or delegated to a managed vault agent goes idle without a review, it adds a reminder to later turns' system prompts | Never blocks a turn and spends no extra model turn. Suggestions come from `hook prompt` via the `chat.message` hook (1.x) or `session.hook("prompt")` (2.x) |
 | Devin CLI | `mcp_config.json` server entry, `config.json` (`permissions.allow`: `run_subagent`, `read_subagent`, `mcp__skillvolution__*`, plus `SessionStart`/`UserPromptSubmit`/`PostToolUse`/`Stop`/`SessionEnd`/`PermissionRequest` hooks), `AGENTS.md` marker block | `hook tool-use`/`hook stop --client devin` keep per-session worked/reviewed flags. A stop after unreviewed work prints `{"decision":"block"}` | `UserPromptSubmit` suggestions follow Devin's docs but are not verified live. `hook approve` auto-approves `run_subagent`/`read_subagent` and every `mcp__skillvolution__*` tool, including `publish_skill` (see [Safety and limitations](#safety-and-limitations)) |
 | Codex CLI | `[mcp_servers.skillvolution]` in `config.toml`, `hooks.json` (SessionStart, UserPromptSubmit, PostToolUse on `apply_patch` and `mcp__skillvolution__*`, Stop, SessionEnd, PermissionRequest on `mcp__skillvolution__*`), `AGENTS.md` | Same flag tracking as Devin; `{"decision":"block"}` on Stop | `UserPromptSubmit` adds the suggestions. A project-mode `.codex/config.toml` loads only after you trust the project in Codex. Your `approval_policy` decides whether tools run without prompting |
 | Gemini CLI | `mcpServers.skillvolution` (with `trust: true` unless already set) and `SessionStart`/`BeforeAgent`/`AfterTool`/`AfterAgent`/`SessionEnd` hooks in `settings.json`, `GEMINI.md` marker block | Same flag tracking. AfterAgent, Gemini's Stop, prints `{"decision":"deny"}` | `BeforeAgent` appends the suggestions to that turn's prompt. MCP tools are named `mcp_skillvolution_*`. `trust` is the documented way to skip tool-confirmation prompts for one server |
@@ -575,7 +575,7 @@ No, that's the review reminder working. `hook stop` scans the session transcript
 the offset recorded for that session. It looks for the last piece of work: a file-edit
 tool call (`Edit`, `Write`, `MultiEdit`, or `NotebookEdit`; `Bash` doesn't count), a
 successful `get_skill`, or a delegation to a managed vault agent (Claude Code
-`Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the
+`Agent`/`Task`, OpenCode `task` (1.x) / `subagent` (2.x); not `sv-*`; the generated file must carry the
 skillvolution marker). When that work comes after the last *successful*
 `publish_skill`/`report_skill_outcome` call, the hook asks for a report on every loaded
 skill. A rejected review call doesn't count, and neither does a failed `get_skill`.
@@ -621,6 +621,9 @@ drops the flags.
 <details>
 <summary><b>What does the OpenCode plugin do?</b></summary>
 
+`plugins/skillvolution.js` loads in OpenCode 1.x and 2.x. 1.x runs its `server` hooks; 2.x runs
+`setup`, which uses `session.hook`, `tool.hook` and `event.subscribe` for the same behavior.
+
 `plugins/skillvolution.js` does four things:
 
 - **Catalog.** It runs `hook session-start` to inject the skill catalog into the system
@@ -628,7 +631,7 @@ drops the flags.
 - **Suggestions.** It runs `hook prompt` on each new top-level user message and adds the
   matching skills to that turn's system prompt. Subagent sessions get none.
 - **Work tracking.** It tracks file-edit tools (`edit`, `write`, `multiedit`, `patch`,
-  `apply_patch`; `bash` doesn't count), `get_skill` loads, and `task` delegations to a
+  `apply_patch`; `bash` doesn't count), `get_skill` loads, and `task` (1.x) / `subagent` (2.x) delegations to a
   managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)
   on the top-level session.
   Subagent work is attributed to its parent, and a subagent's own idle events are
