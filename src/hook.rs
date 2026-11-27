@@ -616,7 +616,7 @@ pub fn session_start_recorded(
     let mut report =
         |error: anyhow::Error| report_hook_error(vault, "session-start", client, &error);
     let refreshed = if subagent {
-        Vec::new()
+        crate::agents::Refresh::default()
     } else {
         agent_session::upkeep(vault, project, project_dir, &mut report)
     };

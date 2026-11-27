@@ -367,7 +367,8 @@ rerun of setup adds it to an install from before v0.7.0); `search_agents`, `inst
 Claude Code's `mcp__skillvolution` grant covers them. At session start Claude Code and OpenCode
 also get an agents block in the catalog (installed agents, then vault agents not yet installed,
 ids and descriptions only), none for a subagent session; managed agent files that are behind
-the vault are refreshed and heavily used agents are promoted to a per-user install (see
+the vault are refreshed (an update that changes the tier, adds skills or widens the tools waits
+for `agents sync`) and heavily used agents are promoted to a per-user install (see
 [architecture.md](architecture.md#agents)). OpenCode 1.x does not hot-reload agent files, so the
 session-start note asks for a restart after a refresh.
 

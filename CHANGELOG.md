@@ -44,7 +44,8 @@ agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill 
   provider is listed as such.
 - Session start for Claude Code and OpenCode: the catalog gets an agents block (installed agents,
   then vault agents not installed), except in subagent sessions; managed agent files behind the
-  vault are refreshed (never hand-edited ones); and an agent used in most projects is promoted to
+  vault are refreshed (never hand-edited ones, nor an update that `sync` flags for a tier change,
+  added skills or widened tools: the catalog lists it as needing review); and an agent used in most projects is promoted to
   a per-user install once a day, with its managed project copies retired. `agents promotion`
   shows and sets the thresholds (default: 30 days, 75% of active projects, more than 5 projects,
   3 delegations each); `doctor` reports candidates and promotes them with `--fix`.

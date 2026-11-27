@@ -93,12 +93,24 @@ impl Sandbox {
     }
 
     fn publish(&self, id: &str, tier: &str, description: &str, replace: bool) {
+        self.publish_with(id, tier, description, "[read]", BODY, replace);
+    }
+
+    fn publish_with(
+        &self,
+        id: &str,
+        tier: &str,
+        description: &str,
+        tools: &str,
+        body: &str,
+        replace: bool,
+    ) {
         let file = self.repo.join(format!("{id}-src")).join("AGENT.md");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(
             &file,
             format!(
-                "---\nname: {id}\ndescription: {description}\ntier: {tier}\ntools: [read]\n---\n{BODY}"
+                "---\nname: {id}\ndescription: {description}\ntier: {tier}\ntools: {tools}\n---\n{body}"
             ),
         )
         .unwrap();
@@ -271,6 +283,48 @@ fn session_start_updates_stale_managed_files_but_never_edited_ones() {
     let again = sandbox.session_start("claude-code");
     assert!(!again.contains("Agent files updated"), "{again}");
     assert_eq!(sandbox.events("agent_update").len(), 1);
+}
+
+#[test]
+fn session_start_holds_an_update_sync_would_flag_and_applies_a_plain_one() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.publish("reviewer", "mid", "Use when a diff needs review", false);
+    sandbox.publish("planner", "high", "Use when a task needs a plan", false);
+    sandbox.ok(&["agents", "add", "reviewer", "planner"]);
+    let before = read(&sandbox.claude("reviewer"));
+    // reviewer v2 may edit files; planner v2 only has a new prompt.
+    let description = "Use when a diff needs review";
+    sandbox.publish_with("reviewer", "mid", description, "[read, edit]", BODY, true);
+    let prompt = BODY.replace("Read the diff.", "Read the plan inputs.");
+    let planner = "Use when a task needs a plan";
+    sandbox.publish_with("planner", "high", planner, "[read]", &prompt, true);
+
+    let text = sandbox.session_start("claude-code");
+    assert_eq!(read(&sandbox.claude("reviewer")), before, "held for review");
+    assert!(
+        text.contains("reviewer v2 available (needs review): run `skillvolution agents sync`\n"),
+        "{text}"
+    );
+    assert_eq!(marker_version(&sandbox.claude("planner")), "v2");
+    assert!(read(&sandbox.claude("planner")).contains("Read the plan inputs."));
+    assert!(
+        text.contains("Agent files updated to the vault's current version: planner v2 (local).\n"),
+        "{text}"
+    );
+    let updates = sandbox.events("agent_update");
+    let ids: Vec<_> = updates.iter().map(|e| e.subject.as_deref()).collect();
+    assert_eq!(ids, [Some("planner")]);
+
+    // Still held at the next start; `agents sync --apply` shows the flag and applies it.
+    let again = sandbox.session_start("claude-code");
+    assert!(again.contains("reviewer v2 available (needs review)"), "{again}");
+    let sync = sandbox.ok(&["agents", "sync"]);
+    assert!(sync.contains("! tools widened: edit"), "{sync}");
+    sandbox.ok(&["agents", "sync", "--apply"]);
+    assert_eq!(marker_version(&sandbox.claude("reviewer")), "v2");
+    let done = sandbox.session_start("claude-code");
+    assert!(!done.contains("available (needs review)"), "{done}");
 }
 
 #[test]

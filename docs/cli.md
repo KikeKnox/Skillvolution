@@ -479,8 +479,9 @@ included, no exclusive lock needed). `PATH` must not exist. Prints `Backed up to
 
 Subagent definitions kept in the vault and generated into client files. Applies to Claude Code
 and OpenCode. `agents add/remove/sync` are the human commands; the `install_agent` MCP tool runs
-the same code in process. Session start refreshes managed files that are behind the vault and may
-promote agents (see [hook session-start](#hook-session-start) and `promotion` below); nothing else
+the same code in process. Session start refreshes managed files that are behind the vault (except
+an update `sync` would flag for a tier change, added skills or widened tools, which the catalog
+lists as needing review) and may promote agents (see [hook session-start](#hook-session-start) and `promotion` below); nothing else
 is generated automatically.
 
 ```

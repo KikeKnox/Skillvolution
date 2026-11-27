@@ -4,7 +4,7 @@
 //! Nothing here runs a client's CLI or touches the network.
 
 use crate::{
-    agents::{self, AgentChange, InstallOptions, Target},
+    agents::{self, AgentChange, InstallOptions, Refresh, Target},
     skill_file,
     vault::{Candidate, Event, Vault},
 };
@@ -14,9 +14,6 @@ use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
 /// Most agents the catalog block lists.
 const AGENT_CATALOG_LIMIT: usize = 15;
-
-/// An agent file a session start rewrote, and its scope (`project` or `global`).
-pub type Refreshed = (AgentChange, &'static str);
 
 /// Records the `agent_*` events of `changes` at `scope`, with the project only for a
 /// project install.
@@ -29,13 +26,13 @@ fn log_changes(vault: &Vault, changes: &[AgentChange], scope: &str, project: Opt
 /// promoted earlier (first, so a stale copy about to go is not rewritten; copies of an
 /// agent promoted now are left until the next session there), rewrite outdated managed
 /// files, then the daily promotion run. Never fails: each error goes to `report` and the
-/// rest still runs. Returns the files rewritten.
+/// rest still runs. Returns the files rewritten and the updates held for review.
 pub fn upkeep(
     vault: &Vault,
     project: Option<&str>,
     project_dir: Option<&Path>,
     report: &mut dyn FnMut(Error),
-) -> Vec<Refreshed> {
+) -> Refresh {
     if let Some(dir) = project_dir
         && let Err(error) = retire(vault, project, dir)
     {
@@ -45,10 +42,10 @@ pub fn upkeep(
         Ok(refreshed) => refreshed,
         Err(error) => {
             report(error);
-            Vec::new()
+            Refresh::default()
         }
     };
-    for (change, scope) in &refreshed {
+    for (change, scope) in &refreshed.updated {
         log_changes(vault, std::slice::from_ref(change), scope, project);
     }
     match vault.claim_promotion_run() {
@@ -147,14 +144,15 @@ fn agent_line(id: &str, version: Option<i64>, tier: Option<&str>) -> String {
 /// The catalog block for a session of `target`: the Skillvolution agents installed for it
 /// (local and global, with versions) and the vault agents visible from `project` that
 /// are not, at most `AGENT_CATALOG_LIMIT`, then one line naming `target`'s files that
-/// `refreshed` rewrote. Ids, versions, tiers and descriptions only, never bodies. `None`
-/// when there are no agents and nothing of `target`'s was refreshed.
+/// `refreshed` rewrote and one per agent whose update it held for review. Ids, versions,
+/// tiers and descriptions only, never bodies. `None` when there are no agents and nothing
+/// of `target`'s was refreshed or held.
 pub fn catalog_block(
     vault: &Vault,
     project: Option<&str>,
     project_dir: Option<&Path>,
     target: Target,
-    refreshed: &[Refreshed],
+    refreshed: &Refresh,
 ) -> Result<Option<String>> {
     let mut installed: BTreeMap<String, Installed> = BTreeMap::new();
     for (dir, level) in agents::session_levels(target, project_dir) {
@@ -258,6 +256,7 @@ pub fn catalog_block(
     }
     // Only this client's files: the others are not this session's concern.
     let updated: Vec<String> = refreshed
+        .updated
         .iter()
         .filter(|(change, _)| change.target == target)
         .map(|(change, scope)| {
@@ -285,6 +284,16 @@ pub fn catalog_block(
             } else {
                 String::new()
             }
+        )?;
+    }
+    for (_, id, version) in refreshed
+        .needs_review
+        .iter()
+        .filter(|(held, ..)| *held == target)
+    {
+        writeln!(
+            text,
+            "{id} v{version} available (needs review): run `skillvolution agents sync`"
         )?;
     }
     Ok((!text.is_empty()).then_some(text))

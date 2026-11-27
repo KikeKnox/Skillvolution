@@ -367,8 +367,11 @@ OpenCode plugin.
 step best effort and never failing the hook):
 1. Managed files that are behind the vault (a new version, model, pinned skills or rendering) are
    rewritten with the same expected render `sync` uses, so a model pinned by `install_agent`
-   survives. Edited and foreign files are never touched. The catalog notes the refresh, and a
-   restart for clients that cannot hot-reload (OpenCode 1.x).
+   survives. Edited and foreign files are never touched, and neither is a new version that
+   `sync` flags as a tier change, added skills or widened tools (or whose installed revision
+   is gone): the catalog lists it as `<id> vN available (needs review)`, pointing at
+   `skillvolution agents sync`. The catalog notes the refresh, and a restart for clients that
+   cannot hot-reload (OpenCode 1.x).
 2. Project copies of agents that were already promoted are retired when they are managed, unedited
    and the per-user copy exists.
 3. At most once a UTC day (`vault_meta`), global-scope agents that pass the promotion thresholds

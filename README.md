@@ -222,7 +222,8 @@ The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`)
   `agents add` included.
 - **Little is automatic.** `agents sync` is a dry run until `--apply`. At session start (Claude
   Code and OpenCode) the catalog lists the agents, files that are behind the vault are
-  refreshed (never hand-edited ones), and an agent used in most of your projects is promoted
+  refreshed (never hand-edited ones, and never an update that widens tools, adds skills or
+  changes the tier: that one waits for `agents sync`), and an agent used in most of your projects is promoted
   to a per-user install, with the project copies retired. The thresholds are in
   `agents promotion`.
 - **Your edits are safe.** Hand-edited files are never overwritten without `--force`, and

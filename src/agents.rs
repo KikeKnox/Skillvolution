@@ -1225,6 +1225,27 @@ fn flags(vault: &Vault, old: i64, agent: &Agent, old_text: &str) -> Vec<String> 
     flags
 }
 
+/// Whether going from installed revision `old` to `agent` widens what the agent may do in a
+/// way `flags` reports and the user should see before the file is rewritten unattended: a
+/// tier change, added skills or widened tools, or a previous revision that cannot be
+/// compared against.
+fn needs_review(vault: &Vault, old: i64, agent: &Agent) -> bool {
+    if old == agent.version || builtin(&agent.id).is_some() {
+        return false;
+    }
+    let Ok(previous) = vault.inspect(&agent.id, old) else {
+        return true;
+    };
+    let Some(previous) = &previous.meta else {
+        return false;
+    };
+    previous.tier != agent.meta.tier
+        || agent.meta.skills.iter().any(|s| !previous.skills.contains(s))
+        || TOOLS
+            .into_iter()
+            .any(|t| agent.meta.allows(t) && !previous.allows(t))
+}
+
 /// The top-level frontmatter keys of `text` with their values; the indented lines of a
 /// block (OpenCode's `permission:`) are joined into the key's value.
 fn front_pairs(text: &str) -> Vec<(String, String)> {
@@ -1416,17 +1437,28 @@ pub(crate) fn session_levels(
     project.into_iter().chain([(user_dir, None)]).collect()
 }
 
+/// What a session-start refresh did.
+#[derive(Debug, Default)]
+pub struct Refresh {
+    /// Each file rewritten, with its scope (`project` or `global`).
+    pub updated: Vec<(AgentChange, &'static str)>,
+    /// The agents left at their installed version because `sync` flags the new one for
+    /// review (`needs_review`): client, id and the vault's version, once per client.
+    pub needs_review: Vec<(Target, String, i64)>,
+}
+
 /// Session-start refresh: rewrites, with `expected_plan`, the managed agent files of the
 /// project and the per-user directories (every client) that `is_outdated`. Hand-edited
 /// and foreign files are never touched, nor files whose agent is gone, deprecated or
-/// misplaced. Returns each file rewritten with its scope (`project` or `global`).
+/// misplaced, nor a new version that changes the tier, adds skills or widens the tools
+/// (`needs_review`: those wait for `agents sync`).
 pub fn refresh_outdated(
     vault: &Vault,
     project_key: Option<&str>,
     project_dir: Option<&Path>,
-) -> Result<Vec<(AgentChange, &'static str)>> {
+) -> Result<Refresh> {
     let models = vault.client_models()?;
-    let mut refreshed = Vec::new();
+    let mut refresh = Refresh::default();
     for target in Target::all() {
         for (dir, level) in session_levels(target, project_dir) {
             let key = level.and(project_key);
@@ -1444,9 +1476,16 @@ pub fn refresh_outdated(
                 if !is_outdated(&models, target, &agent, level, &state) {
                     continue;
                 }
+                if needs_review(vault, marker.version, &agent) {
+                    let held = (target, agent.id.clone(), agent.version);
+                    if !refresh.needs_review.contains(&held) {
+                        refresh.needs_review.push(held);
+                    }
+                    continue;
+                }
                 let plan = expected_plan(&models, target, &agent, level, Some(marker))?;
                 edits.push(Edit::Write(plan.path, plan.text));
-                refreshed.push((
+                refresh.updated.push((
                     AgentChange {
                         kind: "agent_update",
                         target,
@@ -1465,7 +1504,7 @@ pub fn refresh_outdated(
             exclude_from_git(level, &written, true);
         }
     }
-    Ok(refreshed)
+    Ok(refresh)
 }
 
 /// Deletes the project copies of `ids` that are managed (never hand-edited) and whose
