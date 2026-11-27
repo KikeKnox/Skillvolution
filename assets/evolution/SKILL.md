@@ -2,14 +2,15 @@
 name: evolution
 description: Use at the start of any non-trivial task to find and apply proven procedures from the shared Skillvolution vault, whenever a "vault skills matching this request" suggestion appears, after applying a vault skill to report whether it helped, and after finishing work to turn verified lessons into new skills.
 ---
-<!-- skillvolution-managed:evolution:v13 -->
+<!-- skillvolution-managed:evolution:v14 -->
 # Evolution
 
 The Skillvolution vault is shared procedural memory. Reuse what worked, report what did not, and leave behind only lessons that save the next agent real time.
 
-Two companion skills handle the parts of the loop that need more depth:
+Three companion skills handle the parts of the loop that need more depth:
 - `skill-acquisition` — follow it the moment you notice mid-task that you don't know how to do something (an unfamiliar tool or error, or two failed attempts).
 - `skill-evaluation` — the rubric the fresh evaluator subagent applies in step 5.
+- `agent-evaluation` — the same evaluator's rubric for a vault agent, before `publish_agent` (see Agents).
 
 ## 1. Retrieve (before non-trivial work)
 
@@ -26,7 +27,7 @@ Call `report_skill_outcome` once for every skill you loaded with `get_skill`, wi
 - `failed`: name the specific wrong or missing step and what actually worked. This is the most valuable signal in the vault.
 - `not_applicable`: loaded, but irrelevant to the task. Note why it looked relevant.
 
-After delegating to a subagent whose file (`.claude/agents/<id>.md` or `.opencode/agents/<id>.md` in the project, or `~/.claude/agents/<id>.md` or `~/.config/opencode/agents/<id>.md` per user) carries `<!-- skillvolution-managed:agent:<id>:v<N>:... -->`, also call `report_skill_outcome` with that id and version `N` read from the marker, with the same three results. Skip the built-in workers `sv-high`, `sv-mid` and `sv-low`: they have no vault row.
+Vault agents you delegated to are reported the same way (see Agents, step 5).
 
 ## 3. Reflect (after the work is done)
 
@@ -114,12 +115,24 @@ Call `publish_skill` with id, description, tags, content, scope, `evidence`, `ex
 - If `publish_skill` rejects the publication because the base version is **proven** (it has more `helped` than `failed` reports), do not just retry with `replaces_proven: true`: merge your new lesson into the existing content instead of rewriting it, then republish with `replaces_proven: true` — or, if the lesson is genuinely a different one, publish it under a new id. Only set `replaces_proven: true` when you are consciously replacing a version that was working.
 - Tell the user the published id and version; they can hide it later with `skillvolution deprecate`.
 
+## Agents
+
+Vault agents are subagents with a bounded role, a tier (`high`, `mid`, `low`) and an output contract. Their prompt runs only inside the subagent: no tool returns it and `get_skill` refuses agents, so never load or paste an agent's prompt yourself.
+
+1. Before delegating non-trivial work, call `search_agents` with 2-5 English keywords for the work (e.g. `review diff`). It lists vault agents and the built-in workers `sv-high`, `sv-mid`, `sv-low`, with `installed` and `outdated`. Prefer a vault agent whose description fits over your client's generic agents.
+2. If the match is `installed: no` or `outdated: true`, call `install_agent` with its id. It returns how to delegate to it (tool and name) and whether the client must restart to see it; if it must, tell the user and delegate to an installed agent meanwhile.
+3. Call `list_models` for the agent's tier. Where `per_call` says how to pass a model, pass the first one (or a better fit) when delegating; where it says the client cannot take one, the model is fixed in the file — to change it, `install_agent` again with `model`.
+4. Delegate by the returned name with a self-contained task; the agent already has its procedure and output contract.
+5. Then call `report_skill_outcome` with the agent's id and version (from `install_agent`, `search_agents`, or the `<!-- skillvolution-managed:agent:<id>:v<N>:... -->` marker of its file), with the same three results as for skills. Skip `sv-high`, `sv-mid` and `sv-low`: they have no vault row.
+
+To add an agent — the user asks for one, or you delegated the same kind of work several times with a hand-written prompt that worked — draft a candidate: `id`, `description` ("Use when <work to delegate>"), `tier`, the minimal `tools` (`read`, `edit`, `shell`, `web`, `mcp`), optional `skills`, and `content` with `## Role`, `## Procedure`, `## Output contract` (required), `## Limits`, in that order, never telling it to delegate. Evaluate it as in step 5, but tell the fresh subagent to follow the `agent-evaluation` skill, and give it the candidate, its evidence, and the closest agent's id and version from `search_agents` (not its prompt). Then call `publish_agent` with the evaluated fields, `evidence`, `expected_version`, and the verdict and reason verbatim, exactly as step 6 describes for skills; on `discard`, publish nothing. Never publish an agent prompt as a skill.
+
 ## The `skillvolution` CLI
 
 - Never run `skillvolution publish` yourself to put a lesson in the vault: it skips the fresh evaluator. Agent lessons go through step 5 and `publish_skill`. The only exception is when the user explicitly asks you to publish a specific SKILL.md they wrote or approved.
 - When the user wants to add or edit a skill by hand, point them to `skillvolution get <id>`, edit the file, then `skillvolution publish <file> --replace`; `skillvolution publish <dir>` imports a whole directory of skills at once.
-- Never run `skillvolution agents add`, `agents remove` or `agents sync --apply` yourself unless the user explicitly asks; subagent files are installed and updated by the user. Agents cannot be published with `publish_skill` (yet): only the user publishes an `AGENT.md`, with `skillvolution publish`. Never publish an agent prompt as a skill.
-- `skillvolution outcomes --unreported` lists skills that were loaded without an outcome report; use it when the user asks about vault health.
+- Install agents with `install_agent`, not `skillvolution agents add`: it writes only this client's file and says how to delegate. Never run `agents remove`, `agents sync --apply` or anything with `--force` yourself unless the user explicitly asks: they delete or rewrite subagent files, hand-edited ones included. As with skills, never `skillvolution publish` an `AGENT.md` yourself unless the user explicitly asks; agents go through `agent-evaluation` and `publish_agent`.
+- When the user asks how Skillvolution is performing, or after repeated failures (searches that find nothing, skills or agents that keep failing, vault calls that error), call `usage_report` (read-only counts, never prompt text) and base your answer on it. `skillvolution outcomes --unreported` lists skills loaded without an outcome report.
 
 ## Boundaries
 

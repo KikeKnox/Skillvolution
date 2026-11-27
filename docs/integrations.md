@@ -23,13 +23,14 @@ command text and rewrites them in their existing slot; a hook group that removin
 ours leaves empty is dropped, while any other group — including a foreign one that
 was already empty — is kept as is.
 
-Every client also gets three managed skills, each at `skills/<name>/SKILL.md`
+Every client also gets four managed skills, each at `skills/<name>/SKILL.md`
 under its config directory (`.claude/skills/…`, `.codex/skills/…` and so on in a
 project): `evolution`, `skill-evaluation` (the evaluator subagent's rubric), and
-`skill-acquisition` (what an agent follows when it lacks know-how). Each carries
+`skill-acquisition` (what an agent follows when it lacks know-how), and
+`agent-evaluation` (the evaluator's rubric for a vault agent). Each carries
 its own marker `skillvolution-managed:<name>:vN`. Where this page says "the skill
-file" below, it means all three. The `AGENTS.md`/`GEMINI.md` marker block and the
-Cursor rule mention `skill-acquisition` and `skill-evaluation`.
+file" below, it means all four. The `AGENTS.md`/`GEMINI.md` marker block and the
+Cursor rule mention `skill-acquisition`, `skill-evaluation` and `agent-evaluation`.
 
 Retrieval happens in two hooks: `session-start` (catalog) and `prompt` (skills
 matching each submitted prompt, see
@@ -74,7 +75,7 @@ SQLite WAL needs local storage.
 ```
 
 - `skills/evolution/SKILL.md`, `skills/skill-evaluation/SKILL.md`,
-  `skills/skill-acquisition/SKILL.md` — managed skill files (markers
+  `skills/skill-acquisition/SKILL.md`, `skills/agent-evaluation/SKILL.md` — managed skill files (markers
   `skillvolution-managed:<name>:vN`).
 - MCP registration via the `claude` CLI — `~/.claude.json` is never edited:
 
@@ -92,7 +93,7 @@ claude mcp add-json --scope user skillvolution \
 
 **Project** (`<dir>`): `.mcp.json` gets the same server entry (with
 `"--project", "KEY"` before `--client` in `args`), `.claude/settings.local.json` gets the
-hooks and permissions, and the three skills are installed under
+hooks and permissions, and the four skills are installed under
 `.claude/skills/<name>/SKILL.md`. SessionStart and UserPromptSubmit carry
 `--project 'KEY'`, and so does Stop (project-scoped installs only; the global one passes none), which uses it to tell
 vault agents visible from the project apart from foreign ones when a delegation is scanned.
@@ -137,12 +138,17 @@ both files existing is an error):
     "skillvolution_search_skills": "allow",
     "skillvolution_get_skill": "allow",
     "skillvolution_report_skill_outcome": "allow",
-    "skillvolution_publish_skill": "allow"
+    "skillvolution_publish_skill": "allow",
+    "skillvolution_usage_report": "allow",
+    "skillvolution_search_agents": "allow",
+    "skillvolution_install_agent": "allow",
+    "skillvolution_list_models": "allow",
+    "skillvolution_publish_agent": "allow"
   }
 }
 ```
 
-- the three skills (`skills/<name>/SKILL.md`), `AGENTS.md` marker block, and
+- the four skills (`skills/<name>/SKILL.md`), `AGENTS.md` marker block, and
   `plugins/skillvolution.js` — the plugin that drives reminders (with `BIN`,
   `DB`, and the project key baked in).
 
@@ -206,7 +212,7 @@ AGENTS.md block.
 }
 ```
 
-- the three skills (`skills/<name>/SKILL.md`) and the `AGENTS.md` marker block.
+- the four skills (`skills/<name>/SKILL.md`) and the `AGENTS.md` marker block.
 
 **Project** (`<dir>`): `.devin/mcp_config.json`, `.devin/config.json`,
 `.devin/skills/<name>/SKILL.md` (three), `AGENTS.md`.
@@ -245,7 +251,7 @@ args = ["--db", "DB", "serve", "--client", "codex"]
   (matcher `^(apply_patch|mcp__skillvolution__.*)$`), `Stop`, `SessionEnd`,
   and `PermissionRequest` (matcher `^mcp__skillvolution__.*$` →
   `hook approve`).
-- the three skills (`skills/<name>/SKILL.md`), `AGENTS.md` marker block.
+- the four skills (`skills/<name>/SKILL.md`), `AGENTS.md` marker block.
 
 **Project** (`<dir>`): `.codex/config.toml` (with a comment noting Codex
 only loads project config after you accept its trust prompt),
@@ -287,7 +293,7 @@ itself):
 `"trust": true` is set on the Skillvolution server only, and only when the
 entry has no `trust` key — a `trust: false` you set survives reruns.
 
-- the three skills (`skills/<name>/SKILL.md`, inside the `.gemini` dir) and the
+- the four skills (`skills/<name>/SKILL.md`, inside the `.gemini` dir) and the
   `GEMINI.md` marker block.
 
 **Project** (`<dir>`): `.gemini/settings.json`, `.gemini/skills/<name>/SKILL.md`
@@ -304,7 +310,7 @@ session.
 
 ## Cursor
 
-**Global** (`~/.cursor`): the three skills (`skills/<name>/SKILL.md`), `mcp.json`
+**Global** (`~/.cursor`): the four skills (`skills/<name>/SKILL.md`), `mcp.json`
 (`mcpServers` entry, `"type": "stdio"`), `hooks.json`, and
 `cli-config.json` permissions:
 
@@ -317,7 +323,8 @@ session.
 permission grant), and `.cursor/rules/skillvolution.mdc` — a rule file with
 `alwaysApply: true` carrying the trigger instruction. There is no global
 rules file, so globally the skills plus the SessionStart catalog are the only
-trigger. The rule mentions `skill-acquisition` and `skill-evaluation` too.
+trigger. The rule mentions `skill-acquisition`, `skill-evaluation` and
+`agent-evaluation` too.
 
 `hooks.json` uses Cursor's flat shape (no group wrapper), with `"version": 1`
 added only when the file doesn't already carry it:

@@ -45,10 +45,11 @@ flowchart TD
 ```
 
 The loop is the `evolution` skill that `setup` installs into every client
-([`assets/evolution/SKILL.md`](assets/evolution/SKILL.md)). Two companion skills are
+([`assets/evolution/SKILL.md`](assets/evolution/SKILL.md)). Three companion skills are
 installed with it: `skill-acquisition` covers the mid-task moment when the agent realizes
 it lacks the know-how (search the vault, then research and verify). `skill-evaluation`
-gives the evaluator its hard gates, its 16-point rubric, and the exact verdict format.
+gives the evaluator its hard gates, its 16-point rubric, and the exact verdict format;
+`agent-evaluation` does the same for a vault agent before `publish_agent`.
 
 ```mermaid
 flowchart LR
@@ -64,7 +65,7 @@ flowchart LR
     subgraph bin["skillvolution binary"]
         direction TB
         hooks["hook session-start, prompt,<br/>tool-use, stop, ..."]
-        mcp["serve: MCP over stdio<br/>8 tools"]
+        mcp["serve: MCP over stdio<br/>9 tools"]
         cli["CLI: setup, doctor,<br/>publish, curation"]
     end
     clients -- "hooks or OpenCode plugin" --> hooks
@@ -85,6 +86,7 @@ flowchart LR
 | `search_agents` | Lists the vault's subagents visible from the project with tier, where each is installed and whether it is outdated; never the prompt |
 | `install_agent` | Writes an agent's subagent file for the calling client (as `agents add`), kept out of git via `.git/info/exclude`; says how to delegate and whether a restart is needed |
 | `list_models` | The enabled models of a tier for the calling client, and how to pass each per delegation call (or that the client can't) |
+| `publish_agent` | Publishes a new agent or version (`AGENT.md` fields) after a `keep global` / `keep project` verdict from an evaluator following `agent-evaluation`; never returns the prompt |
 
 Full parameter reference: [docs/cli.md#mcp-tools](docs/cli.md#mcp-tools).
 
@@ -167,8 +169,8 @@ locations: [docs/configuration.md](docs/configuration.md). Hook and plugin behav
 <details>
 <summary><b>What global <code>setup</code> writes, per client</b></summary>
 
-Every client gets the three managed skills (`evolution`, `skill-evaluation`,
-`skill-acquisition`) at `skills/<name>/SKILL.md`, plus the following:
+Every client gets the four managed skills (`evolution`, `skill-evaluation`,
+`skill-acquisition`, `agent-evaluation`) at `skills/<name>/SKILL.md`, plus the following:
 
 | Client | Files and entries | Review reminder | Notes |
 |---|---|---|---|
@@ -320,7 +322,7 @@ skillvolution setup --dry-run                # unified diff of every file, nothi
 skillvolution setup --remove                 # undo (see Uninstall)
 ```
 
-`setup` writes the three skills, the MCP server entry, the hooks or plugin each client
+`setup` writes the four skills, the MCP server entry, the hooks or plugin each client
 uses, and the permission grants the review flow needs to run unattended. Rerun it after
 you install a new AI client and after every binary upgrade.
 
@@ -512,7 +514,7 @@ skillvolution setup --project DIR --remove   # a project-level install
 
 Uninstall removes:
 
-- the three managed skill files, and their directories once empty;
+- the four managed skill files, and their directories once empty;
 - the hooks, MCP entries, plugin, and rule file;
 - the Skillvolution-specific permission grants;
 - Claude Code's user-scope MCP registration, via `claude mcp remove`.

@@ -364,8 +364,8 @@ happen and setup prints the `claude mcp add-json` command to run manually (and t
 `claude mcp remove` equivalent for `--remove`); `--dry-run` shows that command as
 `Would print (claude CLI not found on PATH): …`.
 
-Every client gets three managed skills, `evolution`, `skill-evaluation`, and
-`skill-acquisition`, at `skills/<name>/SKILL.md`, each with its own
+Every client gets four managed skills, `evolution`, `skill-evaluation`,
+`skill-acquisition`, and `agent-evaluation`, at `skills/<name>/SKILL.md`, each with its own
 `skillvolution-managed:<name>:vN` marker. A user's own file at any of those paths makes
 setup refuse (`unowned … skill conflict`); `--remove` skips it with a note and deletes
 only the marked ones, plus any skill directory left empty.
@@ -554,7 +554,7 @@ command, a `skillvolution` MCP server entry, the `AGENTS.md`/`GEMINI.md` marker 
 managed skill file, or the OpenCode plugin — a file that merely mentions
 `skillvolution`, e.g. in a permission entry, doesn't count), staleness of
 the installed version of each managed skill (`evolution`, `skill-evaluation`,
-`skill-acquisition`), a configured binary path that no longer exists (fail), Claude Code's user-scope MCP registration, and a project-level install left in
+`skill-acquisition`, `agent-evaluation`), a configured binary path that no longer exists (fail), Claude Code's user-scope MCP registration, and a project-level install left in
 the current repo next to the global one. A client whose config can't be read or parsed
 gets its own `[fail]` check and the report continues. `--json` prints
 `{"healthy": bool, "checks": [{"name", "status", "detail"}]}`.
@@ -622,7 +622,7 @@ The vault is only read, never migrated, for these checks.
 line on stdout. `initialize` negotiates the protocol version (`2025-06-18`,
 `2025-03-26`, `2024-11-05` supported; an unrecognized version falls back to the newest)
 and returns `capabilities.tools` plus `instructions` for the agent. `ping` returns `{}`,
-`tools/list` returns the eight tools below, `tools/call` dispatches by `name`.
+`tools/list` returns the nine tools below, `tools/call` dispatches by `name`.
 
 Protocol errors are JSON-RPC errors on the same `id`:
 
@@ -640,9 +640,9 @@ model can read and react to it.
 
 `search_skills` never returns agents and `get_skill` refuses an agent id (telling the
 model to delegate instead); agents have their own tools (`search_agents`,
-`install_agent`, `list_models`), none of which ever returns an agent's prompt. `report_skill_outcome` accepts
+`install_agent`, `list_models`, `publish_agent`), none of which ever returns an agent's prompt. `report_skill_outcome` accepts
 an agent id with the version from the generated file's marker. `publish_skill` cannot
-publish agents, and an id already used by an agent is refused.
+publish agents, and an id already used by an agent is refused (use `publish_agent`).
 
 ### search_skills
 
@@ -784,3 +784,25 @@ rejections (all returned as `isError` tool results):
   the new version, merge, and re-evaluate;
 - replacing a proven version without `replaces_proven: true` — merge the base's content
   rather than rewriting it, or publish under a new id.
+
+Every refusal after the arguments parse is recorded as a `publish_rejected` event.
+
+### publish_agent
+
+`publish_skill`'s parameters and rules (`id`, `description`, `tags`, `evidence`,
+`expected_version`, `scope`, `verdict`, `verdict_reason`, `replaces_proven`), with an
+agent's metadata and prompt instead of a skill's body — the fields of an `AGENT.md`:
+
+| Param | Type | Constraint |
+|---|---|---|
+| `tier` | string | required; `high`, `mid`, or `low` |
+| `effort` | string | `low`, `medium`, `high`, `xhigh`, or `max`; overrides the tier's |
+| `tools` | string[] | any of `read`, `edit`, `shell`, `web`, `mcp`; omitted allows every tool, including delegation |
+| `skills` | string[] | ≤ 8 ids of published skills visible from the agent's scope; needs `mcp` in `tools` |
+| `content` | string | required; ≤ 65,536 bytes; must contain `## Output contract`, and any of `## Role`, `## Procedure`, `## Limits` in the order Role, Procedure, Output contract, Limits |
+
+The verdict comes from a fresh evaluator following the `agent-evaluation` skill. The id
+must not be reserved (`sv-*`, client built-in agent names, managed skill names) nor
+already used by a skill. Returns the same summary as `publish_skill` (`id`, `version`,
+`status`, `expected_version`, `scope`, `next`), never the prompt; install the agent with
+`install_agent` to delegate to it.

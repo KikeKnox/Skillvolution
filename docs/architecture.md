@@ -47,7 +47,7 @@ client hooks.
 
 | Module | Role |
 |---|---|
-| `setup/mod.rs` | `Scope`, `Change`/`Edit` model, atomic apply with rollback, `setup`/`--remove`/`--dry-run` orchestration; `SKILLS`, the table of managed skills (`evolution`, `skill-evaluation`, `skill-acquisition`) embedded from `assets/<name>/SKILL.md` |
+| `setup/mod.rs` | `Scope`, `Change`/`Edit` model, atomic apply with rollback, `setup`/`--remove`/`--dry-run` orchestration; `SKILLS`, the table of managed skills (`evolution`, `skill-evaluation`, `skill-acquisition`, `agent-evaluation`) embedded from `assets/<name>/SKILL.md` |
 | `setup/client.rs` | `ClientKind` enum, client sets, per-client `global_dir`/`changes`/`removals` dispatch |
 | `setup/common.rs` | Shared pieces: config dirs from env, the managed skills' changes/removals (one per `SKILLS` entry) and `AGENTS.md` block, MCP server argv |
 | `setup/fs_safe.rs` | Atomic file writes with backup; per-skill ownership checks (`check_skill`/`is_our_skill` by marker name); strict-JSON load/merge/remove helpers |
@@ -262,9 +262,10 @@ fresh subagent following `skill-evaluation`.
 
 | Skill | Purpose |
 |---|---|
-| `evolution` (v13) | The vault loop: search and apply, report outcomes, reflect, dispatch the evaluator, publish |
+| `evolution` (v14) | The vault loop: search and apply, report outcomes, reflect, dispatch the evaluator, publish |
 | `skill-evaluation` | The evaluator subagent's rubric: hard gates, 16-point rubric (keep at 11+), verdict format `publish_skill` expects |
 | `skill-acquisition` | What an agent follows on noticing it lacks know-how: vault first, then local and authoritative sources, a small experiment, stop-loss, capture |
+| `agent-evaluation` | The evaluator's rubric for a vault agent: hard gates (bounded role, no delegation, verifiable output contract, listed skills exist, verified, safe), 16-point rubric (keep at 11+), verdict format `publish_agent` expects |
 
 Each file starts with the frontmatter `name` and carries its own marker
 `<!-- skillvolution-managed:<name>:vN -->`. The marker decides ownership per file: setup
@@ -290,7 +291,7 @@ Subagent definitions live in the same vault as skills (`skills.kind = 'agent'`, 
 with `sv-` are reserved for the built-in workers (`sv-high/mid/low`, embedded from `assets/agents/`,
 no vault row, so no outcome reports), as are the client/managed names `general-purpose`,
 `statusline-setup`, `claude-code-guide`, `explore`, `plan`, `build`, `general`, `compaction`, `title`,
-`summary`, `evolution`, `skill-evaluation`, `skill-acquisition` (`reserved_agent_id`; skills may use
+`summary`, `evolution`, `skill-evaluation`, `skill-acquisition`, `agent-evaluation` (`reserved_agent_id`; skills may use
 them). Checked on publish, on `import`, and in `agents add/sync`. Publishing an agent also requires
 every id in `skills` to be a published skill visible from the agent's scope; `import` does not
 check this, and `agents add/sync` and `doctor` warn about skills that are gone. `purge` refuses a
