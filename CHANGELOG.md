@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
+## [v0.6.1]
+
+_2026-11-27_
+
+OpenCode 2.x: the Skillvolution plugin failed to load there ("Plugin must export a default
+definition with an id and an effect or setup function"), so OpenCode 2.x sessions got no
+catalog, no skill suggestions, no review reminder and no delegation tracking. Rerun
+`skillvolution setup` to install the new plugin file (`skillvolution doctor --fix` also
+refreshes a global install).
+
+### Fixed
+
+- `skillvolution.js` now has a single `export default { id, server, setup }` that loads in
+  both plugin systems: OpenCode 1.x runs `server` (unchanged hooks), OpenCode 2.x runs
+  `setup`, which injects the catalog and suggestions through `session.hook("context")` and
+  `session.hook("prompt")`, tracks work and delegations through
+  `tool.hook("execute.after")`, and ends turns on the `session.execution.*` and
+  `session.deleted` events.
+- Delegations to managed vault agents are recognized through both `task`/`subagent_type`
+  (1.x) and `subagent`/`agent` (2.x); a failed 2.x tool call is not counted as work.
+
 ## [v0.6.0]
 
 _2026-11-06_
