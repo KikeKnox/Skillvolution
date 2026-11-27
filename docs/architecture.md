@@ -12,7 +12,9 @@ client hooks.
 | Module | Role |
 |---|---|
 | `skill_file.rs` | SKILL.md / AGENT.md frontmatter parser and YAML scalar quoting |
-| `agents.rs` | Built-in workers, per-client rendering, marker/hash ownership, `agents add/remove/sync/import` |
+| `agents.rs` | Built-in workers, per-client rendering, marker/hash ownership, the shared `install` behind `agents add` and `install_agent`, `agents add/remove/sync/import` |
+| `agent_session.rs` | What session start does about agents: refresh stale managed files, retire project copies of promoted agents, promote heavily used agents once a day, and the catalog's agents block |
+| `clients/` | The client registry: one `ClientSpec` per client (`clients/<client>.rs`: detection, setup, hooks, agent generation) and `version.rs` (per-version `Caps`, `<cli> --version` detection). Code that works on every client iterates `ClientKind::ALL` and reads the spec |
 | `main.rs` | Arg parsing, command dispatch, `hook` subcommands, project detection |
 | `lib.rs` | Re-exports the modules so integration tests and the binary share them |
 
@@ -20,7 +22,7 @@ client hooks.
 
 | Module | Role |
 |---|---|
-| `mcp.rs` | JSON-RPC server loop on stdio; `initialize`, `tools/list`, `tools/call`; tool argument validation |
+| `mcp.rs` | JSON-RPC server loop on stdio (`serve --client`); `initialize`, `tools/list` (nine tools), `tools/call`; tool argument validation; `publish_agent` and `usage_report` |
 | `mcp_agents.rs` | The MCP agent tools behind `search_agents`, `install_agent` (the shared `agents::install`) and `list_models`; never return an agent's body |
 | `git_exclude.rs` | Keeps agent files written inside a project out of git: anchored lines in a marked block of `.git/info/exclude` (the common git dir for worktrees), removed on uninstall |
 
@@ -38,7 +40,11 @@ client hooks.
 | `vault/schema.sql` | Table/view definitions for the initial schema |
 | `vault/search.rs` | FTS5 search, ranking, catalog listing |
 | `vault/revisions.rs` | Publish logic: versioning, scope, optimistic concurrency, proven-version guard |
-| `vault/agent.rs` | Agent metadata (`AgentMeta`), tiers/efforts/tools, validation, `agent_models` access, reserved ids |
+| `vault/agent.rs` | Agent metadata (`AgentMeta`), tiers/efforts/tools, validation, reserved ids |
+| `vault/client_model.rs` | `client_models`: ranked, enable-able models per client and tier; `agents models` |
+| `vault/client_version.rs` | `client_versions`: the version each client reported at the last setup, read by hooks and `list_models` |
+| `vault/events.rs`, `vault/telemetry.rs` | The local `events` table (recording, retention) and its `summary`/`events` queries behind `telemetry` and `usage_report` |
+| `vault/promotion.rs` | Promotion thresholds (compiled defaults, overrides in `vault_meta`) and the pure evaluation over usage events |
 | `vault/outcomes.rs` | Outcome recording and listing (`helped`/`failed`/`not_applicable`) |
 | `vault/transfer.rs` | `purge`, JSON export/import, `backup` (`VACUUM INTO`) |
 | `vault/location.rs` | Default vault path; network-filesystem detection (advisory) |
@@ -76,7 +82,7 @@ client hooks.
 
 ## Data model
 
-From `src/vault/schema.sql` (current schema v6):
+From `src/vault/schema.sql` (current schema v9):
 
 | Table / view | Purpose |
 |---|---|
@@ -89,22 +95,28 @@ From `src/vault/schema.sql` (current schema v6):
 | `skills_fts` | FTS5 index over id/description/tags/content, `porter unicode61 remove_diacritics 2` (English stemming on text and queries alike) |
 | `skills.kind` | `skill` (default) or `agent`; fixed at an id's first publish |
 | `revisions.meta` | JSON agent metadata (`role`, `tier`, `effort`, `tools`, `skills`); NULL for skills |
-| `agent_models` | `(client, tier)` -> `model`, `effort`; user overrides of the tier mapping; local, not exported |
+| `client_models` | Ranked models per `(client, tier)`: `provider` (empty = unknown), `model`, `effort`, `priority` (lower first), `enabled`; replaces `agent_models`; local, not exported |
+| `client_versions` | `client` -> `version`, `detected_at`: what `<cli> --version` reported at the last setup; local, not exported |
+| `events` | Local usage telemetry: `at`, `client`, `client_version`, `project`, `session`, `kind`, `subject`, `version`, `data` (JSON). Rows older than 180 days are pruned, at most once a day; never exported or sent anywhere (see [Telemetry](#telemetry)) |
+| `vault_meta` | Small key/value store: the daily prune and promotion run markers, promotion threshold overrides, the promoted agents |
 | `current_skills` | View (exposes `kind` and `meta`): each skill's latest published revision plus its helped/failed/not_applicable counts, and `prior_helped`/`prior_failed` from the immediately preceding published version (0 if none) |
 
 ## Schema versioning and migrations
 
-- Current version: **v6**. Ordered `MIGRATIONS` chain in `src/vault/mod.rs`:
+- Current version: **v9**. Ordered `MIGRATIONS` chain in `src/vault/mod.rs`:
   - v1 → v2: add `devin_hook_state`.
   - v2 → v3: FTS rows addressed by `rowid`; one outcome per skill/version/project/UTC day; legacy drafts retired; hook-state timestamp columns and pruning support.
   - v3 → v4: `loads` table; `current_skills` recreated with `prior_helped`/`prior_failed`.
   - v4 → v5: `revisions` rebuilt with `status IN ('published', 'superseded')`; any remaining `draft`/`rejected` row becomes `superseded` with its `review_note` prefixed `legacy <status>` (`legacy <status>: <old note>`); `current_skills` recreated unchanged; `skills_fts` dropped and recreated with the `porter` tokenizer, repopulated from `current_skills` keyed by `skills.rowid`, and `fts_rowid` reset (as v3 did).
   - v5 → v6: `skills.kind` (`skill`/`agent`, existing rows become `skill`), `revisions.meta`, table `agent_models`; `current_skills` recreated with `kind` and `meta`.
+  - v6 → v7: `client_versions`.
+  - v7 → v8: `events` and `vault_meta`.
+  - v8 → v9: `client_models` replaces `agent_models`; existing rows become priority-0 rows (Claude Code rows with provider `anthropic`, OpenCode rows with the model's `provider/` prefix, or unknown).
 - Migrations run in one IMMEDIATE transaction with foreign keys switched off around it (a table rebuild needs that); the `PRAGMA foreign_key_check` violation count is taken before the steps run and must not be higher afterwards (violations already in the vault are left as they are).
 - `PRAGMA application_id` is `SKV1`; a non-empty database with a different `application_id` is refused as foreign.
-- A database with a newer schema version is refused.
+- A database with a newer schema version is refused, so once a vault has migrated to v9 an older binary can no longer open it; run `skillvolution backup PATH` before the first use of a new binary.
 - When the schema is already current the vault opens without taking a write lock, so concurrent read-only opens don't serialize.
-- `hook_state`/`devin_hook_state` rows older than 30 days are pruned.
+- `hook_state`/`devin_hook_state` rows older than 30 days are pruned; `events` rows older than 180 days are pruned at most once a day (`vault_meta`).
 
 ## Search ranking
 
@@ -169,12 +181,12 @@ vault never stalls the agent.
 
 Two tracking designs. In both, work is a file edit, **a successful `get_skill`**, or a delegation to a managed vault agent (Claude Code `Agent`/`Task`, OpenCode `task`; not `sv-*`; the generated file must carry the skillvolution marker): whoever loaded a skill or delegated to an agent owes an outcome report, so those count like editing. Vault tools are matched by name suffix, since each client prefixes MCP tool names its own way.
 
-- **Claude Code** — transcript scan. `Stop` reads the session transcript JSONL from the stored byte offset (`hook_state`). Work tools: `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (Bash does not count), plus `get_skill`, plus a successful `Agent`/`Task` delegation whose `input.subagent_type` is a vault agent visible from the current project (built-in `sv-*` and unknown types do not count; the subagent's own tool calls are not in this transcript). A review or load counts only when its tool result succeeds (`is_error` results don't). The hook blocks when the latest work (edit or successful load) is newer than the latest successful `publish_skill`/`report_skill_outcome`. Each transcript span is judged once; `stop_hook_active=true` prevents repeated blocking.
+- **Claude Code** — transcript scan. `Stop` reads the session transcript JSONL from the stored byte offset (`hook_state`). Work tools: `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (Bash does not count), plus `get_skill`, plus a successful `Agent`/`Task` delegation whose `input.subagent_type` is a vault agent visible from the current project (built-in `sv-*` and unknown types do not count; the subagent's own tool calls are not in this transcript). A review or load counts only when its tool result succeeds (`is_error` results don't). The hook blocks when the latest work (edit or successful load) is newer than the latest successful `publish_skill`/`publish_agent`/`report_skill_outcome`. Each transcript span is judged once; `stop_hook_active=true` prevents repeated blocking.
 - **Flag-tracked clients** (Devin, Codex, Gemini, Cursor) — these do not count delegations to vault agents. `tool-use` sets `worked` on matching file-editing tools or `get_skill` and `reviewed` on vault review tools; `stop` emits the reminder if `worked` is set after `reviewed`. Work after a review re-arms the reminder; every judged stop consumes the span. `session-end` deletes the session state. Work tools per client: Devin `write`/`edit`/`apply_patch`/`notebook_edit`, Codex `apply_patch`, Gemini `write_file`/`replace`, Cursor `Write` (plus `get_skill` everywhere; each client's `PostToolUse` matcher includes its vault tools).
 
 When the span holds successful delegations to managed vault agents after the last review, the Claude Code hook and the OpenCode plugin append a second line to the reminder, `Delegated vault agents to report: counter-agent v2, reviewer v1.` (ids deduplicated, versions from the generated file's marker), so the delegation is not mistaken for a built-in agent; the constant itself is unchanged. In OpenCode, tool calls of a child (subagent) session count toward the parent only when they are file edits: a child's own `get_skill` loads and `report_skill_outcome` calls are about its skills and never mark the parent reviewed. Project agent files are looked up under the plugin input's `worktree` (the repository root, where `agents add` writes), falling back to `directory`.
 
-The reminder text is `STOP_REASON` in `hook.rs`: it asks for `report_skill_outcome` on every skill loaded with `get_skill` and every vault agent delegated to, then for any lesson meeting the criteria a fresh subagent following the `skill-evaluation` skill, then `publish_skill`. The OpenCode plugin's `REVIEW_REMINDER` must be identical (a test checks it).
+The reminder text is `STOP_REASON` in `hook.rs`: it asks for `report_skill_outcome` on every skill loaded with `get_skill` and every vault agent delegated to, then for any lesson meeting the criteria a fresh subagent following the `skill-evaluation` skill (`agent-evaluation` for an agent), then `publish_skill` (`publish_agent` for an agent). The OpenCode plugin's `REVIEW_REMINDER` must be identical (a test checks it).
 
 `hook approve` (wired to PermissionRequest for Devin and Codex) emits
 `{"decision":"approve","reason":"Skillvolution-managed tool"}` for
@@ -184,7 +196,9 @@ The reminder text is `STOP_REASON` in `hook.rs`: it asks for `report_skill_outco
 for Claude Code, Devin, Codex, and Gemini, `additional_context` for Cursor. Its header
 tells the agent to check the catalog (`search_skills` if nothing fits; matches are also
 suggested per request), say in one line which skill it applies, and follow
-`skill-acquisition` when it lacks the know-how.
+`skill-acquisition` when it lacks the know-how. For a client with subagents (Claude Code,
+OpenCode) and a top-level session it also prints the agents block and does the agent upkeep
+described under [Agents](#agents); a subagent session gets neither.
 
 ### Prompt hook
 
@@ -253,7 +267,7 @@ only as far as it fits, verify it with the Verification section, and call
 `report_skill_outcome` with the loaded id and version. The tool descriptions and the
 `initialize` instructions mention per-request suggestions, the one-line "which skill I
 am applying" statement, the `skill-acquisition` skill, and that publication requires a
-fresh subagent following `skill-evaluation`.
+fresh subagent following `skill-evaluation` (`agent-evaluation` for `publish_agent`).
 
 ## Managed skills
 
@@ -280,8 +294,13 @@ have the evaluator follow `skill-evaluation`.
 
 Subagent definitions live in the same vault as skills (`skills.kind = 'agent'`, metadata in
 `revisions.meta`) and share versioning, scope, outcomes and export/import. They are excluded from
-`search_skills`, the SessionStart catalog and prompt suggestions (`search()` is skills only;
-`search_kind` selects by kind). Only the CLI lists them (`list --kind agent`).
+`search_skills`, the skills part of the SessionStart catalog and prompt suggestions (`search()` is
+skills only; `search_kind` selects by kind). They have their own surface: `list --kind agent` on the
+CLI and the MCP tools `search_agents`, `install_agent`, `list_models` and `publish_agent`
+(`mcp_agents.rs`; none returns an agent's body, and `get_skill` refuses an agent id). The MCP
+server learns the client it serves from `serve --client`, which setup writes into every MCP
+entry; without it (an entry from before v0.7.0, which `doctor --fix` corrects) `install_agent`
+writes for every configured client with agents and `list_models` needs a `client` argument.
 
 **Format.** `AGENT.md` = frontmatter (`name`, `description`, `tier`, optional `role`, `effort`,
 `tools`, `skills`, `tags`, `scope`) + body. `role: primary` is rejected (not supported yet).
@@ -299,8 +318,13 @@ skill listed by a current agent revision unless `--force`. A skill id cannot be 
 
 **Tiers.** `high|mid|low` abstract the model. Claude Code defaults: high -> `opus`/`high`,
 mid -> `sonnet`/`medium`, low -> `haiku`/`low`. OpenCode has no default (the file inherits the
-client's model, with a warning). `agents models set` overrides per client in `agent_models`
-(not exported).
+client's model, with a warning). `client_models` (not exported) holds the user's models per client
+and tier as a ranked list (`agents models add/remove/enable/disable`, plus the single-model
+`set`/`unset`): generation uses the enabled row with the lowest priority, else the default. A row's
+provider can be unknown (a bare OpenCode model); such a model is listed but cannot be passed per
+call. `list_models` returns these rows with how each can be passed when delegating, from the
+client's version caps: OpenCode 2.x takes `provider/model` per call, 1.x and non-alias Claude Code
+models need the agent reinstalled with `install_agent`.
 
 **Generation** (`agents add`/`sync`), one file per agent and configured client:
 - Claude Code (`.claude/agents/<id>.md`, global `$CLAUDE_CONFIG_DIR/agents`): frontmatter `name`,
@@ -321,11 +345,66 @@ file without marker lines (BOM and line endings normalized); the optional pin is
 foreign. States: missing, foreign (never overwritten), edited (hash mismatch: skipped by
 `add`/`remove`/`sync`, `doctor` warns), managed. Writes go through `setup::write_all`
 (atomic, rollback). `sync` is a dry run unless `--apply`, flags widened tools and changed prompts
-on shell-capable agents, and nothing runs it automatically. `agents import` converts Claude Code
-agent files back into canonical `AGENT.md` for `publish`.
+on shell-capable agents. `agents import` converts Claude Code agent files back into canonical
+`AGENT.md` for `publish`.
 
-Postponed: `role: primary`, Codex/Cursor/Hermes/Antigravity targets (Cursor only reads
-`.claude/agents/`), and `publish_skill` for agents.
+**Kept out of git.** Every file written inside a project (`agents add`, `install_agent`, `sync
+--apply`, a session-start refresh) also gets an anchored line (`/.claude/agents/<id>.md`) in a
+`# skillvolution:start` / `# skillvolution:end` block of the repository's `.git/info/exclude`
+(`git_exclude.rs`; the common git directory, so worktrees share it; `.gitignore` is never touched;
+skipped with a note outside a git repository). Removing the file takes its line back out, unless
+another worktree still has the file. Per-user files never touch an exclude file. This applies to
+the CLI as well as the MCP tools, which changed `agents add/remove/sync` in v0.7.0.
+
+**Publishing.** `publish_agent` (MCP) publishes an `AGENT.md` after an evaluator subagent
+following `agent-evaluation` has judged it, like `publish_skill`. `tools` is required, and an
+agent that grants delegation is refused, so a published agent cannot spawn others; the CLI
+`publish` is the user's own path and keeps its rules. A refused publish (either tool) is recorded
+as a `publish_rejected` event, and `publish_agent` counts as a review for the hooks and the
+OpenCode plugin.
+
+**At session start** (`agent_session.rs`; Claude Code and OpenCode, top-level sessions only, every
+step best effort and never failing the hook):
+1. Managed files that are behind the vault (a new version, model, pinned skills or rendering) are
+   rewritten with the same expected render `sync` uses, so a model pinned by `install_agent`
+   survives. Edited and foreign files are never touched. The catalog notes the refresh, and a
+   restart for clients that cannot hot-reload (OpenCode 1.x).
+2. Project copies of agents that were already promoted are retired when they are managed, unedited
+   and the per-user copy exists.
+3. At most once a UTC day (`vault_meta`), global-scope agents that pass the promotion thresholds
+   are installed per user for every client set up per user (event `agent_promote`). Within a
+   window (default 30 days) an agent must have been delegated to after its install in at least 75%
+   of the active projects (any event in the window), in more than 5 projects, with a mean of 3
+   delegations per using project; `agents promotion` shows and overrides these. Project-scope
+   agents never promote. `doctor` lists the candidates and promotes them only with `--fix`.
+4. The catalog's agents block lists the agents installed for the client (local or per user, with
+   versions), then vault agents visible from the project that are not installed (id, version, tier,
+   description; at most 15 lines), and asks the agent to check them before the client's own.
+
+Not supported: `role: primary`, Codex/Cursor/Hermes/Antigravity targets (Cursor only reads
+`.claude/agents/`).
+
+## Telemetry
+
+The `events` table records, locally, what the vault was used for: `session_start`, `suggest`,
+`search`, `load`, `outcome`, `publish`/`publish_rejected`, `delegation`, `review_reminder`,
+`mcp_error`, `hook_error`, `agent_install`/`agent_update`/`agent_remove`/`agent_promote`. Each row
+carries the client and its stored version, the project key, the session when the client gives
+one, a subject (a skill or agent id) and a small JSON `data`. Never stored: prompt text,
+transcripts, file contents or absolute paths; queries are truncated and run through the credential
+detector. Recording never fails the operation that triggered it. The table is never exported and
+nothing is sent anywhere. Access: `skillvolution telemetry summary|events` and the read-only MCP
+tool `usage_report`, which the `evolution` skill tells agents to use for questions about vault use.
+
+## Client versions
+
+Each client's spec lists version ranges with capabilities (`clients/version.rs`): for example
+OpenCode 1.x versus 2.x differ in the delegation tool and field, how the plugin is exported,
+per-call models and hot reload. `<cli> --version` runs only in `setup` and `doctor` (3 second
+limit); the result is stored in `client_versions` and everything else (hooks, `list_models`,
+`install_agent`) reads the stored value, defaulting to the latest known range when nothing is
+stored. `doctor` warns when the version changed since setup and when it is newer than the last one
+tested.
 
 ## Setup design
 
@@ -343,13 +422,13 @@ Postponed: `role: primary`, Codex/Cursor/Hermes/Antigravity targets (Cursor only
 
 - `publish PATH`, `search`, `list`, `get` — the human counterparts of `publish_skill`, `search_skills` and `get_skill`. `publish` preflights the SKILL.md (`vault::skill_problems`, built on `section_problems`), then calls `propose` with the user as evaluator (`keep global`/`keep project`, `expected_version` = current version, `replaces_proven` with `--replace`). `get` prints a round-trippable SKILL.md and records no outcome.
 - `purge ID [--version N]` — permanently deletes a skill or one revision plus its outcomes and loads in an `IMMEDIATE` transaction with `secure_delete` on. Deletes the row(s) immediately, then compacts the file (secure_delete, VACUUM, WAL checkpoint) so purged content doesn't linger on disk. Compaction can't complete while another connection (an AI client's MCP server) holds the vault open; then it prints a warning and the content may linger until a later purge compacts it.
-- `export [-o FILE]` — dumps all skills (agents carry `kind` and revision `meta`; `agent_models` is not exported), revisions and outcomes as JSON, format `skillvolution-export` version 1 (version 2 when the export contains any agent, so older binaries refuse it; skill-only exports stay version 1). Loads and hook state are per-machine telemetry and are not exported (so `import` never brings any).
+- `export [-o FILE]` — dumps all skills (agents carry `kind` and revision `meta`; `client_models` is not exported), revisions and outcomes as JSON, format `skillvolution-export` version 1 (version 2 when the export contains any agent, so older binaries refuse it; skill-only exports stay version 1). Loads, events, client versions, models and hook state are per-machine data and are not exported (so `import` never brings any).
 - `import FILE` — merges an export (version 1 or 2): identical revisions are skipped, same-id/version content conflicts are errors, outcomes insert-or-skip on the uniqueness key, `draft`/`rejected` revisions from pre-v5 exports are stored as `superseded` (same note prefix as the v5 migration), and aborts if a revision's or outcome's id differs from the skill it is listed under.
 - `backup PATH` — `VACUUM INTO` a path that must not exist; creates parent directories.
 
 ## Doctor
 
-`skillvolution doctor` is read-only. Managed agent files get warn-only checks (edited, outdated, missing from the vault, no model for the tier, catalog size). It opens the vault read-only (schema
+`skillvolution doctor` is read-only. Managed agent files get warn-only checks (edited, outdated, missing from the vault, no model for the tier, catalog size), each client gets a version check, and agents that pass the promotion thresholds are listed as candidates. It opens the vault read-only (schema
 version, `PRAGMA quick_check`, FTS orphan check, stats) and diffs each
 detected client's files against what `setup` would write — stale skill
 versions (each managed skill checked separately), missing configured binaries, Claude MCP registration status, and
@@ -357,7 +436,7 @@ legacy installs. `--json` emits the same checks as data; the command exits
 non-zero on failures. `--fix` attaches a repair to each fixable check, applies
 them (schema migration via `Vault::open`, `Vault::rebuild_search_index`, global
 setup re-applied per configured client through `write_all`, Claude MCP
-re-registration), then re-runs every check; see [cli.md](cli.md#doctor).
+re-registration, adding `--client` to an MCP entry without it, recording a changed client version, promoting candidate agents), then re-runs every check; see [cli.md](cli.md#doctor).
 
 ## Relocate
 

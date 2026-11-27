@@ -227,10 +227,23 @@ in one line which skill it applies (or that none matched), and to follow the
 `skill-acquisition` skill when it lacks the know-how, then up to 30 published skills visible to the project with id, version, description,
 and helped/failed counts (or `No published skills are visible to this project yet.`).
 
+For a client with subagents (Claude Code and OpenCode) and a top-level session, the catalog
+is followed by an agents block: the Skillvolution agents installed for that client (local or
+per-user, with versions), then vault agents visible from the project that are not installed
+(id, version, tier and description only; at most 15 lines, then a pointer to `search_agents`),
+with the instruction to check them before the client's own agents. Subagent sessions get no
+agents block. Before printing, the hook does the agent upkeep: managed agent files that are
+behind the vault are rewritten (never hand-edited or foreign ones; one `agent_update` event
+each, and the output says so, adding a restart note for clients that cannot hot-reload),
+project copies of agents already promoted are retired, and once a UTC day agents that pass the
+promotion thresholds are installed per user (see [agents promotion](#agents)). Nothing in the
+upkeep can fail the hook or runs a client CLI.
+
 `--client` selects the output envelope (default `claude-code`): `claude-code`, `devin`,
 `codex`, and `gemini` print
 `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":…}}`;
-`cursor` prints `{"additional_context":…}`. `--project` resolves like `serve`'s.
+`cursor` prints `{"additional_context":…}`; `opencode` (the plugin's call) prints the same
+envelope as Claude Code, which the plugin parses. `--project` resolves like `serve`'s.
 
 ### hook prompt
 
@@ -277,7 +290,7 @@ file-editing tools — `write`, `edit`, `apply_patch`, `notebook_edit` (Devin);
 `apply_patch` (Codex); `write_file`, `replace` (Gemini CLI); `Write` (Cursor) — or as
 having done work when the tool name ends with `get_skill` (loading a skill owes an
 outcome report), or as having reviewed when it ends with
-`publish_skill`/`report_skill_outcome`. Any other tool is ignored. Work after a review re-arms the reminder. Prints nothing.
+`publish_skill`/`publish_agent`/`report_skill_outcome`. Any other tool is ignored. Work after a review re-arms the reminder. Prints nothing.
 `--client` defaults to `devin`.
 
 ### hook stop
@@ -290,7 +303,7 @@ Asks for an evolution review when the session has unreviewed work, at most once 
 span. For `--client claude-code` (the default) the payload's `transcript_path` is
 scanned from the byte offset recorded for that session: if the last `Edit`/`Write`/
 `MultiEdit`/`NotebookEdit` call or successful `get_skill` call postdates the last
-*successful* review call (`publish_skill`/`report_skill_outcome`), it prints
+*successful* review call (`publish_skill`/`publish_agent`/`report_skill_outcome`), it prints
 `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":…}}`, which makes
 Claude Code continue the turn (a `stop_hook_active` stop is never blocked; the reviewed
 offset always advances to the last complete line). For the flag-tracked clients it
@@ -319,7 +332,7 @@ PermissionRequest-style entry point. Prints
 `{"decision":"approve","reason":"Skillvolution-managed tool"}` when the payload's
 `tool_name` is `run_subagent`, `read_subagent`, or starts with `mcp__skillvolution__`;
 prints nothing otherwise, so the client's normal permission prompt still runs. Note the
-grant covers `publish_skill`: anything an evaluator subagent keeps is published without
+grant covers `publish_skill` and `publish_agent`: anything an evaluator subagent keeps is published without
 a further prompt.
 
 ## setup
@@ -363,6 +376,10 @@ If `claude` isn't on `PATH` for a global Claude Code setup, the file changes sti
 happen and setup prints the `claude mcp add-json` command to run manually (and the
 `claude mcp remove` equivalent for `--remove`); `--dry-run` shows that command as
 `Would print (claude CLI not found on PATH): …`.
+
+Setup also runs `<cli> --version` for each client it configures and records the detected
+version in the vault (`client_versions`), noting on stderr a version newer than the last one
+tested; an undetected CLI stores nothing. Every MCP entry it writes carries `--client <token>`.
 
 Every client gets four managed skills, `evolution`, `skill-evaluation`,
 `skill-acquisition`, and `agent-evaluation`, at `skills/<name>/SKILL.md`, each with its own
@@ -436,12 +453,18 @@ included, no exclusive lock needed). `PATH` must not exist. Prints `Backed up to
 ## agents
 
 Subagent definitions kept in the vault and generated into client files. Applies to Claude Code
-and OpenCode. Nothing is generated automatically: there is no sync at session start.
+and OpenCode. `agents add/remove/sync` are the human commands; the `install_agent` MCP tool runs
+the same code in process. Session start refreshes managed files that are behind the vault and may
+promote agents (see [hook session-start](#hook-session-start) and `promotion` below); nothing else
+is generated automatically.
 
 ```
 skillvolution agents models
+skillvolution agents models add CLIENT TIER MODEL [--provider P] [--effort E] [--priority N]
+skillvolution agents models remove|enable|disable CLIENT TIER MODEL [--provider P] [--effort E]
 skillvolution agents models set CLIENT TIER MODEL [--effort E]
 skillvolution agents models unset CLIENT TIER
+skillvolution agents promotion [--window Nd] [--min-share PCT] [--min-projects N] [--min-delegations N]
 skillvolution agents add ID... [--global | --project KEY] [--force]
 skillvolution agents remove ID... [--global]
 skillvolution agents sync [--apply [--force]] [--global | --project KEY]
@@ -449,13 +472,39 @@ skillvolution agents import PATH [-o DIR]
 ```
 
 - `models` prints the tier mapping per client (`claude-code`, `opencode`) marked `(default)`,
-  `(set)` or `(none)`. Defaults for Claude Code: `high` -> `opus`/`high`, `mid` -> `sonnet`/`medium`,
-  `low` -> `haiku`/`low`; OpenCode has none. `models set` stores an override in the vault
-  (`agent_models`, not exported); omitting `--effort` keeps the
-  mapping's current effort; `--effort` on `opencode` is stored with a warning, since OpenCode
-  files carry no effort, and a `claude-code` model containing `/` or an `opencode` model
-  without `/` also warns. `models unset CLIENT TIER` deletes the stored mapping (back to the
-  default, or none).
+  `(set)`, `(set, priority N)`, `(set, disabled)`, `(set, unknown provider)` or `(none)`. Defaults
+  for Claude Code: `high` -> `opus`/`high`, `mid` -> `sonnet`/`medium`, `low` -> `haiku`/`low`;
+  OpenCode has none. Rows live in the vault's `client_models` table (not exported): a ranked
+  list per client and tier, each with a provider (`anthropic` for Claude Code, the `provider/`
+  part of an OpenCode model, or unknown for a bare OpenCode model), an optional effort, a
+  priority and an enabled flag. File generation takes the enabled row with the lowest priority
+  of the tier (ties by insertion order), else the default, else inherits the client's model
+  with a warning.
+  - `models add` appends a row after the tier's last (or at `--priority`, lower is preferred).
+    The provider defaults to `anthropic` for Claude Code and to the model's `provider/` prefix for
+    OpenCode (a bare OpenCode model is refused; `--provider` must match a prefix); a duplicate is an error.
+  - `models remove`, `enable` and `disable` act on the rows matching CLIENT TIER MODEL, narrowed
+    by `--provider`/`--effort`. A disabled model is
+    kept but never chosen. These also work on rows with an unknown provider.
+  - `models set` is kept for the single-model case: it replaces every priority-0 row of the tier
+    with one row; omitting `--effort` keeps the mapping's current effort; `--effort` on
+    `opencode` is stored with a warning, since OpenCode files carry no effort, and a
+    `claude-code` model containing `/` or an `opencode` model without `/` also warns.
+    `models unset CLIENT TIER` deletes the priority-0 row (back to the next ranked model, the
+    default, or none).
+  - Rows written by an older binary's `models set` (`agent_models`) are migrated by the v9
+    schema migration as priority-0 rows.
+- `promotion` shows, and with options changes, when a global-scope vault agent is promoted to a
+  per-user install. Within the window (`--window`, `1d` to `180d`, default `30d`), an agent passes
+  when it was delegated to after its install in that project in at least `--min-share` percent
+  of the active projects (those with any Skillvolution event; default 75), in at least
+  `--min-projects` projects (default 6, i.e. more than 5), with a mean of at least
+  `--min-delegations` delegations per using project (default 3). A project agent never
+  promotes. Overrides are stored in the vault; without options the command prints the current
+  values, the number of active projects, the candidates and the agents already promoted. Session
+  start evaluates it at most once a day and installs per user (every client set up per user,
+  recorded as an `agent_promote` event), then retires managed, unedited project copies of the
+  agent. `doctor` lists candidates and promotes only with `--fix`.
 - `add` resolves each id (the built-ins `sv-high`, `sv-mid`, `sv-low` first, then a vault agent) and
   writes one file per configured client (Claude Code: `.claude/agents/ID.md`; OpenCode:
   `.opencode/agents/ID.md`; `--global` uses the per-user directories). Without `--global` a
@@ -531,14 +580,16 @@ check fails.
 
 ```
 [warn] vault: database: will be created on first use
-[ok] vault: schema: up to date (v6)
+[ok] vault: schema: up to date (v9)
 [ok] vault: integrity: PRAGMA quick_check: ok
 [ok] vault: search index: 12 skill(s) indexed, no orphans
 [ok] vault: stats: 12 skill(s), 15 published revision(s), 34 outcome(s), 1 deprecated
 [ok] Claude Code: configured, up to date
 [warn] OpenCode: differs from what `skillvolution setup --client opencode` would write: …
-[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v13)
+[warn] OpenCode skill: rerun setup to update the evolution skill (installed v7, current v14)
 [fail] Devin CLI binary: configured binary /old/path/skillvolution does not exist; rerun setup
+[warn] OpenCode version: changed since setup (was 1.4.0); `doctor --fix` records it, rerun setup to refresh the client's files
+[warn] agents: promotion: candidates for a per-user install: reviewer
 [warn] Claude Code MCP registration: `claude mcp get skillvolution` reports no registration; rerun setup
 [warn] legacy install: project-level install found (…) alongside the global one; hooks will run twice
 ```
@@ -554,8 +605,13 @@ command, a `skillvolution` MCP server entry, the `AGENTS.md`/`GEMINI.md` marker 
 managed skill file, or the OpenCode plugin — a file that merely mentions
 `skillvolution`, e.g. in a permission entry, doesn't count), staleness of
 the installed version of each managed skill (`evolution`, `skill-evaluation`,
-`skill-acquisition`, `agent-evaluation`), a configured binary path that no longer exists (fail), Claude Code's user-scope MCP registration, and a project-level install left in
-the current repo next to the global one. A client whose config can't be read or parsed
+`skill-acquisition`, `agent-evaluation`), a configured binary path that no longer exists (fail), an MCP entry registered without `--client` (from before v0.7.0), Claude Code's user-scope MCP registration, and a project-level install left in
+the current repo next to the global one. For each installed client doctor also runs
+`<cli> --version` (3 second limit; this and `setup` are the only places that do) and compares it with the
+version stored at the last setup and with the last version Skillvolution was tested against: it warns
+when it changed since setup and when it is newer than the last tested one (`unverified`), and
+a CLI it cannot run or parse is assumed to be the latest known version, never a failure.
+Hooks and the server read the stored version and never run the CLI. A client whose config can't be read or parsed
 gets its own `[fail]` check and the report continues. `--json` prints
 `{"healthy": bool, "checks": [{"name", "status", "detail"}]}`.
 
@@ -572,7 +628,11 @@ the final report; the exit code reflects that final report. Repairs:
   re-applied for exactly that client — same validation, numbered backups and symlink
   refusal as `setup --client <name>`, keeping the configured binary when it still exists
   and using the running one otherwise; Claude Code is re-registered too;
-- a missing Claude Code MCP registration (for a configured Claude Code) is re-registered.
+- a missing Claude Code MCP registration (for a configured Claude Code) is re-registered;
+- an MCP entry without `--client` is rewritten with it (the client's global setup is re-applied);
+- a changed client version is recorded;
+- global-scope agents that pass the promotion thresholds are installed per user (only when a
+  client is set up per user).
 
 Never repaired: a client that is only installed (not configured) or not installed —
 configuring one is the user's call; a newer-schema or non-Skillvolution database; and a
@@ -609,7 +669,7 @@ skillvolution relocate ~/vaults/skills.db
 # Note: CLI commands without --db still resolve to the old path. Set SKILLVOLUTION_DB=/home/you/vaults/skills.db in your shell profile (or pass --db) so they use the new vault; AI clients are already repointed.
 ```
 
-Agent checks (warn-only, no auto-fix) run over managed agent files in the global and current
+Agent checks (warn-only, except the promotion fix above) run over managed agent files in the global and current
 project agent directories, and print nothing when there are none: files edited by hand
 (use `agents import` then `publish`; for the built-ins `sv-high`, `sv-mid`, `sv-low`, delete the file and re-run `skillvolution agents add <id>`), files older than the vault's current version or the
 built-in version (`agents sync --apply`), agents missing from the vault, files with no `model`

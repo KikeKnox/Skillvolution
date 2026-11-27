@@ -200,7 +200,8 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 | | `outcomes [ID] [--failing] [--unreported] [--json]` | Per-skill helped / failed / not applicable / loaded / unreported, or one skill's log |
 | | `deprecate ID` / `undeprecate ID` | Hide a skill from search without deleting its history, or bring it back |
 | | `purge ID [--version N] [--force]` | Permanently delete a skill or one revision, with its outcomes and loads; refuses skills agents list unless `--force` |
-| | `agents models\|add\|remove\|sync\|import …` | Generate subagent files from the vault ([Subagents](#subagents)) |
+| | `agents models\|promotion\|add\|remove\|sync\|import …` | Generate subagent files from the vault, rank their models ([Subagents](#subagents)) |
+| | `telemetry summary\|events [--since D] [--json]` | Read the local usage telemetry ([Local telemetry](#local-telemetry)) |
 | **Maintain** | `backup PATH` | Consistent copy of the live database (`VACUUM INTO`; PATH must not exist) |
 | | `export [-o FILE]` / `import FILE` | Whole vault as JSON / merge an export back (atomic; a conflict aborts) |
 | | `relocate PATH` | Move the vault and repoint every global client config |
@@ -212,10 +213,18 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`) that
 `skillvolution agents add` generates for Claude Code and OpenCode.
 
-- **Tiers and models.** Built-in `sv-high`, `sv-mid`, and `sv-low` ship with the binary;
-  `agents models set` maps each tier to a model per client.
-- **Nothing automatic.** Agent files are generated only on request, and `agents sync` is a
-  dry run until `--apply`.
+- **Tiers and models.** Built-in `sv-high`, `sv-mid`, and `sv-low` ship with the binary.
+  Each client and tier has a ranked list of models (`agents models add|remove|enable|disable`,
+  or `set` for a single one); the best enabled one goes in the file.
+- **From the agent, too.** `search_agents`, `install_agent`, `list_models`, and
+  `publish_agent` let a session find, install, and publish agents itself (see the MCP tools
+  above). Files written inside a project are kept out of git through `.git/info/exclude`,
+  `agents add` included.
+- **Little is automatic.** `agents sync` is a dry run until `--apply`. At session start (Claude
+  Code and OpenCode) the catalog lists the agents, files that are behind the vault are
+  refreshed (never hand-edited ones), and an agent used in most of your projects is promoted
+  to a per-user install, with the project copies retired. The thresholds are in
+  `agents promotion`.
 - **Your edits are safe.** Hand-edited files are never overwritten without `--force`, and
   then only after a backup.
 - **Pinned skills.** Listed skills are pinned to the version seen when the file was
@@ -309,7 +318,8 @@ Publication is automatic, so humans review afterwards. These are the questions t
 
 `import` merges instead of replacing. Identical revisions are skipped, a conflicting
 revision aborts the whole import, and a skill that exists under a different scope is
-refused. `export` leaves out per-session hook state and load telemetry.
+refused. `export` leaves out per-session hook state, load and usage telemetry, client
+versions, and models.
 
 ## Setup
 
@@ -395,12 +405,14 @@ root-level `AGENTS.md`, `GEMINI.md`, `opencode.json`, and `.mcp.json`.
   completeness, and row counts;
 - every detected client: whether it is configured and up to date, whether each managed
   skill is current, whether the configured binary path still exists, and whether Claude
-  Code's MCP registration is in place;
+  Code's MCP registration is in place, whether each MCP entry passes `--client`, and
+  whether the client's CLI version changed since setup or is newer than the last tested;
 - leftover project-level installs;
 - managed agent files (warn-only, nothing when there are none): edited by hand, outdated,
   missing from the vault (or deprecated, or a skill rather than an agent), the same id at
   project and user level, no model for a tier, unavailable `skills:`, and a catalog size
-  estimate. `--fix` doesn't regenerate them: run `skillvolution agents sync --apply`.
+  estimate. `--fix` doesn't regenerate them: run `skillvolution agents sync --apply`;
+- agents that pass the promotion thresholds, which `--fix` installs per user.
 
 It exits 0 when nothing fails; warnings don't count as failures.
 
@@ -413,6 +425,8 @@ exit code reflects that final report.
 | A search index with missing or orphaned rows: rebuilt in one transaction | A newer-schema or non-Skillvolution database |
 | A configured client whose files differ from what `setup` would write (stale skill, missing binary): global setup re-applied for exactly that client, with the same validation, backups, and symlink refusal | A failing `PRAGMA quick_check`: it prints `[not fixable]` guidance instead (restore a `skillvolution backup`, or `export` and `import` into a fresh vault) |
 | A missing Claude Code MCP registration: re-registered | |
+| An MCP entry without `--client`, or a changed client version: setup re-applied, version recorded | |
+| Candidate agents for a per-user install: promoted | |
 
 ## Where the vault lives
 
@@ -494,9 +508,13 @@ skillvolution doctor                              # anything still stale? doctor
 ```
 
 - **Schema migration.** The schema migrates automatically on first open. The current
-  schema, v6, adds agents (`skills.kind`, `revisions.meta`, `agent_models`); v5 rebuilt the
-  search index with the porter stemmer. Back up first: once
+  schema, v9, adds per-client versions (v7), local usage events (v8), and ranked client
+  models replacing `agent_models` (v9); v6 added agents (`skills.kind`, `revisions.meta`),
+  and v5 rebuilt the search index with the porter stemmer. Back up first: once
   migrated, the vault no longer opens with an older binary.
+- **Coming from v0.6.x.** After upgrading, rerun `setup` (or `doctor --fix`): the MCP entries
+  gain `--client`, which the agent tools need, and the new `agent-evaluation` skill is
+  installed alongside `evolution` v14.
 - **Newer vaults.** A vault written by a newer version refuses to open and asks you to
   upgrade skillvolution.
 - **Why rerun `setup`.** The registered configs keep pointing at the same binary path,
@@ -530,6 +548,17 @@ It deliberately keeps:
 - the `skillvolution` binary. Remove it yourself, for example with
   `rm ~/.local/bin/skillvolution`.
 
+## Local telemetry
+
+The vault records what it is used for, on your machine only: searches (and whether they found
+anything), suggestions, loads, outcomes, publishes and rejections, delegations, reminders, agent
+installs and promotions, and MCP or hook errors, each with the client, its version, and the
+project key. It never stores prompt text, transcripts, file contents, or absolute paths, keeps
+rows for 180 days, leaves them out of `export`, and sends nothing anywhere.
+`skillvolution telemetry summary` and `telemetry events` read it, and so does the `usage_report`
+MCP tool, which the `evolution` skill points agents to when a question is about how the vault is
+used.
+
 ## Safety and limitations
 
 - **Skills aren't independently verified.** Agents write the skill text and evidence,
@@ -549,7 +578,7 @@ It deliberately keeps:
   guarantee.
 - **Devin auto-approval.** The `PermissionRequest` hook (`hook approve`) approves
   `run_subagent`, `read_subagent`, and every `mcp__skillvolution__*` tool, **including
-  `publish_skill`**. Anything the evaluator subagent keeps goes live without a human
+  `publish_skill` and `publish_agent`**. Anything the evaluator subagent keeps goes live without a human
   prompt; the evaluator dispatch needs that approval to run unattended. To approve
   publishes yourself, remove the hook from `config.json` (the next `setup` run puts it
   back) or uninstall. Codex wires the same hook but approves only
@@ -608,7 +637,7 @@ keeps per-session worked/reviewed flags in the vault. The `PostToolUse`/`AfterTo
 | Gemini CLI | `write_file`, `replace` |
 | Cursor | `Write` |
 
-They also match the vault's own tools. `get_skill` counts as work, and `publish_skill` or
+They also match the vault's own tools. `get_skill` counts as work, and `publish_skill`, `publish_agent` or
 `report_skill_outcome` counts as a review. Other tools are ignored.
 
 The stop hook (`Stop`, `AfterAgent`, or `stop`) then returns the client's continue
@@ -643,7 +672,7 @@ drops the flags.
   Subagent work is attributed to its parent, and a subagent's own idle events are
   ignored.
 - **Reminder.** Once a working turn goes idle without a review call, later turns' system
-  prompts carry the review reminder until `publish_skill` or `report_skill_outcome`
+  prompts carry the review reminder until `publish_skill`, `publish_agent` or `report_skill_outcome`
   runs.
 
 It never blocks a turn and spends no extra model call.

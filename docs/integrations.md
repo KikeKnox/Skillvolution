@@ -104,7 +104,7 @@ Legacy cleanup: a Skillvolution-managed block in `CLAUDE.md` is removed.
 `hookSpecificOutput.additionalContext` JSON; plain stdout reaches the model only
 as a "hook success" status line. `Stop` scans the session transcript JSONL from the stored offset;
 work = `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, a successful `get_skill`, or a delegation to a managed vault agent visible from the current project (Claude Code `Agent`/`Task`; not `sv-*`; the generated file must carry the skillvolution marker), a review
-counts only when `publish_skill` or `report_skill_outcome` succeeds. If the latest work is
+counts only when `publish_skill`, `publish_agent` or `report_skill_outcome` succeeds. If the latest work is
 newer than the latest successful review, the hook prints
 `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":...}}`
 and Claude continues the same turn; `stop_hook_active` prevents repeat
@@ -115,7 +115,7 @@ stdin and prints
 `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":...}}`
 when a vault skill matches, nothing otherwise.
 
-**`setup --remove`**: deletes the three skill files (and their directories once empty;
+**`setup --remove`**: deletes the four skill files (and their directories once empty;
 a file without its marker is skipped with a note), strips the three hook entries
 and the three permission grants, removes the `.mcp.json`/user-scope MCP
 entry (`claude mcp remove` globally), and keeps every user-owned key.
@@ -154,7 +154,7 @@ both files existing is an error):
 
 **Project** (`<dir>`): `opencode.json` at the root (`opencode.jsonc` in a
 project is refused), `AGENTS.md` marker block,
-`.opencode/skills/<name>/SKILL.md` (three), `.opencode/plugins/skillvolution.js`.
+`.opencode/skills/<name>/SKILL.md` (four), `.opencode/plugins/skillvolution.js`.
 A legacy `instructions` entry pointing at the old skill path is dropped and
 never recreated.
 
@@ -166,7 +166,7 @@ hooks (`experimental.chat.system.transform`, `chat.message`, `tool.execute.after
 **Reminder behavior** (plugin, not hooks): the plugin injects the catalog
 into the system prompt, tracks work (`edit`, `write`, `multiedit`, `patch`,
 `apply_patch`, a tool ending in `get_skill`, or a `task` (1.x) / `subagent` (2.x) delegation to a managed vault agent (not `sv-*`; the generated file must carry the skillvolution marker)) and review tools (any tool containing
-`publish_skill` or `report_skill_outcome`) per top-level session — a subagent session's
+`publish_skill`, `publish_agent` or `report_skill_outcome`) per top-level session — a subagent session's
 file edits count toward the parent, but its own `get_skill` loads and reports do not (it reports
 its skills itself) — and appends a reminder to the next turn after unreviewed
 work. For each new user message, the `chat.message` hook (2.x: `session.hook("prompt")`) runs `hook prompt` (the
@@ -176,9 +176,9 @@ turn's system prompt; subagent sessions get none, and a failed lookup only costs
 turn's suggestions. The plugin never spawns its own prompt turn, retries catalog-load
 failures, and strips an inherited `CLAUDE_PROJECT_DIR` from the child environment.
 
-**`setup --remove`**: deletes the three skill files and the plugin (and emptied skill
+**`setup --remove`**: deletes the four skill files and the plugin (and emptied skill
 directories; a skill file without its marker is skipped with a note), strips the `mcp`
-entry, the five `skillvolution_*` grants, `task` if setup set it, and the
+entry, the nine `skillvolution_*` grants, `task` if setup set it, and the
 AGENTS.md block.
 
 ## Devin CLI
@@ -215,18 +215,18 @@ AGENTS.md block.
 - the four skills (`skills/<name>/SKILL.md`) and the `AGENTS.md` marker block.
 
 **Project** (`<dir>`): `.devin/mcp_config.json`, `.devin/config.json`,
-`.devin/skills/<name>/SKILL.md` (three), `AGENTS.md`.
+`.devin/skills/<name>/SKILL.md` (four), `AGENTS.md`.
 
 **Reminder behavior** (flag-tracked): `PostToolUse` sets `worked` on
 `write`/`edit`/`apply_patch`/`notebook_edit` and on the vault's `get_skill`, and
-`reviewed` on `publish_skill`/`report_skill_outcome`; `UserPromptSubmit` injects the
+`reviewed` on `publish_skill`/`publish_agent`/`report_skill_outcome`; `UserPromptSubmit` injects the
 matching skills;
 `Stop` prints `{"decision":"block","reason":"..."}` while `worked` is set
 after `reviewed`; `SessionEnd` drops the session row. `PermissionRequest`
 → `hook approve` returns
 `{"decision":"approve","reason":"Skillvolution-managed tool"}` for
 `run_subagent`, `read_subagent`, and every `mcp__skillvolution__*` tool —
-including `publish_skill`, so the evaluator dispatch and the publish both
+including `publish_skill` and `publish_agent`, so the evaluator dispatch and the publish both
 run unattended.
 
 **Unverified**: the Devin hook payload shapes (including `UserPromptSubmit`'s
@@ -255,7 +255,7 @@ args = ["--db", "DB", "serve", "--client", "codex"]
 
 **Project** (`<dir>`): `.codex/config.toml` (with a comment noting Codex
 only loads project config after you accept its trust prompt),
-`.codex/hooks.json`, `.codex/skills/<name>/SKILL.md` (three), `AGENTS.md`.
+`.codex/hooks.json`, `.codex/skills/<name>/SKILL.md` (four), `AGENTS.md`.
 
 Codex has **no per-tool permission grant** — auto-approval runs through the
 `PermissionRequest` hook instead. Work tools: `apply_patch` and `get_skill` (the
@@ -297,7 +297,7 @@ entry has no `trust` key — a `trust: false` you set survives reruns.
   `GEMINI.md` marker block.
 
 **Project** (`<dir>`): `.gemini/settings.json`, `.gemini/skills/<name>/SKILL.md`
-(three), `GEMINI.md` at the root.
+(four), `GEMINI.md` at the root.
 
 **Reminder behavior**: flag-tracked like Devin. Work tools:
 `write_file`, `replace`, and `get_skill` (the `AfterTool` matcher covers
@@ -318,7 +318,7 @@ session.
 {"permissions": {"allow": ["Mcp(skillvolution:*)"]}}
 ```
 
-**Project** (`<dir>`): `.cursor/skills/<name>/SKILL.md` (three),
+**Project** (`<dir>`): `.cursor/skills/<name>/SKILL.md` (four),
 `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/cli.json` (same
 permission grant), and `.cursor/rules/skillvolution.mdc` — a rule file with
 `alwaysApply: true` carrying the trigger instruction. There is no global
@@ -355,9 +355,18 @@ conventions.
 
 ## Subagent files (`agents`)
 
-`skillvolution agents add` writes subagent files for clients `setup` configured, Claude Code
-and OpenCode only; `setup` itself does not write them and never syncs them (see
-[cli.md](cli.md#agents), [architecture.md](architecture.md#agents)).
+`skillvolution agents add`, or the `install_agent` MCP tool, writes subagent files for clients
+`setup` configured, Claude Code and OpenCode only; `setup` itself does not write them (see
+[cli.md](cli.md#agents), [architecture.md](architecture.md#agents)). The MCP server learns which
+client it serves from the `--client` that setup writes into every MCP entry (`doctor --fix` or a
+rerun of setup adds it to an install from before v0.7.0); `search_agents`, `install_agent`,
+`list_models` and `publish_agent` are in the permission grants shown above for OpenCode, and
+Claude Code's `mcp__skillvolution` grant covers them. At session start Claude Code and OpenCode
+also get an agents block in the catalog (installed agents, then vault agents not yet installed,
+ids and descriptions only), none for a subagent session; managed agent files that are behind
+the vault are refreshed and heavily used agents are promoted to a per-user install (see
+[architecture.md](architecture.md#agents)). OpenCode 1.x does not hot-reload agent files, so the
+session-start note asks for a restart after a refresh.
 
 - **Claude Code**: `.claude/agents/<id>.md` (global `$CLAUDE_CONFIG_DIR/agents`). Frontmatter `name`,
   `description`, `model` (`opus|sonnet|haiku` by tier), `effort`, and `disallowedTools` derived
@@ -366,7 +375,7 @@ and OpenCode only; `setup` itself does not write them and never syncs them (see
   subagent such as `general-purpose`. Cursor also reads this directory and may not accept the model
   aliases.
 - **OpenCode**: `.opencode/agents/<id>.md` (global `~/.config/opencode/agents`). `mode: subagent`,
-  `model` only if configured with `agents models set opencode ...`, and `permission` entries
+  `model` only if configured with `agents models add opencode ...` (or `set`), and `permission` entries
   set to `deny` for edit, bash, webfetch, websearch, and `task: deny` for a restricted agent
   (`task: allow` otherwise, so a user-level file cannot leak a deny). OpenCode can deny MCP tools
   only per server with a wildcard (`<server>_*`); skillvolution does not write those because it
@@ -378,6 +387,11 @@ and OpenCode only; `setup` itself does not write them and never syncs them (see
   is flagged there as `! skill ID vA -> vB`).
 - Every file starts (after the frontmatter) with the `skillvolution-managed:agent:` marker.
   `setup --remove` leaves these files and lists them; remove them with `agents remove <id>`.
+- A file written inside a project (`agents add`, `install_agent`, a sync or a refresh) gets an
+  anchored line in the repository's `.git/info/exclude` (the shared git directory in a worktree),
+  inside a `# skillvolution:start` / `# skillvolution:end` block, so it is never committed by
+  accident; `.gitignore` is not touched and the line goes away when the file is removed.
+  Per-user files never touch an exclude file.
 - After delegating to such an agent, the `evolution` skill has the orchestrator report its
   id and version from the marker (not for `sv-*`). The OpenCode plugin counts a `task` (1.x) or `subagent` (2.x) call whose
   `subagent_type` (1.x) / `agent` (2.x) has a marked file in the project's `.opencode/agents/` (found under the plugin input's `worktree`, i.e. the repository root, else `directory`) or the per-user
@@ -390,7 +404,7 @@ and OpenCode only; `setup` itself does not write them and never syncs them (see
 markers or command text) and never touches keys it didn't write — your other
 `mcpServers`, hook entries, permissions, `hooks.json` `version`, and files
 without our marker all survive. Managed files that exist solely because of
-setup (the three skill files, plugin, rule file) are deleted, each only when it carries
+setup (the four skill files, plugin, rule file) are deleted, each only when it carries
 its own marker (`skillvolution-managed:<name>:`) — a user's own file at one of those
 paths is skipped with a `skipped … (not ours)` note, and the same file makes `setup`
 itself refuse with an `unowned … skill conflict`. A `skills/<name>` directory left
@@ -432,6 +446,6 @@ empty is removed; one that still holds your files stays. Empty marker blocks (`s
   `PermissionRequest` hook.
 - Gemini `trust: true` is scoped to the Skillvolution server entry and is
   not re-asserted once you set `trust` yourself.
-- `hook approve` auto-approves `publish_skill` for Devin (and any
+- `hook approve` auto-approves `publish_skill` and `publish_agent` for Devin (and any
   `mcp__skillvolution__*` tool under Codex's `PermissionRequest`) — this is
   what lets the review flow run without prompts.
