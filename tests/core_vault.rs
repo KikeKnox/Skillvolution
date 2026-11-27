@@ -2,7 +2,7 @@
 mod support;
 
 use skillvolution::clients::{ClientKind, Version};
-use skillvolution::vault::{Proposal, Vault};
+use skillvolution::vault::{ModelSelector, Proposal, Vault};
 use support::Draft;
 
 fn open() -> (tempfile::TempDir, Vault) {
@@ -1248,7 +1248,7 @@ fn new_databases_are_stamped_with_the_version_and_application_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 }
 
@@ -1256,7 +1256,7 @@ fn new_databases_are_stamped_with_the_version_and_application_id() {
 fn migrates_a_v1_database_to_v8() {
     let (_dir, path) = legacy_database(1);
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
     // v1 defaulted new revisions to draft; the v5 rebuild drops that too.
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -1279,7 +1279,7 @@ fn migrates_a_v1_database_to_v8() {
 fn migrates_a_v2_database_to_v8_preserving_data() {
     let (_dir, path) = legacy_database(2);
     let mut vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 
     // Revisions survive; the legacy draft is retired.
@@ -1353,7 +1353,7 @@ fn migrates_a_v3_database_to_v8_with_loads_and_inherited_records() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(
         ids(&page),
@@ -1378,7 +1378,7 @@ fn strip_v6(conn: &rusqlite::Connection) {
     let view = schema_sql(conn, "current_skills").replace(", s.kind, r.meta", "");
     conn.execute_batch(&format!(
         "DROP VIEW current_skills;
-         DROP TABLE agent_models;
+         DROP TABLE client_models;
          DROP TABLE client_versions;
          DROP TABLE events;
          DROP TABLE vault_meta;
@@ -1402,7 +1402,7 @@ fn migrates_a_v5_database_to_v8_keeping_skills_as_skills() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     let skill = vault.get("skill", None, None).unwrap();
     assert_eq!((skill.kind.as_str(), skill.meta.is_none()), ("skill", true));
     assert_eq!(ids(&vault.search("", None, 20, 0).unwrap()), ["skill"]);
@@ -1426,13 +1426,22 @@ fn migrates_a_v7_database_adding_events() {
     let (_dir, path) = legacy_database(1);
     drop(Vault::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE events; DROP TABLE vault_meta;")
-        .unwrap();
+    conn.execute_batch(
+        "DROP TABLE events; DROP TABLE vault_meta; DROP TABLE client_models;
+         CREATE TABLE agent_models (
+             client TEXT NOT NULL,
+             tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+             model TEXT NOT NULL,
+             effort TEXT,
+             PRIMARY KEY (client, tier)
+         );",
+    )
+    .unwrap();
     conn.pragma_update(None, "user_version", 7).unwrap();
     drop(conn);
 
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let columns: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('events') ORDER BY cid")
@@ -1465,17 +1474,44 @@ fn migrates_a_v6_database_adding_client_versions_and_keeping_agent_models() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch("DROP TABLE client_versions; DROP TABLE events; DROP TABLE vault_meta;")
         .unwrap();
-    conn.execute(
-        "INSERT INTO agent_models (client, tier, model) VALUES ('claude-code', 'mid', 'sonnet')",
-        [],
+    conn.execute_batch(
+        "DROP TABLE client_models;
+         CREATE TABLE agent_models (
+             client TEXT NOT NULL,
+             tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+             model TEXT NOT NULL,
+             effort TEXT,
+             PRIMARY KEY (client, tier)
+         );
+         INSERT INTO agent_models (client, tier, model, effort) VALUES ('claude-code', 'mid', 'sonnet', 'high');
+         INSERT INTO agent_models (client, tier, model) VALUES ('opencode', 'low', 'openai/gpt-5-mini');",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 6).unwrap();
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
-    assert_eq!(vault.agent_models().unwrap().len(), 1);
+    assert_eq!(pragma(&path, "user_version"), 9);
+    let rows = vault.client_models().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (
+            rows[0].provider.as_str(),
+            rows[0].effort.as_deref(),
+            rows[0].priority,
+            rows[0].enabled
+        ),
+        ("anthropic", Some("high"), 0, true)
+    );
+    assert_eq!(
+        (rows[1].provider.as_str(), rows[1].effort.as_deref()),
+        ("openai", None)
+    );
+    assert_eq!(
+        pragma_table(&path, "agent_models"),
+        0,
+        "agent_models is dropped"
+    );
     assert_eq!(vault.client_version(ClientKind::OpenCode).unwrap(), None);
     vault
         .record_client_version(ClientKind::OpenCode, Version(2, 2, 5))
@@ -1554,7 +1590,7 @@ fn migrates_a_v4_database_retiring_draft_and_rejected_revisions() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     let draft = vault.inspect("skill", 2).unwrap();
     assert_eq!(draft.status, "superseded");
     assert_eq!(draft.review_note.as_deref(), Some("legacy draft"));
@@ -1639,7 +1675,7 @@ fn migration_tolerates_foreign_key_violations_already_in_the_vault() {
     drop(conn);
 
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 8);
+    assert_eq!(pragma(&path, "user_version"), 9);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let orphans: i64 = conn
         .query_row(
@@ -1792,4 +1828,138 @@ fn agent_messages_name_the_tier_and_the_entry_kind() {
         error.contains("agent scoped-agent already exists with scope mine"),
         "{error}"
     );
+}
+
+fn pragma_table(path: &std::path::Path, name: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn client_models_rank_by_priority_and_reject_duplicates_and_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("v.db")).unwrap();
+    let a = vault
+        .add_client_model("claude-code", "mid", "sonnet", None, Some("high"), None)
+        .unwrap();
+    assert_eq!((a.provider.as_str(), a.priority), ("anthropic", 0));
+    let b = vault
+        .add_client_model("claude-code", "mid", "opus", None, None, None)
+        .unwrap();
+    assert_eq!(b.priority, 1);
+    vault
+        .add_client_model("claude-code", "mid", "haiku", None, None, Some(1))
+        .unwrap();
+    let order: Vec<_> = vault
+        .client_models()
+        .unwrap()
+        .into_iter()
+        .map(|m| m.model)
+        .collect();
+    assert_eq!(
+        order,
+        ["sonnet", "opus", "haiku"],
+        "ties break by insertion"
+    );
+    assert!(
+        vault
+            .add_client_model("claude-code", "mid", "sonnet", None, Some("high"), None)
+            .is_err()
+    );
+    // Same model with another effort is another row.
+    vault
+        .add_client_model("claude-code", "mid", "sonnet", None, Some("low"), None)
+        .unwrap();
+    assert!(
+        vault
+            .add_client_model("opencode", "mid", "sonnet", None, None, None)
+            .is_err()
+    );
+    assert!(
+        vault
+            .add_client_model(
+                "opencode",
+                "mid",
+                "openai/gpt-5",
+                Some("anthropic"),
+                None,
+                None
+            )
+            .is_err()
+    );
+    let c = vault
+        .add_client_model("opencode", "mid", "gpt-5", Some("openai"), None, None)
+        .unwrap();
+    assert_eq!(c.provider, "openai");
+    assert!(
+        vault
+            .add_client_model("cursor", "mid", "x", None, None, None)
+            .is_err()
+    );
+    assert!(
+        vault
+            .add_client_model("claude-code", "top", "x", None, None, None)
+            .is_err()
+    );
+    assert!(
+        vault
+            .add_client_model("claude-code", "mid", "x", None, Some("huge"), None)
+            .is_err()
+    );
+    assert!(
+        vault
+            .add_client_model("claude-code", "mid", "x", None, None, Some(-1))
+            .is_err()
+    );
+}
+
+#[test]
+fn client_models_set_replaces_priority_zero_and_enable_disable_remove_select_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(&dir.path().join("v.db")).unwrap();
+    vault
+        .set_agent_model("claude-code", "mid", "sonnet", Some("low"))
+        .unwrap();
+    vault
+        .add_client_model("claude-code", "mid", "opus", None, None, Some(5))
+        .unwrap();
+    vault
+        .set_agent_model("claude-code", "mid", "haiku", None)
+        .unwrap();
+    let rows = vault.client_models().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|m| (m.model.as_str(), m.priority))
+            .collect::<Vec<_>>(),
+        [("haiku", 0), ("opus", 5)]
+    );
+    let sel = |model| ModelSelector {
+        client: "claude-code",
+        tier: "mid",
+        model,
+        provider: None,
+        effort: None,
+    };
+    assert_eq!(
+        vault
+            .set_client_model_enabled(&sel("haiku"), false)
+            .unwrap(),
+        1
+    );
+    assert!(!vault.client_models().unwrap()[0].enabled);
+    assert_eq!(
+        vault.set_client_model_enabled(&sel("haiku"), true).unwrap(),
+        1
+    );
+    assert_eq!(vault.remove_client_model(&sel("nope")).unwrap(), 0);
+    assert_eq!(vault.remove_client_model(&sel("opus")).unwrap(), 1);
+    assert!(vault.unset_agent_model("claude-code", "mid").unwrap());
+    assert!(vault.client_models().unwrap().is_empty());
+    assert!(!vault.unset_agent_model("claude-code", "mid").unwrap());
 }

@@ -11,7 +11,7 @@ use crate::{
     project,
     setup::{self, ClientKind, Edit, MANAGED_MARKER, Scope},
     skill_file,
-    vault::{self, AgentMeta, AgentModel, EFFORTS, TIERS, TOOLS, Vault, validate_id},
+    vault::{self, AgentMeta, ClientModel, EFFORTS, TIERS, TOOLS, Vault, validate_id},
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -81,7 +81,7 @@ impl Target {
     }
 }
 
-/// Tier model compiled in for `target`; stored `agent_models` rows override it.
+/// Tier model compiled in for `target`; stored `client_models` rows override it.
 fn default_model(target: Target, tier: &str) -> Option<(&'static str, &'static str)> {
     target
         .spec()
@@ -93,20 +93,20 @@ fn default_model(target: Target, tier: &str) -> Option<(&'static str, &'static s
 
 /// The `(model, effort)` generated files get for `tier` on `target`.
 pub fn model_for(
-    stored: &[AgentModel],
+    stored: &[ClientModel],
     target: Target,
     tier: &str,
 ) -> Option<(String, Option<String>)> {
     stored
         .iter()
-        .find(|m| m.client == target.token() && m.tier == tier)
+        .find(|m| m.enabled && m.client == target.token() && m.tier == tier)
         .map(|m| (m.model.clone(), m.effort.clone()))
         .or_else(|| default_model(target, tier).map(|(m, e)| (m.to_owned(), Some(e.to_owned()))))
 }
 
 /// The effort `models set` keeps when `--effort` is not given: the stored row's, else the
 /// compiled tier default.
-pub fn current_effort(stored: &[AgentModel], client: &str, tier: &str) -> Option<String> {
+pub fn current_effort(stored: &[ClientModel], client: &str, tier: &str) -> Option<String> {
     Target::from_token(client)
         .and_then(|t| model_for(stored, t, tier))
         .and_then(|(_, effort)| effort)
@@ -125,26 +125,50 @@ pub fn model_warning(client: &str, model: &str) -> Option<String> {
     }
 }
 
-/// The `agents models` table: a header, then one aligned line per client and tier.
-pub fn models_table(stored: &[AgentModel]) -> Vec<String> {
+/// The `agents models` table: a header, then one aligned line per stored model of each
+/// client and tier (best first), plus the compiled default when no enabled row applies.
+pub fn models_table(stored: &[ClientModel]) -> Vec<String> {
     let mut rows = vec![["client", "tier", "model", "effort", "origin"].map(str::to_owned)];
     for kind in ClientKind::with_agents() {
         let (client, target) = (kind.token(), Target::from_kind(kind));
         for tier in TIERS {
-            let set = stored.iter().any(|m| m.client == client && m.tier == tier);
-            let mapped = target.and_then(|t| model_for(stored, t, tier));
+            let mut any_enabled = false;
+            for m in stored
+                .iter()
+                .filter(|m| m.client == client && m.tier == tier)
+            {
+                any_enabled |= m.enabled;
+                let mut origin = vec!["set".to_owned()];
+                if m.priority != 0 {
+                    origin.push(format!("priority {}", m.priority));
+                }
+                if !m.enabled {
+                    origin.push("disabled".into());
+                }
+                rows.push([
+                    client.to_owned(),
+                    tier.to_owned(),
+                    m.model.clone(),
+                    m.effort.clone().unwrap_or_else(|| "-".into()),
+                    format!("({})", origin.join(", ")),
+                ]);
+            }
+            if any_enabled {
+                continue;
+            }
+            let mapped = target.and_then(|t| model_for(&[], t, tier));
             let (model, effort) = mapped.clone().unwrap_or(("-".into(), None));
-            let origin = match (set, mapped) {
-                (true, _) => "(set)",
-                (false, Some(_)) => "(default)",
-                (false, None) => "(none)",
-            };
             rows.push([
                 client.to_owned(),
                 tier.to_owned(),
                 model,
                 effort.unwrap_or_else(|| "-".into()),
-                origin.to_owned(),
+                if mapped.is_some() {
+                    "(default)"
+                } else {
+                    "(none)"
+                }
+                .to_owned(),
             ]);
         }
     }
@@ -489,7 +513,7 @@ fn plan(
     target: Target,
     agent: &Agent,
     project_dir: Option<&Path>,
-    models: &[AgentModel],
+    models: &[ClientModel],
 ) -> Result<Plan> {
     let (text, warnings) = render(target, agent, model_for(models, target, &agent.meta.tier));
     Ok(Plan {
@@ -601,7 +625,7 @@ pub fn add_with_changes(
              (global is its default) for Claude Code or OpenCode"
         }
     );
-    let models = vault.agent_models()?;
+    let models = vault.client_models()?;
     let mut agents = Vec::new();
     let mut seen: Vec<&String> = Vec::new();
     for id in ids {
@@ -941,7 +965,7 @@ pub fn sync_with_changes(
     apply: bool,
     force: bool,
 ) -> Result<(Vec<String>, Vec<AgentChange>)> {
-    let models = vault.agent_models()?;
+    let models = vault.client_models()?;
     let mut changes = Vec::new();
     let (mut lines, mut edits, mut unchanged, mut backups) =
         (Vec::new(), Vec::new(), 0, Vec::new());
@@ -1345,7 +1369,7 @@ fn tier_from_model(vault: &Vault, model: Option<&str>, notes: &mut Vec<String>) 
         notes.push("no model; tier set to mid".into());
         return Ok("mid".into());
     };
-    let stored = vault.agent_models()?;
+    let stored = vault.client_models()?;
     let lower = model.to_ascii_lowercase();
     let exact = TIERS
         .into_iter()

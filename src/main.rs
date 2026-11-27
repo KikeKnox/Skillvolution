@@ -295,13 +295,67 @@ enum ModelsAction {
         #[arg(long)]
         effort: Option<String>,
     },
-    /// Delete a stored mapping so the tier reverts to its default (or to none).
+    /// Delete the priority-0 mapping so the tier reverts to the next ranked model, its
+    /// default, or none.
     Unset {
         /// `claude-code` or `opencode`.
         client: String,
         /// `high`, `mid` or `low`.
         tier: String,
     },
+    /// Add a ranked model for a tier (lower priority is preferred).
+    Add {
+        /// `claude-code` or `opencode`.
+        client: String,
+        /// `high`, `mid` or `low`.
+        tier: String,
+        /// Model as written to the file, e.g. `opus` or `anthropic/claude-sonnet-4-5`.
+        model: String,
+        /// Provider; `anthropic` for Claude Code, else the `provider/` of an OpenCode model.
+        #[arg(long)]
+        provider: Option<String>,
+        /// `low`, `medium`, `high`, `xhigh` or `max`.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Lower is preferred. Default: after the tier's last model.
+        #[arg(long)]
+        priority: Option<i64>,
+    },
+    /// Delete the stored model rows matching CLIENT TIER MODEL.
+    Remove(ModelRef),
+    /// Let a disabled model be chosen again.
+    Enable(ModelRef),
+    /// Stop choosing a model without deleting it.
+    Disable(ModelRef),
+}
+
+/// Names the stored rows `models remove`, `enable` and `disable` act on.
+#[derive(clap::Args)]
+struct ModelRef {
+    /// `claude-code` or `opencode`.
+    client: String,
+    /// `high`, `mid` or `low`.
+    tier: String,
+    /// The model exactly as stored.
+    model: String,
+    /// Only the row with this provider.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Only the row with this effort.
+    #[arg(long)]
+    effort: Option<String>,
+}
+
+impl ModelRef {
+    fn selector(&self) -> skillvolution::vault::ModelSelector<'_> {
+        skillvolution::vault::ModelSelector {
+            client: &self.client,
+            tier: &self.tier,
+            model: &self.model,
+            provider: self.provider.as_deref(),
+            effort: self.effort.as_deref(),
+        }
+    }
 }
 
 /// The vault project key and the directory agent files go in: `--global` is the per-user
@@ -326,7 +380,7 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
     use skillvolution::agents;
     let mut failed = false;
     let lines = match command {
-        AgentsCommand::Models { action: None } => agents::models_table(&open(db)?.agent_models()?),
+        AgentsCommand::Models { action: None } => agents::models_table(&open(db)?.client_models()?),
         AgentsCommand::Models {
             action:
                 Some(ModelsAction::Set {
@@ -337,7 +391,7 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
                 }),
         } => {
             let vault = open(db)?;
-            let stored = vault.agent_models()?;
+            let stored = vault.client_models()?;
             let kept = effort.is_none();
             let effort = effort.or_else(|| agents::current_effort(&stored, &client, &tier));
             vault.set_agent_model(&client, &tier, &model, effort.as_deref())?;
@@ -368,6 +422,69 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             } else {
                 format!("No stored mapping for {client} {tier}; nothing to remove.")
             }]
+        }
+        AgentsCommand::Models {
+            action:
+                Some(ModelsAction::Add {
+                    client,
+                    tier,
+                    model,
+                    provider,
+                    effort,
+                    priority,
+                }),
+        } => {
+            let row = open(db)?.add_client_model(
+                &client,
+                &tier,
+                &model,
+                provider.as_deref(),
+                effort.as_deref(),
+                priority,
+            )?;
+            let mut lines = vec![format!(
+                "Added {client} {tier} {} `{model}` (priority {}).",
+                row.provider, row.priority
+            )];
+            lines.extend(agents::model_warning(&client, &model).map(|w| format!("warning: {w}")));
+            lines
+        }
+        AgentsCommand::Models {
+            action:
+                Some(
+                    action @ (ModelsAction::Remove(_)
+                    | ModelsAction::Enable(_)
+                    | ModelsAction::Disable(_)),
+                ),
+        } => {
+            let vault = open(db)?;
+            let (reference, verb) = match &action {
+                ModelsAction::Remove(r) => (r, "Removed"),
+                ModelsAction::Enable(r) => (r, "Enabled"),
+                ModelsAction::Disable(r) => (r, "Disabled"),
+                _ => unreachable!(),
+            };
+            let selector = reference.selector();
+            let count = match &action {
+                ModelsAction::Remove(_) => vault.remove_client_model(&selector)?,
+                ModelsAction::Enable(_) => vault.set_client_model_enabled(&selector, true)?,
+                _ => vault.set_client_model_enabled(&selector, false)?,
+            };
+            if count == 0 {
+                failed = true;
+                vec![format!(
+                    "No stored model `{}` for {} {}.",
+                    reference.model, reference.client, reference.tier
+                )]
+            } else {
+                vec![format!(
+                    "{verb} {count} row{} for {} {} `{}`.",
+                    if count == 1 { "" } else { "s" },
+                    reference.client,
+                    reference.tier,
+                    reference.model
+                )]
+            }
         }
         AgentsCommand::Add {
             ids,

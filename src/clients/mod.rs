@@ -122,7 +122,7 @@ pub struct AgentSpec {
     /// The front matter lines (without the `---` fences) for an agent and its model, and
     /// warnings about what the client cannot express.
     pub render: fn(&Agent, Option<&ModelChoice>) -> FrontMatter,
-    /// The `(tier, model, effort)` compiled in; stored `agent_models` rows override them.
+    /// The `(tier, model, effort)` compiled in; stored `client_models` rows override them.
     pub default_models: &'static [(&'static str, &'static str, Option<&'static str>)],
 }
 

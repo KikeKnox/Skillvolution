@@ -1,10 +1,8 @@
-//! Agent entries: the metadata an agent revision carries, its validation, and
-//! the machine-local tier-to-model mapping (`agent_models`).
+//! Agent entries: the metadata an agent revision carries and its validation.
 
-use super::{Vault, validate_id, validate_single_line};
-use crate::clients::ClientKind;
+use super::{Vault, validate_id};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const TIERS: [&str; 3] = ["high", "mid", "low"];
@@ -227,98 +225,6 @@ pub(super) fn parse_meta(text: Option<String>) -> rusqlite::Result<Option<AgentM
         })
     })
     .transpose()
-}
-
-/// One stored `agent_models` row.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AgentModel {
-    pub client: String,
-    pub tier: String,
-    pub model: String,
-    pub effort: Option<String>,
-}
-
-impl Vault {
-    /// Every stored tier mapping, ordered by client then tier.
-    pub fn agent_models(&self) -> Result<Vec<AgentModel>> {
-        let mut statement = self.conn.prepare(
-            "SELECT client, tier, model, effort FROM agent_models ORDER BY client, tier",
-        )?;
-        Ok(statement
-            .query_map([], |row| {
-                Ok(AgentModel {
-                    client: row.get(0)?,
-                    tier: row.get(1)?,
-                    model: row.get(2)?,
-                    effort: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Maps `tier` to `model` (and optionally `effort`) for `client`.
-    pub fn set_agent_model(
-        &self,
-        client: &str,
-        tier: &str,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Result<()> {
-        ensure!(
-            ClientKind::with_agents().any(|kind| kind.token() == client),
-            "client must be one of {}",
-            ClientKind::with_agents()
-                .map(ClientKind::token)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        ensure!(
-            TIERS.contains(&tier),
-            "tier must be one of {}",
-            TIERS.join(", ")
-        );
-        validate_single_line("model", model, 128)?;
-        ensure!(
-            !model.contains(char::is_whitespace),
-            "model must not contain whitespace"
-        );
-        if let Some(effort) = effort {
-            ensure!(
-                EFFORTS.contains(&effort),
-                "effort must be one of {}",
-                EFFORTS.join(", ")
-            );
-        }
-        self.conn.execute(
-            "INSERT INTO agent_models (client, tier, model, effort) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(client, tier) DO UPDATE SET model = excluded.model, effort = excluded.effort",
-            params![client, tier, model, effort],
-        )?;
-        Ok(())
-    }
-
-    /// Deletes the stored mapping of `tier` for `client`, so it reverts to the compiled
-    /// default (or to none); `false` when there was no row.
-    pub fn unset_agent_model(&self, client: &str, tier: &str) -> Result<bool> {
-        ensure!(
-            ClientKind::with_agents().any(|kind| kind.token() == client),
-            "client must be one of {}",
-            ClientKind::with_agents()
-                .map(ClientKind::token)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        ensure!(
-            TIERS.contains(&tier),
-            "tier must be one of {}",
-            TIERS.join(", ")
-        );
-        let removed = self.conn.execute(
-            "DELETE FROM agent_models WHERE client = ?1 AND tier = ?2",
-            params![client, tier],
-        )?;
-        Ok(removed > 0)
-    }
 }
 
 #[cfg(test)]

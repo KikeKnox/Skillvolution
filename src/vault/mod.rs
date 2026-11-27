@@ -1,4 +1,5 @@
 mod agent;
+mod client_model;
 mod client_version;
 mod events;
 mod location;
@@ -9,10 +10,10 @@ mod telemetry;
 mod transfer;
 
 pub use agent::{
-    AGENT_SECTIONS, AgentMeta, AgentModel, EFFORTS, TIERS, TOOLS, agent_content_problems,
-    agent_meta_problems, agent_section_problems, reserved_agent_id, skill_deprecated,
-    skill_unavailable,
+    AGENT_SECTIONS, AgentMeta, EFFORTS, TIERS, TOOLS, agent_content_problems, agent_meta_problems,
+    agent_section_problems, reserved_agent_id, skill_deprecated, skill_unavailable,
 };
+pub use client_model::{ClientModel, ModelSelector};
 pub use client_version::{StoredVersion, stored_client_version};
 pub use events::{Event, MAX_REASON_CHARS, error_class, scrub_text, search_query_for_event};
 pub use location::{network_fs, warn_if_unsafe};
@@ -233,6 +234,26 @@ const MIGRATIONS: &[&str] = &[
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );",
+    // v9: `client_models` replaces `agent_models`: several models per client and tier,
+    // ranked by `priority` (lower is preferred); old rows keep priority 0. `effort` is ''
+    // when none. The provider of an OpenCode row is its `provider/model` prefix.
+    "CREATE TABLE client_models (
+        id INTEGER PRIMARY KEY,
+        client TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+        effort TEXT NOT NULL DEFAULT '',
+        priority INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+        UNIQUE (client, tier, provider, model, effort)
+    );
+    INSERT INTO client_models (client, provider, model, tier, effort, priority)
+        SELECT client,
+            CASE WHEN client = 'opencode' THEN substr(model, 1, instr(model, '/') - 1) ELSE 'anthropic' END,
+            model, tier, COALESCE(effort, ''), 0
+        FROM agent_models ORDER BY client, tier;
+    DROP TABLE agent_models;",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another

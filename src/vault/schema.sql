@@ -113,14 +113,20 @@ JOIN revisions r ON r.id = s.id
 WHERE r.status = 'published'
     AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
 
--- Which model each agent tier maps to, per client. Machine-local configuration
+-- The models each client's tiers map to, ranked: file generation uses the enabled row
+-- with the lowest `priority` (ties by insertion order). `effort` is '' when none; an
+-- OpenCode provider is the `provider/` prefix of its model. Machine-local configuration
 -- (model availability depends on the machine): not exported or imported.
-CREATE TABLE agent_models (
+CREATE TABLE client_models (
+    id INTEGER PRIMARY KEY,
     client TEXT NOT NULL,
-    tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+    provider TEXT NOT NULL,
     model TEXT NOT NULL,
-    effort TEXT,
-    PRIMARY KEY (client, tier)
+    tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+    effort TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    UNIQUE (client, tier, provider, model, effort)
 );
 
 -- The version each client reported when setup last ran, so hooks can pick version-

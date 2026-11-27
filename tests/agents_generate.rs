@@ -477,6 +477,86 @@ fn models_set_changes_the_generated_model() {
 }
 
 #[test]
+fn models_add_rank_disable_and_remove_drive_the_generated_model() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code,opencode");
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "claude-code",
+        "mid",
+        "opus",
+        "--priority",
+        "5",
+        "--effort",
+        "high",
+    ]);
+    let table = sandbox.ok(&["agents", "models"]);
+    let sonnet = table.find("claude-sonnet-4-5").unwrap();
+    let opus = table.find("(set, priority 5)").unwrap();
+    assert!(sonnet < opus, "{table}");
+    sandbox.ok(&["agents", "add", "sv-mid"]);
+    assert!(read(&sandbox.claude("sv-mid")).contains("model: claude-sonnet-4-5\n"));
+
+    let out = sandbox.ok(&[
+        "agents",
+        "models",
+        "disable",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    assert!(out.contains("Disabled 1 row"), "{out}");
+    assert!(
+        sandbox
+            .ok(&["agents", "models"])
+            .contains("(set, disabled)")
+    );
+    sandbox.ok(&["agents", "add", "sv-mid", "--force"]);
+    assert!(read(&sandbox.claude("sv-mid")).contains("model: opus\n"));
+
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "enable",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "remove",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    let gone = sandbox.run(&[
+        "agents",
+        "models",
+        "remove",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stdout).contains("No stored model"));
+    // A bare OpenCode model needs a provider; one with a prefix derives it.
+    sandbox.err(&["agents", "models", "add", "opencode", "mid", "sonnet"]);
+    let out = sandbox.ok(&["agents", "models", "add", "opencode", "mid", "openai/gpt-5"]);
+    assert!(out.contains("openai"), "{out}");
+}
+
+#[test]
 fn importing_a_generated_file_round_trips_and_native_files_map_sensibly() {
     let sandbox = Sandbox::new();
     sandbox.setup("claude-code");
