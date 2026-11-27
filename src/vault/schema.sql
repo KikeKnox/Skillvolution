@@ -131,3 +131,23 @@ CREATE TABLE client_versions (
     version TEXT NOT NULL,
     detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- Local usage telemetry: what was searched, suggested, loaded, delegated to, and where
+-- hooks or the MCP server failed. Never prompt text, file contents, or absolute paths;
+-- nothing leaves the machine. Machine-local: not exported or imported. Rows older than
+-- 180 days are deleted when the vault is opened.
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    client TEXT,
+    client_version TEXT,
+    project TEXT,
+    session TEXT,
+    kind TEXT NOT NULL,
+    subject TEXT,
+    version INTEGER,
+    data TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(data))
+);
+
+CREATE INDEX events_at ON events(at);
+CREATE INDEX events_kind_at ON events(kind, at);

@@ -1,5 +1,6 @@
 mod agent;
 mod client_version;
+mod events;
 mod location;
 mod outcomes;
 mod revisions;
@@ -12,6 +13,7 @@ pub use agent::{
     skill_unavailable,
 };
 pub use client_version::{StoredVersion, stored_client_version};
+pub use events::{Event, MAX_REASON_CHARS, error_class, scrub_text, search_query_for_event};
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
 pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
@@ -210,6 +212,21 @@ const MIGRATIONS: &[&str] = &[
         version TEXT NOT NULL,
         detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );",
+    // v8: local usage telemetry.
+    "CREATE TABLE events (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        client TEXT,
+        client_version TEXT,
+        project TEXT,
+        session TEXT,
+        kind TEXT NOT NULL,
+        subject TEXT,
+        version INTEGER,
+        data TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(data))
+    );
+    CREATE INDEX events_at ON events(at);
+    CREATE INDEX events_kind_at ON events(kind, at);",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
@@ -229,6 +246,8 @@ pub(crate) fn application_id() -> i64 {
 }
 /// Hook state for sessions idle this long is dropped on open.
 const HOOK_STATE_RETENTION_DAYS: i64 = 30;
+/// Usage events older than this are dropped on open.
+const EVENT_RETENTION_DAYS: i64 = 180;
 const MAX_TAGS: usize = 8;
 const MAX_TAG_BYTES: usize = 32;
 const CONTENT_SECTIONS: [&str; 4] = [
@@ -266,6 +285,8 @@ impl Vault {
         })?;
         let vault = Self { conn };
         vault.prune_hook_state(HOOK_STATE_RETENTION_DAYS)?;
+        // Telemetry retention never blocks or fails an open.
+        let _ = vault.prune_events(EVENT_RETENTION_DAYS);
         Ok(vault)
     }
 
@@ -349,6 +370,19 @@ impl Vault {
             .conn
             .query_row(
                 "DELETE FROM devin_hook_state WHERE session_id = ?1 RETURNING worked, reviewed",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.unwrap_or((false, false)))
+    }
+
+    /// `take_devin_hook_state` without consuming the flags.
+    pub fn peek_devin_hook_state(&self, session_id: &str) -> Result<(bool, bool)> {
+        let row: Option<(bool, bool)> = self
+            .conn
+            .query_row(
+                "SELECT worked, reviewed FROM devin_hook_state WHERE session_id = ?1",
                 [session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

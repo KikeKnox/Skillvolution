@@ -277,6 +277,10 @@ fn agent_scope(global: bool, project: Option<String>) -> Result<(Option<String>,
     Ok((key, Some(dir)))
 }
 
+fn scope_name(global: bool) -> &'static str {
+    if global { "global" } else { "project" }
+}
+
 fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
     use skillvolution::agents;
     let mut failed = false;
@@ -331,12 +335,32 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             force,
         } => {
             let (key, dir) = agent_scope(global, project)?;
-            agents::add(&open(db)?, &ids, key.as_deref(), dir.as_deref(), force)?
+            let vault = open(db)?;
+            let lines = agents::add(&vault, &ids, key.as_deref(), dir.as_deref(), force)?;
+            agents::log_agent_events(
+                &vault,
+                &lines,
+                agents::AgentOp::Add,
+                scope_name(global),
+                key.as_deref(),
+            );
+            lines
         }
         AgentsCommand::Remove { ids, global } => {
-            let (_, dir) = agent_scope(global, None)?;
+            let (key, dir) = agent_scope(global, None)?;
             let (lines, missing) = agents::remove(&ids, dir.as_deref())?;
             failed = missing > 0;
+            // Recording is best effort: removing needs no vault, so a vault that
+            // cannot be opened must not fail it.
+            if let Ok(vault) = open(db) {
+                agents::log_agent_events(
+                    &vault,
+                    &lines,
+                    agents::AgentOp::Remove,
+                    scope_name(global),
+                    key.as_deref(),
+                );
+            }
             lines
         }
         AgentsCommand::Sync {
@@ -346,7 +370,18 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             force,
         } => {
             let (key, dir) = agent_scope(global, project)?;
-            agents::sync(&open(db)?, key.as_deref(), dir.as_deref(), apply, force)?
+            let vault = open(db)?;
+            let lines = agents::sync(&vault, key.as_deref(), dir.as_deref(), apply, force)?;
+            if apply {
+                agents::log_agent_events(
+                    &vault,
+                    &lines,
+                    agents::AgentOp::SyncApply,
+                    scope_name(global),
+                    key.as_deref(),
+                );
+            }
+            lines
         }
         AgentsCommand::Import { path, output } => {
             anyhow::ensure!(
@@ -601,6 +636,33 @@ fn publish_file(
     }))
 }
 
+/// Records a `publish` event for a published file, or a `publish_rejected` one with
+/// the (scrubbed) problems for a rejected one. A skipped file is neither.
+fn log_publish(vault: &Vault, result: &std::result::Result<Published, Vec<String>>) {
+    use skillvolution::vault::{Event, MAX_REASON_CHARS, scrub_text};
+    match result {
+        Ok(Published::Done {
+            id,
+            version,
+            scope,
+            agent,
+        }) => vault.log_event(Event::new("publish").subject(id, Some(*version)).data(
+            serde_json::json!({
+                "scope": scope,
+                "agent": agent,
+            }),
+        )),
+        Ok(Published::Skipped { .. }) => {}
+        Err(problems) => vault.log_event(Event::new("publish_rejected").data(serde_json::json!({
+            "reasons": problems
+                .iter()
+                .take(5)
+                .map(|problem| scrub_text(problem, MAX_REASON_CHARS))
+                .collect::<Vec<_>>(),
+        }))),
+    }
+}
+
 fn publish(
     db: &Option<PathBuf>,
     path: PathBuf,
@@ -653,6 +715,7 @@ fn publish(
         for file in &files {
             let result = publish_file(&mut vault, file, None, &opts)
                 .unwrap_or_else(|e| Err(vec![format!("{e:#}")]));
+            log_publish(&vault, &result);
             match result {
                 Ok(Published::Done {
                     id,
@@ -701,7 +764,9 @@ fn publish(
         path
     };
     let mut vault = open(db)?;
-    match publish_file(&mut vault, &path, id, &opts)? {
+    let result = publish_file(&mut vault, &path, id, &opts)?;
+    log_publish(&vault, &result);
+    match result {
         Ok(Published::Done {
             id,
             version,
@@ -899,6 +964,40 @@ enum HookEvent {
     Approve,
 }
 
+impl HookEvent {
+    /// The hook's name and the client that emitted it, for `hook_error` events.
+    fn origin(&self) -> (&'static str, Option<ClientKind>) {
+        match self {
+            HookEvent::SessionStart { client, .. } => ("session-start", Some(client.0)),
+            HookEvent::Prompt { client, .. } => ("prompt", Some(client.0)),
+            HookEvent::ToolUse { client } => ("tool-use", Some(client.0)),
+            HookEvent::Stop { client, .. } => ("stop", Some(client.0)),
+            HookEvent::SessionEnd => ("session-end", None),
+            HookEvent::Approve => ("approve", None),
+        }
+    }
+}
+
+/// Records a `hook_error` event (hook and error class, never the message). Best effort:
+/// when the vault itself cannot be opened there is nowhere to record it.
+fn log_hook_error(
+    db: &Option<PathBuf>,
+    hook: &str,
+    client: Option<ClientKind>,
+    error: &anyhow::Error,
+) {
+    if let Ok(vault) = open(db) {
+        vault.log_event(
+            skillvolution::vault::Event::new("hook_error")
+                .client(client)
+                .data(serde_json::json!({
+                    "hook": hook,
+                    "class": skillvolution::vault::error_class(error),
+                })),
+        );
+    }
+}
+
 fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -960,7 +1059,7 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
         HookEvent::SessionStart { project, client } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let context = hook::session_start(&open(db)?, project.as_deref())?;
+            let context = hook::session_start_recorded(&open(db)?, project.as_deref(), client.0)?;
             print!("{}", client.session_context(context));
         }
         HookEvent::Prompt { project, client } => {
@@ -972,7 +1071,9 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                 .prompt_event()
                 .context("this client's prompt hook cannot inject context")?;
             let project = resolve_project(project)?;
-            if let Some(context) = hook::prompt(&open(db)?, project.as_deref(), &input)? {
+            if let Some(context) =
+                hook::prompt_recorded(&open(db)?, project.as_deref(), &input, client.0)?
+            {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -1004,9 +1105,14 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                         });
                     let dirs = skillvolution::agents::claude_agent_dirs(project_dir.as_deref());
                     let hooks = &client.0.spec().hooks;
-                    if let Some(reason) =
-                        hook::transcript_stop(&open(db)?, &input, project.as_deref(), &dirs, hooks)?
-                    {
+                    if let Some(reason) = hook::transcript_stop_as(
+                        &open(db)?,
+                        &input,
+                        project.as_deref(),
+                        &dirs,
+                        hooks,
+                        Some(client.0),
+                    )? {
                         // additionalContext on stdout (exit 0) makes Claude continue the
                         // same turn, like decision:block, and the continued stop arrives
                         // with stop_hook_active=true; unlike decision:block, it shows no
@@ -1023,7 +1129,10 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                     }
                 }
                 StopJudgment::Flags(output) => {
-                    if let Some(reason) = hook::devin_stop(&open(db)?, &input)? {
+                    let project = resolve_project(project).ok().flatten();
+                    if let Some(reason) =
+                        hook::devin_stop_as(&open(db)?, &input, project.as_deref(), Some(client.0))?
+                    {
                         println!("{}", continue_with(output, reason));
                     }
                 }
@@ -1205,7 +1314,17 @@ fn main() -> Result<()> {
         } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let page = open(&cli.db)?.search(&query, project.as_deref(), limit, 0)?;
+            let vault = open(&cli.db)?;
+            let page = vault.search(&query, project.as_deref(), limit, 0)?;
+            vault.log_event(
+                skillvolution::vault::Event::new("search")
+                    .project(project.as_deref())
+                    .data(serde_json::json!({
+                        "query": skillvolution::vault::search_query_for_event(&query),
+                        "total": page.total,
+                        "ids": page.skills.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                    })),
+            );
             print_skills(&page, json)?;
         }
         Command::List {
@@ -1318,8 +1437,10 @@ fn main() -> Result<()> {
         // Hooks fail open: a hook error must never block or break the client's
         // session, so it is reported on stderr and the process still exits 0.
         Command::Hook(event) => {
+            let (hook, client) = event.origin();
             if let Err(error) = run_hook(event, &cli.db) {
                 eprintln!("skillvolution hook: {error:#}");
+                log_hook_error(&cli.db, hook, client, &error);
             }
         }
     }

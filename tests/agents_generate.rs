@@ -1599,3 +1599,51 @@ fn purging_the_current_agent_version_warns_about_skills_the_older_one_lists() {
         "{out}"
     );
 }
+
+#[test]
+fn agents_add_sync_and_remove_record_events_without_paths() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.publish("[read]", "", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.publish("[read, shell]", "", true);
+    sandbox.ok(&["agents", "sync"]);
+    assert!(
+        support::events(&sandbox.db, Some("agent_update")).is_empty(),
+        "a dry run changes nothing"
+    );
+    sandbox.ok(&["agents", "sync", "--apply"]);
+    sandbox.ok(&["agents", "remove", "reviewer"]);
+
+    let events = support::events(&sandbox.db, None);
+    let agent_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind.starts_with("agent_"))
+        .map(|event| {
+            (
+                event.kind.as_str(),
+                event.client.as_deref(),
+                event.subject.as_deref(),
+                event.version,
+            )
+        })
+        .collect();
+    let claude = Some("claude-code");
+    let reviewer = Some("reviewer");
+    assert_eq!(
+        agent_events,
+        [
+            ("agent_install", claude, reviewer, Some(1)),
+            ("agent_update", claude, reviewer, Some(2)),
+            ("agent_remove", claude, reviewer, None),
+        ]
+    );
+    let install = &support::events(&sandbox.db, Some("agent_install"))[0];
+    assert_eq!(install.data["scope"], "project");
+    let home = sandbox.home.to_str().unwrap();
+    let repo = sandbox.repo.to_str().unwrap();
+    for event in &events {
+        let text = format!("{:?}", event);
+        assert!(!text.contains(home) && !text.contains(repo), "{text}");
+    }
+}

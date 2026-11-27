@@ -983,6 +983,101 @@ pub fn sync(
     Ok(lines)
 }
 
+/// Which command produced the report lines `log_agent_events` reads.
+#[derive(Clone, Copy)]
+pub enum AgentOp {
+    Add,
+    Remove,
+    /// `sync --apply`; a dry run changes nothing and is not logged.
+    SyncApply,
+}
+
+/// One agent file written or removed, as read back from a report line.
+#[derive(Debug, PartialEq, Eq)]
+struct AgentChange {
+    kind: &'static str,
+    target: Target,
+    id: String,
+    version: Option<i64>,
+}
+
+/// The `v12` at the start of `token`, as 12.
+fn version_token(token: &str) -> Option<i64> {
+    token.strip_prefix('v')?.trim_end_matches(':').parse().ok()
+}
+
+/// The files `add`, `remove` or `sync --apply` changed, read from their report lines
+/// (`[added] Claude Code my-agent v2 -> PATH`, `[removed] Claude Code my-agent -> PATH`,
+/// `[update] Claude Code my-agent v1 -> v2`): the installed version for an install, the
+/// new one for an update.
+fn agent_changes(lines: &[String], command: AgentOp) -> Vec<AgentChange> {
+    let mut changes = Vec::new();
+    for line in lines {
+        let Some((tag, rest)) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once("] "))
+        else {
+            continue;
+        };
+        let kind = match (command, tag) {
+            (AgentOp::Add, "added") => "agent_install",
+            (AgentOp::Add, "updated" | "overwritten") => "agent_update",
+            (AgentOp::Remove, "removed") => "agent_remove",
+            (AgentOp::SyncApply, "update") => "agent_update",
+            _ => continue,
+        };
+        let Some((target, rest)) = Target::all().find_map(|target| {
+            let rest = rest
+                .strip_prefix(target.display_name())?
+                .strip_prefix(' ')?;
+            Some((target, rest))
+        }) else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(id) = words.next().map(|id| id.trim_end_matches(':')) else {
+            continue;
+        };
+        // The last `vN` before any path: the new version of an update (`v1 -> v2`).
+        let summary = rest.split(" -> ").take(2).collect::<Vec<_>>();
+        let version = if kind == "agent_update" && summary.len() == 2 {
+            summary[1].split_whitespace().next().and_then(version_token)
+        } else {
+            summary[0]
+                .split_whitespace()
+                .skip(1)
+                .find_map(version_token)
+        };
+        changes.push(AgentChange {
+            kind,
+            target,
+            id: id.to_owned(),
+            version,
+        });
+    }
+    changes
+}
+
+/// Records an `agent_install`, `agent_update` or `agent_remove` event for each file
+/// the report `lines` of `command` say changed. `scope` is `global` or `project`.
+pub fn log_agent_events(
+    vault: &Vault,
+    lines: &[String],
+    command: AgentOp,
+    scope: &str,
+    project: Option<&str>,
+) {
+    for change in agent_changes(lines, command) {
+        vault.log_event(
+            crate::vault::Event::new(change.kind)
+                .client(Some(change.target.kind()))
+                .project(project)
+                .subject(&change.id, change.version)
+                .data(serde_json::json!({"scope": scope})),
+        );
+    }
+}
+
 /// A note for `setup --remove`: managed agent files its client leaves in `scope`.
 pub(crate) fn left_behind_note(kind: ClientKind, scope: Scope) -> Option<String> {
     let target = Target::from_kind(kind)?;

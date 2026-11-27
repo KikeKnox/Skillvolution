@@ -1,9 +1,10 @@
 use crate::{
     clients::{ClientKind, HookSpec},
-    vault::{SkillMetadata, Vault},
+    vault::{Event, SkillMetadata, Vault},
 };
 use anyhow::Result;
 use serde_json::Value;
+use serde_json::json;
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -507,6 +508,48 @@ pub fn relevant_skills(
 /// the `prompt` field of `input` (the field Claude Code, Codex, Devin, and Gemini CLI
 /// all use), or `None` when nothing is relevant, so the client adds nothing.
 pub fn prompt(vault: &Vault, project: Option<&str>, input: &str) -> Result<Option<String>> {
+    Ok(suggest(vault, project, input)?.map(|(text, _)| text))
+}
+
+/// `prompt`, recording a `suggest` event (the ids and scores suggested, never the
+/// prompt) for the `client` that emitted it.
+pub fn prompt_recorded(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<Option<String>> {
+    let Some((text, skills)) = suggest(vault, project, input)? else {
+        return Ok(None);
+    };
+    let session = serde_json::from_str::<Value>(input)
+        .ok()
+        .and_then(|input| session_of(&input).map(str::to_owned));
+    vault.log_event(
+        Event::new("suggest")
+            .client(Some(client))
+            .project(project)
+            .session(session.as_deref())
+            .data(json!({
+                "suggested": skills
+                    .iter()
+                    .map(|skill| json!({
+                        "id": skill.id,
+                        "version": skill.version,
+                        "score": skill.score,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+    );
+    Ok(Some(text))
+}
+
+/// The suggestion text for the prompt in `input` and the skills it names.
+fn suggest(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+) -> Result<Option<(String, Vec<SkillMetadata>)>> {
     let input: Value = serde_json::from_str(input)?;
     let Some(prompt) = input["prompt"].as_str() else {
         return Ok(None);
@@ -528,10 +571,32 @@ pub fn prompt(vault: &Vault, project: Option<&str>, input: &str) -> Result<Optio
          which vault skill you are applying (id and version), or that none fits. After \
          applying it, call report_skill_outcome.",
     );
-    Ok(Some(text))
+    Ok(Some((text, skills)))
 }
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
+    Ok(catalog(vault, project)?.0)
+}
+
+/// `session_start`, recording a `session_start` event (the catalog size) for the
+/// `client` that emitted it.
+pub fn session_start_recorded(
+    vault: &Vault,
+    project: Option<&str>,
+    client: ClientKind,
+) -> Result<String> {
+    let (text, visible) = catalog(vault, project)?;
+    vault.log_event(
+        Event::new("session_start")
+            .client(Some(client))
+            .project(project)
+            .data(json!({"catalog": visible})),
+    );
+    Ok(text)
+}
+
+/// The session-start context and how many skills are visible to `project`.
+fn catalog(vault: &Vault, project: Option<&str>) -> Result<(String, i64)> {
     let page = vault.search("", project, CATALOG_LIMIT, 0)?;
     let mut text = String::from(
         "Skillvolution vault (shared procedural memory). Before any non-trivial task, follow \
@@ -543,7 +608,7 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     );
     if page.skills.is_empty() {
         text.push_str("No published skills are visible to this project yet.\n");
-        return Ok(text);
+        return Ok((text, 0));
     }
     writeln!(text, "Published skills ({} visible):", page.total)?;
     for skill in &page.skills {
@@ -565,7 +630,7 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
             page.total - shown
         )?;
     }
-    Ok(text)
+    Ok((text, page.total))
 }
 
 /// Claude Code Stop: `transcript_stop` with Claude Code's work and delegation tools.
@@ -590,6 +655,19 @@ pub fn transcript_stop(
     project: Option<&str>,
     agent_dirs: &[std::path::PathBuf],
     hooks: &HookSpec,
+) -> Result<Option<Cow<'static, str>>> {
+    transcript_stop_as(vault, input, project, agent_dirs, hooks, None)
+}
+
+/// `transcript_stop`, recording `delegation` and `review_reminder` events for the
+/// `client` that wrote the transcript (`None` records none, for callers without one).
+pub fn transcript_stop_as(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    agent_dirs: &[std::path::PathBuf],
+    hooks: &HookSpec,
+    client: Option<ClientKind>,
 ) -> Result<Option<Cow<'static, str>>> {
     let input: Value = serde_json::from_str(input)?;
     let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
@@ -617,7 +695,25 @@ pub fn transcript_stop(
     // (e.g. a report_skill_outcome call) get re-read on the next real stop,
     // mixed in with new unreviewed work, and mask it as already reviewed.
     vault.set_transcript_offset(session, offset + complete as u64)?;
+    let scan = scan_span(&bytes[..complete], hooks);
+    if client.is_some() {
+        for (agent, model) in &scan.delegations {
+            record_delegation(
+                vault,
+                project,
+                client,
+                Some(session),
+                agent,
+                model.as_deref(),
+            );
+        }
+    }
     if stop_hook_active {
+        // We reminded and the agent continued: the reminder was ignored unless the
+        // span since shows a review.
+        if client.is_some() && !scan.reviewed {
+            log_reminder(vault, client, project, Some(session), "ignored");
+        }
         return Ok(None);
     }
     let Some(delegated) = has_unreviewed_work(&bytes[..complete], hooks, |id| {
@@ -628,7 +724,113 @@ pub fn transcript_stop(
     }) else {
         return Ok(None);
     };
+    if client.is_some() {
+        log_reminder(vault, client, project, Some(session), "fired");
+    }
     Ok(Some(reason_with_delegations(&delegated)))
+}
+
+fn log_reminder(
+    vault: &Vault,
+    client: Option<ClientKind>,
+    project: Option<&str>,
+    session: Option<&str>,
+    state: &str,
+) {
+    vault.log_event(
+        Event::new("review_reminder")
+            .client(client)
+            .project(project)
+            .session(session)
+            .data(json!({"state": state})),
+    );
+}
+
+/// A `delegation` event: which agent, whether it is a built-in or a vault agent
+/// (anything else is the client's own), its tier when it has one, and the model when
+/// the tool call named it.
+fn record_delegation(
+    vault: &Vault,
+    project: Option<&str>,
+    client: Option<ClientKind>,
+    session: Option<&str>,
+    agent: &str,
+    model: Option<&str>,
+) {
+    let (source, tier, version) = if let Some(builtin) = crate::agents::builtin(agent) {
+        ("builtin", Some(builtin.meta.tier), None)
+    } else {
+        match vault.get(agent, None, project) {
+            Ok(view) if view.kind == "agent" => {
+                ("vault", view.meta.map(|meta| meta.tier), Some(view.version))
+            }
+            _ => ("other", None, None),
+        }
+    };
+    vault.log_event(
+        Event::new("delegation")
+            .client(client)
+            .project(project)
+            .session(session)
+            .subject(agent, version)
+            .data(json!({"source": source, "level": tier, "model": model})),
+    );
+}
+
+/// What one transcript span shows, for telemetry.
+struct SpanScan {
+    /// Successful delegations (agent, model named in the call), in order.
+    delegations: Vec<(String, Option<String>)>,
+    /// Whether a review tool call succeeded in the span.
+    reviewed: bool,
+}
+
+fn scan_span(span: &[u8], hooks: &HookSpec) -> SpanScan {
+    // (tool_use id, delegation (agent, model) if it is one, whether it is a review)
+    type Call = (String, Option<(String, Option<String>)>, bool);
+    let mut calls: Vec<Call> = Vec::new();
+    let mut failed = HashSet::new();
+    for line in span.split(|b| *b == b'\n') {
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        visit_objects(&entry, &mut |object| match object["type"].as_str() {
+            Some("tool_use") => {
+                let name = object["name"].as_str().unwrap_or_default();
+                let id = object["id"].as_str().unwrap_or_default().to_owned();
+                let delegation = hooks
+                    .delegation_tools
+                    .iter()
+                    .find(|delegation| delegation.tool == name)
+                    .and_then(|delegation| object["input"][delegation.agent_field].as_str())
+                    .map(|agent| {
+                        (
+                            agent.to_owned(),
+                            object["input"]["model"].as_str().map(str::to_owned),
+                        )
+                    });
+                calls.push((id, delegation, is_review_tool(name)));
+            }
+            Some("tool_result") if object["is_error"].as_bool() == Some(true) => {
+                if let Some(id) = object["tool_use_id"].as_str() {
+                    failed.insert(id.to_owned());
+                }
+            }
+            _ => {}
+        });
+    }
+    let mut scan = SpanScan {
+        delegations: Vec::new(),
+        reviewed: false,
+    };
+    for (id, delegation, review) in calls {
+        if failed.contains(&id) {
+            continue;
+        }
+        scan.reviewed |= review;
+        scan.delegations.extend(delegation);
+    }
+    scan
 }
 
 /// `STOP_REASON`, followed by a line naming the vault agents delegated to (so the
@@ -788,15 +990,37 @@ pub fn tool_use(vault: &Vault, input: &str, work_tools: &[&str]) -> Result<()> {
 /// blocked and leaves the flags alone.
 /// The same judgment serves every flag-tracked client.
 pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
+    devin_stop_as(vault, input, None, None)
+}
+
+/// `devin_stop`, recording `review_reminder` events for the `client` (`None` records
+/// none).
+pub fn devin_stop_as(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    client: Option<ClientKind>,
+) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
+    let session = session_of(&input);
     if input["stop_hook_active"].as_bool() == Some(true) {
+        // We reminded and the agent continued: ignored unless it reviewed since.
+        if let (Some(session), Some(_)) = (session, client)
+            && !vault.peek_devin_hook_state(session)?.1
+        {
+            log_reminder(vault, client, project, Some(session), "ignored");
+        }
         return Ok(None);
     }
-    let Some(session) = session_of(&input) else {
+    let Some(session) = session else {
         return Ok(None);
     };
     let (worked, reviewed) = vault.take_devin_hook_state(session)?;
-    Ok((worked && !reviewed).then_some(STOP_REASON))
+    let reminder = (worked && !reviewed).then_some(STOP_REASON);
+    if reminder.is_some() && client.is_some() {
+        log_reminder(vault, client, project, Some(session), "fired");
+    }
+    Ok(reminder)
 }
 
 /// Devin SessionEnd: drops the session's flag row so the table does not grow

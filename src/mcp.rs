@@ -3,7 +3,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
 
-use crate::vault::{Proposal, Vault};
+use crate::vault::{
+    Event, MAX_REASON_CHARS, Proposal, Vault, error_class, scrub_text, search_query_for_event,
+};
 
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_NAME: &str = "skillvolution";
@@ -291,12 +293,20 @@ impl From<serde_json::Error> for ToolCallError {
 }
 
 impl Server {
+    /// Records a usage event for this server. The one place that decides which client
+    /// the events belong to: the server does not know its client yet, so they carry
+    /// none (and so no client version).
+    fn log(&self, event: Event<'_>) {
+        self.vault
+            .log_event(event.client(None).project(self.project.as_deref()));
+    }
+
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, (i32, String)> {
         match method {
             "initialize" => Ok(initialize(&params)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
-            "tools/call" => match self.call(params) {
+            "tools/call" => match self.call_logged(params) {
                 Ok(value) => Ok(json!({
                     "content": [{"type": "text", "text": value.to_string()}],
                     "isError": false,
@@ -309,6 +319,25 @@ impl Server {
             },
             _ => Err((-32601, format!("method not found: {method}"))),
         }
+    }
+
+    /// `call`, recording a `mcp_error` event (tool and error class, never the message)
+    /// when the tool fails. A refused publish is a `publish_rejected` event instead:
+    /// it is the vault doing its job, not a malfunction.
+    fn call_logged(&mut self, params: Value) -> Result<Value, ToolCallError> {
+        let tool = params
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let result = self.call(params);
+        if let (Err(ToolCallError::ToolFailure(error)), Some(tool)) = (&result, &tool)
+            && tool != "publish_skill"
+        {
+            self.log(
+                Event::new("mcp_error").data(json!({"tool": tool, "class": error_class(error)})),
+            );
+        }
+        result
     }
 
     fn call(&mut self, params: Value) -> Result<Value, ToolCallError> {
@@ -328,6 +357,11 @@ impl Server {
                 let page = self
                     .vault
                     .search(&args.query, project, args.limit, args.offset)?;
+                self.log(Event::new("search").data(json!({
+                    "query": search_query_for_event(&args.query),
+                    "total": page.total,
+                    "ids": page.skills.iter().map(|skill| skill.id.as_str()).collect::<Vec<_>>(),
+                })));
                 Ok(serde_json::to_value(page)?)
             }
             "get_skill" => {
@@ -349,6 +383,7 @@ impl Server {
                         skill.id, skill.version
                     );
                 }
+                self.log(Event::new("load").subject(&skill.id, Some(skill.version)));
                 let next = format!(
                     "Apply this procedure only as far as it fits the task, verify the result with its \
                      Verification section, then call report_skill_outcome with id {} and version {}: \
@@ -368,6 +403,11 @@ impl Server {
                     &args.note,
                     project,
                 )?;
+                self.log(
+                    Event::new("outcome")
+                        .subject(&args.id, Some(args.version))
+                        .data(json!({"result": args.result})),
+                );
                 Ok(json!({"recorded": true}))
             }
             "publish_skill" => {
@@ -392,7 +432,7 @@ impl Server {
                     )
                     .into());
                 }
-                let revision = self.vault.propose(&Proposal {
+                let proposed = self.vault.propose(&Proposal {
                     id: &args.id,
                     description: &args.description,
                     tags: &args.tags,
@@ -403,7 +443,26 @@ impl Server {
                     verdict: &args.verdict,
                     verdict_reason: &args.verdict_reason,
                     replaces_proven: args.replaces_proven,
-                })?;
+                });
+                let revision = match proposed {
+                    Ok(revision) => revision,
+                    Err(error) => {
+                        self.log(Event::new("publish_rejected").subject(&args.id, None).data(
+                            json!({
+                                "reason": scrub_text(&format!("{error:#}"), MAX_REASON_CHARS),
+                            }),
+                        ));
+                        return Err(error.into());
+                    }
+                };
+                self.log(
+                    Event::new("publish")
+                        .subject(&revision.id, Some(revision.version))
+                        .data(json!({
+                            "scope": if revision.scope.is_some() { "project" } else { "global" },
+                            "update": args.expected_version > 0,
+                        })),
+                );
                 Ok(json!({
                     "id": revision.id,
                     "version": revision.version,

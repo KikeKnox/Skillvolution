@@ -1248,15 +1248,15 @@ fn new_databases_are_stamped_with_the_version_and_application_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 }
 
 #[test]
-fn migrates_a_v1_database_to_v7() {
+fn migrates_a_v1_database_to_v8() {
     let (_dir, path) = legacy_database(1);
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
     // v1 defaulted new revisions to draft; the v5 rebuild drops that too.
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -1276,10 +1276,10 @@ fn migrates_a_v1_database_to_v7() {
 }
 
 #[test]
-fn migrates_a_v2_database_to_v7_preserving_data() {
+fn migrates_a_v2_database_to_v8_preserving_data() {
     let (_dir, path) = legacy_database(2);
     let mut vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     assert_eq!(pragma(&path, "application_id"), APPLICATION_ID);
 
     // Revisions survive; the legacy draft is retired.
@@ -1324,7 +1324,7 @@ fn migrates_a_v2_database_to_v7_preserving_data() {
 }
 
 #[test]
-fn migrates_a_v3_database_to_v7_with_loads_and_inherited_records() {
+fn migrates_a_v3_database_to_v8_with_loads_and_inherited_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
@@ -1353,7 +1353,7 @@ fn migrates_a_v3_database_to_v7_with_loads_and_inherited_records() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     let page = vault.search("", None, 20, 0).unwrap();
     assert_eq!(
         ids(&page),
@@ -1380,6 +1380,7 @@ fn strip_v6(conn: &rusqlite::Connection) {
         "DROP VIEW current_skills;
          DROP TABLE agent_models;
          DROP TABLE client_versions;
+         DROP TABLE events;
          ALTER TABLE skills DROP COLUMN kind;
          ALTER TABLE revisions DROP COLUMN meta;
          {view};"
@@ -1388,7 +1389,7 @@ fn strip_v6(conn: &rusqlite::Connection) {
 }
 
 #[test]
-fn migrates_a_v5_database_to_v7_keeping_skills_as_skills() {
+fn migrates_a_v5_database_to_v8_keeping_skills_as_skills() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("skills.db");
     let mut vault = Vault::open(&path).unwrap();
@@ -1400,7 +1401,7 @@ fn migrates_a_v5_database_to_v7_keeping_skills_as_skills() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     let skill = vault.get("skill", None, None).unwrap();
     assert_eq!((skill.kind.as_str(), skill.meta.is_none()), ("skill", true));
     assert_eq!(ids(&vault.search("", None, 20, 0).unwrap()), ["skill"]);
@@ -1420,11 +1421,48 @@ fn schema_sql(conn: &rusqlite::Connection, name: &str) -> String {
 }
 
 #[test]
+fn migrates_a_v7_database_adding_events() {
+    let (_dir, path) = legacy_database(1);
+    drop(Vault::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE events;").unwrap();
+    conn.pragma_update(None, "user_version", 7).unwrap();
+    drop(conn);
+
+    drop(Vault::open(&path).unwrap());
+    assert_eq!(pragma(&path, "user_version"), 8);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('events') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "id",
+            "at",
+            "client",
+            "client_version",
+            "project",
+            "session",
+            "kind",
+            "subject",
+            "version",
+            "data"
+        ]
+    );
+}
+
+#[test]
 fn migrates_a_v6_database_adding_client_versions_and_keeping_agent_models() {
     let (_dir, path) = legacy_database(1);
     drop(Vault::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE client_versions;").unwrap();
+    conn.execute_batch("DROP TABLE client_versions; DROP TABLE events;")
+        .unwrap();
     conn.execute(
         "INSERT INTO agent_models (client, tier, model) VALUES ('claude-code', 'mid', 'sonnet')",
         [],
@@ -1434,7 +1472,7 @@ fn migrates_a_v6_database_adding_client_versions_and_keeping_agent_models() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     assert_eq!(vault.agent_models().unwrap().len(), 1);
     assert_eq!(vault.client_version(ClientKind::OpenCode).unwrap(), None);
     vault
@@ -1514,7 +1552,7 @@ fn migrates_a_v4_database_retiring_draft_and_rejected_revisions() {
     drop(conn);
 
     let vault = Vault::open(&path).unwrap();
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     let draft = vault.inspect("skill", 2).unwrap();
     assert_eq!(draft.status, "superseded");
     assert_eq!(draft.review_note.as_deref(), Some("legacy draft"));
@@ -1599,7 +1637,7 @@ fn migration_tolerates_foreign_key_violations_already_in_the_vault() {
     drop(conn);
 
     drop(Vault::open(&path).unwrap());
-    assert_eq!(pragma(&path, "user_version"), 7);
+    assert_eq!(pragma(&path, "user_version"), 8);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let orphans: i64 = conn
         .query_row(
