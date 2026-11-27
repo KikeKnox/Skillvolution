@@ -262,6 +262,25 @@ fn hooks_record_session_start_and_suggest_with_the_stored_client_version() {
     assert_eq!(suggested["id"], "sqlite-busy-timeout");
     assert!(suggested["score"].as_f64().unwrap() > 0.0, "{suggested}");
     assert!(!format!("{suggest:?}").contains("zebra"));
+
+    // A searchable prompt with no match records an empty list (and no prompt text); a
+    // prompt too short to be searched records nothing.
+    let none =
+        json!({"session_id": "s-8", "prompt": "quantum chromodynamics lattice gauge"}).to_string();
+    hook_cmd(
+        &db,
+        &["prompt", "--client", "codex", "--project", "proj"],
+        &none,
+    );
+    hook_cmd(
+        &db,
+        &["prompt", "--client", "codex"],
+        &json!({"prompt": "hola"}).to_string(),
+    );
+    let all = events(&db, Some("suggest"));
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(all[1].data, json!({"suggested": []}));
+    assert!(!format!("{all:?}").contains("quantum"));
 }
 
 #[test]
@@ -408,6 +427,24 @@ fn flag_tracked_clients_record_the_reminder_lifecycle() {
 }
 
 #[test]
+fn retention_runs_once_a_day_not_on_every_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_with_skill(dir.path());
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search');")
+        .unwrap();
+    drop(Vault::open(&db).unwrap());
+    assert_eq!(events(&db, None).len(), 1, "already pruned today");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("UPDATE vault_meta SET value = '2000-01-01';")
+        .unwrap();
+    drop(Vault::open(&db).unwrap());
+    assert!(events(&db, None).is_empty());
+}
+
+#[test]
 fn export_does_not_include_events() {
     let dir = tempfile::tempdir().unwrap();
     let db = db_with_skill(dir.path());
@@ -449,7 +486,8 @@ fn opening_the_vault_drops_events_past_the_retention() {
     let db = db_with_skill(dir.path());
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute_batch(
-        "INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search');
+        "DELETE FROM vault_meta;
+         INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search');
          INSERT INTO events (kind) VALUES ('search');",
     )
     .unwrap();

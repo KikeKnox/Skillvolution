@@ -226,7 +226,11 @@ const MIGRATIONS: &[&str] = &[
         data TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(data))
     );
     CREATE INDEX events_at ON events(at);
-    CREATE INDEX events_kind_at ON events(kind, at);",
+    CREATE INDEX events_kind_at ON events(kind, at);
+    CREATE TABLE vault_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another

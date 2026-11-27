@@ -1647,3 +1647,38 @@ fn agents_add_sync_and_remove_record_events_without_paths() {
         assert!(!text.contains(home) && !text.contains(repo), "{text}");
     }
 }
+
+#[test]
+fn forced_overwrites_and_same_version_rerenders_record_the_version_written() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.publish("[read]", "", false);
+    sandbox.publish("[read, shell]", "", true); // v2
+    let file = sandbox.claude("reviewer");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+    // A foreign file replaced with --force counts as an install, at the vault version.
+    fs::write(&file, "mine\n").unwrap();
+    sandbox.ok(&["agents", "add", "reviewer", "--force"]);
+    // A hand-edited generated file replaced with --force counts as an update.
+    let edited = read(&file).replace("Reviews diffs.", "Reviews diffs, my way.");
+    fs::write(&file, edited).unwrap();
+    sandbox.ok(&["agents", "add", "reviewer", "--force"]);
+    // A same-version re-render (the tier's model changed) is an update at that version.
+    sandbox.ok(&["agents", "models", "set", "claude-code", "mid", "opus"]);
+    sandbox.ok(&["agents", "sync", "--apply"]);
+
+    let got: Vec<_> = support::events(&sandbox.db, None)
+        .into_iter()
+        .filter(|e| e.kind.starts_with("agent_"))
+        .map(|e| (e.kind, e.version))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("agent_install".to_string(), Some(2)),
+            ("agent_update".to_string(), Some(2)),
+            ("agent_update".to_string(), Some(2)),
+        ]
+    );
+}

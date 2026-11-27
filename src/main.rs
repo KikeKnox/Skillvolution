@@ -336,30 +336,19 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
         } => {
             let (key, dir) = agent_scope(global, project)?;
             let vault = open(db)?;
-            let lines = agents::add(&vault, &ids, key.as_deref(), dir.as_deref(), force)?;
-            agents::log_agent_events(
-                &vault,
-                &lines,
-                agents::AgentOp::Add,
-                scope_name(global),
-                key.as_deref(),
-            );
+            let (lines, changes) =
+                agents::add_with_changes(&vault, &ids, key.as_deref(), dir.as_deref(), force)?;
+            agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
             lines
         }
         AgentsCommand::Remove { ids, global } => {
             let (key, dir) = agent_scope(global, None)?;
-            let (lines, missing) = agents::remove(&ids, dir.as_deref())?;
+            let (lines, missing, changes) = agents::remove_with_changes(&ids, dir.as_deref())?;
             failed = missing > 0;
             // Recording is best effort: removing needs no vault, so a vault that
             // cannot be opened must not fail it.
             if let Ok(vault) = open(db) {
-                agents::log_agent_events(
-                    &vault,
-                    &lines,
-                    agents::AgentOp::Remove,
-                    scope_name(global),
-                    key.as_deref(),
-                );
+                agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
             }
             lines
         }
@@ -371,16 +360,9 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
         } => {
             let (key, dir) = agent_scope(global, project)?;
             let vault = open(db)?;
-            let lines = agents::sync(&vault, key.as_deref(), dir.as_deref(), apply, force)?;
-            if apply {
-                agents::log_agent_events(
-                    &vault,
-                    &lines,
-                    agents::AgentOp::SyncApply,
-                    scope_name(global),
-                    key.as_deref(),
-                );
-            }
+            let (lines, changes) =
+                agents::sync_with_changes(&vault, key.as_deref(), dir.as_deref(), apply, force)?;
+            agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
             lines
         }
         AgentsCommand::Import { path, output } => {

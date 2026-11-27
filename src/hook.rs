@@ -508,55 +508,69 @@ pub fn relevant_skills(
 /// the `prompt` field of `input` (the field Claude Code, Codex, Devin, and Gemini CLI
 /// all use), or `None` when nothing is relevant, so the client adds nothing.
 pub fn prompt(vault: &Vault, project: Option<&str>, input: &str) -> Result<Option<String>> {
-    Ok(suggest(vault, project, input)?.map(|(text, _)| text))
+    Ok(suggest(vault, project, input)?.text)
 }
 
 /// `prompt`, recording a `suggest` event (the ids and scores suggested, never the
-/// prompt) for the `client` that emitted it.
+/// prompt) for the `client` that emitted it. A prompt with enough keywords to be searched
+/// but no match records an empty list: what goes unmatched is the signal.
 pub fn prompt_recorded(
     vault: &Vault,
     project: Option<&str>,
     input: &str,
     client: ClientKind,
 ) -> Result<Option<String>> {
-    let Some((text, skills)) = suggest(vault, project, input)? else {
-        return Ok(None);
-    };
-    let session = serde_json::from_str::<Value>(input)
-        .ok()
-        .and_then(|input| session_of(&input).map(str::to_owned));
-    vault.log_event(
-        Event::new("suggest")
-            .client(Some(client))
-            .project(project)
-            .session(session.as_deref())
-            .data(json!({
-                "suggested": skills
-                    .iter()
-                    .map(|skill| json!({
-                        "id": skill.id,
-                        "version": skill.version,
-                        "score": skill.score,
-                    }))
-                    .collect::<Vec<_>>(),
-            })),
-    );
-    Ok(Some(text))
+    let suggestion = suggest(vault, project, input)?;
+    if suggestion.searched {
+        let session = serde_json::from_str::<Value>(input)
+            .ok()
+            .and_then(|input| session_of(&input).map(str::to_owned));
+        vault.log_event(
+            Event::new("suggest")
+                .client(Some(client))
+                .project(project)
+                .session(session.as_deref())
+                .data(json!({
+                    "suggested": suggestion.skills
+                        .iter()
+                        .map(|skill| json!({
+                            "id": skill.id,
+                            "version": skill.version,
+                            "score": skill.score,
+                        }))
+                        .collect::<Vec<_>>(),
+                })),
+        );
+    }
+    Ok(suggestion.text)
 }
 
-/// The suggestion text for the prompt in `input` and the skills it names.
-fn suggest(
-    vault: &Vault,
-    project: Option<&str>,
-    input: &str,
-) -> Result<Option<(String, Vec<SkillMetadata>)>> {
+/// What the prompt hook found for a prompt.
+struct Suggestion {
+    /// The context to inject; `None` when nothing is relevant.
+    text: Option<String>,
+    skills: Vec<SkillMetadata>,
+    /// Whether the prompt had enough keywords to be searched at all.
+    searched: bool,
+}
+
+fn suggest(vault: &Vault, project: Option<&str>, input: &str) -> Result<Suggestion> {
     let input: Value = serde_json::from_str(input)?;
     let Some(prompt) = input["prompt"].as_str() else {
-        return Ok(None);
+        return Ok(Suggestion {
+            text: None,
+            skills: Vec::new(),
+            searched: false,
+        });
     };
+    let searched = keywords(prompt).len() >= MIN_PROMPT_TERMS;
     let skills = relevant_skills(vault, project, prompt)?;
     if skills.is_empty() {
-        return Ok(None);
+        return Ok(Suggestion {
+            text: None,
+            skills,
+            searched,
+        });
     }
     let mut text = String::from("Skillvolution: vault skills matching this request:\n");
     for skill in &skills {
@@ -571,7 +585,11 @@ fn suggest(
          which vault skill you are applying (id and version), or that none fits. After \
          applying it, call report_skill_outcome.",
     );
-    Ok(Some((text, skills)))
+    Ok(Suggestion {
+        text: Some(text),
+        skills,
+        searched,
+    })
 }
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {

@@ -102,23 +102,28 @@ impl Vault {
         }
     }
 
-    /// Deletes events older than `older_than_days`. Reads first (an indexed lookup)
-    /// because it runs on every open and a DELETE takes the write lock even when
-    /// nothing matches.
+    /// Deletes events older than `older_than_days`, at most once per UTC day (the day is
+    /// kept in `vault_meta`): it runs on every open, and the day check is a primary-key
+    /// read, while a DELETE would take the write lock.
     pub(super) fn prune_events(&self, older_than_days: i64) -> Result<()> {
-        let age = format!("-{older_than_days} days");
-        let stale: bool = self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM events
-                WHERE at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1))",
-            [&age],
+        let done_today: bool = self.conn.query_row(
+            "SELECT COALESCE((SELECT value FROM vault_meta WHERE key = 'events_pruned_on'), '')
+                    = strftime('%Y-%m-%d', 'now')",
+            [],
             |row| row.get(0),
         )?;
-        if stale {
-            self.conn.execute(
-                "DELETE FROM events WHERE at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
-                [&age],
-            )?;
+        if done_today {
+            return Ok(());
         }
+        self.conn.execute(
+            "DELETE FROM events WHERE at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+            [format!("-{older_than_days} days")],
+        )?;
+        self.conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES ('events_pruned_on', strftime('%Y-%m-%d', 'now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
         Ok(())
     }
 }
@@ -223,11 +228,39 @@ mod tests {
                 [],
             )
             .unwrap();
+        vault.conn.execute("DELETE FROM vault_meta", []).unwrap();
         vault.prune_events(180).unwrap();
         let count: i64 = vault
             .conn
             .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn pruning_runs_at_most_once_per_day() {
+        let (_dir, vault) = vault();
+        vault.prune_events(180).unwrap();
+        vault
+            .conn
+            .execute(
+                "INSERT INTO events (at, kind) VALUES ('2000-01-01T00:00:00Z', 'search')",
+                [],
+            )
+            .unwrap();
+        vault.prune_events(180).unwrap();
+        let count = || -> i64 {
+            vault
+                .conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(), 1, "already pruned today: left alone");
+        vault
+            .conn
+            .execute("UPDATE vault_meta SET value = '2000-01-01'", [])
+            .unwrap();
+        vault.prune_events(180).unwrap();
+        assert_eq!(count(), 0);
     }
 }

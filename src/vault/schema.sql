@@ -151,3 +151,10 @@ CREATE TABLE events (
 
 CREATE INDEX events_at ON events(at);
 CREATE INDEX events_kind_at ON events(kind, at);
+
+-- Machine-local housekeeping state (e.g. the day events were last pruned). Not exported
+-- or imported.
+CREATE TABLE vault_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);

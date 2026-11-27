@@ -1381,6 +1381,7 @@ fn strip_v6(conn: &rusqlite::Connection) {
          DROP TABLE agent_models;
          DROP TABLE client_versions;
          DROP TABLE events;
+         DROP TABLE vault_meta;
          ALTER TABLE skills DROP COLUMN kind;
          ALTER TABLE revisions DROP COLUMN meta;
          {view};"
@@ -1425,7 +1426,8 @@ fn migrates_a_v7_database_adding_events() {
     let (_dir, path) = legacy_database(1);
     drop(Vault::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE events;").unwrap();
+    conn.execute_batch("DROP TABLE events; DROP TABLE vault_meta;")
+        .unwrap();
     conn.pragma_update(None, "user_version", 7).unwrap();
     drop(conn);
 
@@ -1461,7 +1463,7 @@ fn migrates_a_v6_database_adding_client_versions_and_keeping_agent_models() {
     let (_dir, path) = legacy_database(1);
     drop(Vault::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE client_versions; DROP TABLE events;")
+    conn.execute_batch("DROP TABLE client_versions; DROP TABLE events; DROP TABLE vault_meta;")
         .unwrap();
     conn.execute(
         "INSERT INTO agent_models (client, tier, model) VALUES ('claude-code', 'mid', 'sonnet')",
