@@ -375,6 +375,51 @@ fn install_agent_flags_a_restart_for_clients_without_hot_reload() {
 }
 
 #[test]
+fn without_a_stored_version_install_agent_and_list_models_cover_both_opencode_generations() {
+    let sandbox = Sandbox::new("opencode");
+    assert!(
+        sandbox
+            .vault()
+            .client_version(ClientKind::OpenCode)
+            .unwrap()
+            .is_none()
+    );
+    let result = sandbox
+        .one(Some("opencode"), "install_agent", json!({"id": "reviewer"}))
+        .unwrap();
+    let line = result["result"].as_str().unwrap();
+    assert!(
+        line.contains(
+            "delegate with subagent (agent: \"reviewer\") on OpenCode 2.x or \
+             delegate with task (subagent_type: \"reviewer\") on OpenCode 1.x"
+        ) && line.contains("restart OpenCode to load it if it is 1.x"),
+        "{line}"
+    );
+    assert_eq!(result["restart_needed"], true);
+
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "opencode",
+        "mid",
+        "anthropic/claude-sonnet-4-5",
+    ]);
+    let models = sandbox
+        .one(Some("opencode"), "list_models", json!({"tier": "mid"}))
+        .unwrap();
+    assert_eq!(models["version"], Value::Null);
+    let per_call = models["models"][0]["per_call"].as_str().unwrap();
+    assert!(
+        per_call.starts_with(
+            "OpenCode 2.x: pass model: \"anthropic/claude-sonnet-4-5\" when delegating; \
+             OpenCode 1.x: not supported"
+        ),
+        "{per_call}"
+    );
+}
+
+#[test]
 fn install_agent_accepts_only_models_of_the_agent_tier() {
     let sandbox = Sandbox::new("claude-code");
     // mid's only model is the compiled default, sonnet.

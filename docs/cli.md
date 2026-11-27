@@ -848,6 +848,11 @@ and `per_call`: `pass model: "…" when delegating` (an alias on Claude Code;
 1.x, a non-alias Claude Code model, an unknown provider) and to reinstall with
 `install_agent` instead.
 
+When setup stored no OpenCode version (its CLI was not on `PATH` or gave no version), both
+tools cover both generations: `install_agent` names `subagent` (2.x) and `task` (1.x) and
+asks for a restart if OpenCode is 1.x (`restart_needed: true`), and each `per_call` reads
+`OpenCode 2.x: pass model: … when delegating; OpenCode 1.x: not supported: …`.
+
 ### publish_skill
 
 | Param | Type | Constraint |

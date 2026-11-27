@@ -4,7 +4,7 @@
 
 use crate::{
     agents::{self, FileState, InstallOptions, Target, TierModel},
-    clients::{ClientKind, ModelRefFormat},
+    clients::{Caps, ClientKind, ModelRefFormat},
     vault::{ClientModel, TIERS, Vault},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -168,6 +168,21 @@ fn install_state(
     (installed, outdated)
 }
 
+/// The capabilities to describe for `kind`: those of its stored version alone (no label),
+/// or, when no version is stored and its version ranges differ, every range's with the
+/// range's label (`1.x`), newest first, so the answer holds whichever is installed.
+fn described_caps(vault: &Vault, kind: ClientKind) -> Result<Vec<(Option<String>, &'static Caps)>> {
+    let ranges = kind.spec().versions.ranges;
+    if ranges.len() == 1 || vault.client_version(kind)?.is_some() {
+        return Ok(vec![(None, vault.client_caps(kind)?)]);
+    }
+    Ok(ranges
+        .iter()
+        .rev()
+        .map(|range| (Some(range.label()), &range.caps))
+        .collect())
+}
+
 /// Installs agent `id` in the project, for the server's client (every configured client
 /// without one), as `agents add` does, and records the `agent_*` events. One line per
 /// client: path, version, how to delegate, and whether the client must restart.
@@ -212,22 +227,38 @@ pub fn install(vault: &Vault, scope: &Scope, id: &str, model: Option<&str>) -> R
     let mut restart_needed = false;
     for file in &report.files {
         let name = file.target.display_name();
-        let caps = vault.client_caps(file.target.kind())?;
+        let described = described_caps(vault, file.target.kind())?;
         let path = file
             .path
             .strip_prefix(scope.project_dir)
             .unwrap_or(&file.path)
             .display()
             .to_string();
-        let delegate = caps.delegation.first().map_or_else(
-            || format!("delegate to \"{}\"", file.id),
-            |tool| {
-                format!(
-                    "delegate with {} ({}: \"{}\")",
-                    tool.tool, tool.agent_field, file.id
-                )
-            },
-        );
+        let delegate = described
+            .iter()
+            .map(|(label, caps)| {
+                let how = caps.delegation.first().map_or_else(
+                    || format!("delegate to \"{}\"", file.id),
+                    |tool| {
+                        format!(
+                            "delegate with {} ({}: \"{}\")",
+                            tool.tool, tool.agent_field, file.id
+                        )
+                    },
+                );
+                match label {
+                    Some(label) => format!("{how} on {name} {label}"),
+                    None => how,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" or ");
+        // Without a stored version, a restart is owed when any possible version needs it.
+        let cold: Vec<&str> = described
+            .iter()
+            .filter(|(_, caps)| !caps.hot_reload)
+            .map(|(label, _)| label.as_deref().unwrap_or_default())
+            .collect();
         parts.push(match file.status {
             "edited" => format!(
                 "{name}: {path} was edited by hand and was left as is (the user can overwrite it with `skillvolution agents add --force {}`); {delegate}",
@@ -238,11 +269,14 @@ pub fn install(vault: &Vault, scope: &Scope, id: &str, model: Option<&str>) -> R
                 file.id, file.version
             ),
             status => {
-                let restart = if caps.hot_reload {
+                let restart = if cold.is_empty() {
                     "no restart needed".to_owned()
-                } else {
+                } else if cold.len() == described.len() {
                     restart_needed = true;
                     format!("restart {name} to load it")
+                } else {
+                    restart_needed = true;
+                    format!("restart {name} to load it if it is {}", cold.join(" or "))
                 };
                 format!(
                     "{name}: {status} {} v{} at {path}{}; {delegate}; {restart}",
@@ -282,7 +316,7 @@ pub fn list_models(
         }));
     }
     let target = target_of(kind)?;
-    let caps = vault.client_caps(kind)?;
+    let described = described_caps(vault, kind)?;
     let version = vault.client_version(kind)?.map(|v| v.version);
     let stored = vault.client_models()?;
     let tiers: Vec<&str> = match tier {
@@ -293,7 +327,17 @@ pub fn list_models(
     let mut models = Vec::new();
     for tier in tiers {
         for model in agents::tier_models(&stored, target, tier) {
-            let per_call = per_call(caps.per_call_model, caps.hot_reload, kind, &model);
+            let per_call = described
+                .iter()
+                .map(|(label, caps)| {
+                    let how = per_call(caps.per_call_model, caps.hot_reload, kind, &model);
+                    match label {
+                        Some(label) => format!("{} {label}: {how}", kind.display_name()),
+                        None => how,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             models.push(json!({
                 "tier": tier,
                 "model": model.model,

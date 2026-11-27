@@ -105,6 +105,25 @@ impl VersionRange {
     fn contains(&self, version: Version) -> bool {
         version >= self.min && self.max.is_none_or(|max| version < max)
     }
+
+    /// A short name for the range: `1.x` when it spans one major version (the first range
+    /// ending at 2.0.0, or one from 1.0.0 to 2.0.0), `2.x` for an open range from 2.0.0,
+    /// otherwise its bounds.
+    pub fn label(&self) -> String {
+        let major = |v: Version| (v.1 == 0 && v.2 == 0).then_some(v.0);
+        match (self.min, self.max) {
+            (ANY, Some(max)) if major(max).is_some_and(|m| m > 0) => {
+                format!("{}.x", max.0 - 1)
+            }
+            (min, None) if major(min).is_some() => format!("{}.x", min.0),
+            (min, Some(max)) if major(min).is_some() && major(max) == Some(min.0 + 1) => {
+                format!("{}.x", min.0)
+            }
+            (ANY, Some(max)) => format!("before {max}"),
+            (min, None) => format!("{min} and later"),
+            (min, Some(max)) => format!("{min} up to {max}"),
+        }
+    }
 }
 
 /// A client's known versions. `ranges` are contiguous, oldest first, the last open.
@@ -380,6 +399,14 @@ mod tests {
         assert!(spec.is_unverified(Version(2, 0, 0)));
         assert_eq!(spec.range_of(Version(1, 9, 0)), 0);
         assert_eq!(spec.range_of(Version(7, 0, 0)), 1);
+        assert_eq!(RANGES[0].label(), "1.x");
+        assert_eq!(RANGES[1].label(), "2.x");
+        let odd = VersionRange {
+            min: Version(1, 4, 0),
+            max: Some(Version(1, 9, 0)),
+            caps: Caps::NONE,
+        };
+        assert_eq!(odd.label(), "1.4.0 up to 1.9.0");
         let kind = ClientKind::OpenCode;
         assert!(kind.same_range(Version(2, 2, 4), Version(2, 2, 5)));
         assert!(!kind.same_range(Version(1, 19, 6), Version(2, 0, 0)));
