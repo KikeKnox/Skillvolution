@@ -280,3 +280,18 @@ fn the_mcp_usage_report_matches_the_cli_summary_and_writes_nothing() {
         .unwrap();
     assert_eq!(after, before + 2);
 }
+
+#[test]
+fn events_rejects_a_limit_below_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = seeded(dir.path());
+    for bad in ["0", "-3"] {
+        let output = run(&db, &["telemetry", "events", &format!("--limit={bad}")]);
+        assert!(!output.status.success(), "{bad}");
+        assert!(
+            stderr(&output).contains("must be at least 1"),
+            "{bad}: {}",
+            stderr(&output)
+        );
+    }
+}
