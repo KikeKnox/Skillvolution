@@ -318,7 +318,10 @@ fn session_start_holds_an_update_sync_would_flag_and_applies_a_plain_one() {
 
     // Still held at the next start; `agents sync --apply` shows the flag and applies it.
     let again = sandbox.session_start("claude-code");
-    assert!(again.contains("reviewer v2 available (needs review)"), "{again}");
+    assert!(
+        again.contains("reviewer v2 available (needs review)"),
+        "{again}"
+    );
     let sync = sandbox.ok(&["agents", "sync"]);
     assert!(sync.contains("! tools widened: edit"), "{sync}");
     sandbox.ok(&["agents", "sync", "--apply"]);
@@ -505,7 +508,10 @@ fn an_agent_whose_per_user_copy_is_edited_is_not_promoted() {
     assert_eq!(read(&sandbox.user_claude("reviewer")), edited);
     assert!(sandbox.events("agent_promote").is_empty());
     assert!(sandbox.vault().promoted_agents().unwrap().is_empty());
-    assert!(sandbox.claude("reviewer").exists(), "the project copy stays");
+    assert!(
+        sandbox.claude("reviewer").exists(),
+        "the project copy stays"
+    );
     assert!(sandbox.events("agent_remove").is_empty());
     let status = sandbox.ok(&["agents", "promotion"]);
     assert!(status.contains("Candidates: reviewer"), "{status}");

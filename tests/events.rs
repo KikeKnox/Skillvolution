@@ -586,9 +586,8 @@ fn opencode_plugin_hooks_record_delegations_reminders_and_suggestions_as_opencod
 
     // `hook prompt --client opencode` prints what the plugin has always read and
     // records the suggestion as OpenCode's.
-    let prompt =
-        json!({"session_id": "o1", "prompt": "sqlite database locked concurrent writers"})
-            .to_string();
+    let prompt = json!({"session_id": "o1", "prompt": "sqlite database locked concurrent writers"})
+        .to_string();
     let as_opencode = hook_cmd(
         &db,
         &["prompt", "--client", "opencode", "--project", "p0"],

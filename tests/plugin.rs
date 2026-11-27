@@ -413,7 +413,12 @@ fn recorded_events(temp: &tempfile::TempDir) -> Vec<(String, serde_json::Value)>
 #[cfg(unix)]
 fn event_order((hook, json): &(String, serde_json::Value)) -> (String, String, String, String) {
     let field = |key: &str| json[key].as_str().unwrap_or_default().to_owned();
-    (hook.clone(), field("agent"), field("session"), field("model"))
+    (
+        hook.clone(),
+        field("agent"),
+        field("session"),
+        field("model"),
+    )
 }
 
 /// `(hook, stdin)` pairs as `recorded_events` returns them, from (hook, agent or "", session,
@@ -583,10 +588,15 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
 #[cfg(unix)]
 fn assert_prompt_names_opencode(temp: &tempfile::TempDir) {
     let args = fs::read_to_string(temp.path().join("args.log")).unwrap();
-    let prompts: Vec<&str> = args.lines().filter(|l| l.contains(" hook prompt")).collect();
+    let prompts: Vec<&str> = args
+        .lines()
+        .filter(|l| l.contains(" hook prompt"))
+        .collect();
     assert!(!prompts.is_empty());
     assert!(
-        prompts.iter().all(|l| l.contains(" hook prompt --client opencode")),
+        prompts
+            .iter()
+            .all(|l| l.contains(" hook prompt --client opencode")),
         "{prompts:?}"
     );
 }

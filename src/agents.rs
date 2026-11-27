@@ -1240,7 +1240,11 @@ fn needs_review(vault: &Vault, old: i64, agent: &Agent) -> bool {
         return false;
     };
     previous.tier != agent.meta.tier
-        || agent.meta.skills.iter().any(|s| !previous.skills.contains(s))
+        || agent
+            .meta
+            .skills
+            .iter()
+            .any(|s| !previous.skills.contains(s))
         || TOOLS
             .into_iter()
             .any(|t| agent.meta.allows(t) && !previous.allows(t))

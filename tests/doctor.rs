@@ -896,7 +896,10 @@ fn doctor_warns_when_a_version_changed_since_setup_and_fix_records_it() {
     );
     let healthy = env.doctor().env("PATH", &bin_dir).output().unwrap();
     let stdout = String::from_utf8(healthy.stdout).unwrap();
-    assert!(stdout.contains("[ok] OpenCode version: 1.19.5\n"), "{stdout}");
+    assert!(
+        stdout.contains("[ok] OpenCode version: 1.19.5\n"),
+        "{stdout}"
+    );
 
     // Within the same range (same capabilities): no warning, but `--fix` records it.
     fake_clis(&bin_dir, &[("opencode", "opencode v1.19.6")]);
@@ -1021,7 +1024,9 @@ fn a_hanging_cli_does_not_hang_detection() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("[warn] OpenCode version: unreadable: `opencode --version` failed, timed out"),
+        stdout.contains(
+            "[warn] OpenCode version: unreadable: `opencode --version` failed, timed out"
+        ),
         "{stdout}"
     );
 }
