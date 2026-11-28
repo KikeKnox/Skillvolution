@@ -126,8 +126,9 @@ You don't need an init step: the vault database is created the first time it is 
 
 [`install.sh`](install.sh) / [`install.ps1`](install.ps1) run the release's cargo-dist
 installer. It verifies each archive's SHA-256, puts the binary in `~/.local/bin`, and adds
-that directory to `PATH`. Then the script runs `skillvolution setup`. Rerunning the same
-command updates the binary, and setup is idempotent.
+that directory to `PATH`. Then the script runs `skillvolution setup`. After that,
+`skillvolution update` installs newer releases ([Upgrading](#upgrading)); rerunning the
+install command also works, and setup is idempotent.
 
 | Variable | Effect |
 |---|---|
@@ -202,7 +203,8 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 | | `purge ID [--version N] [--force]` | Permanently delete a skill or one revision, with its outcomes and loads; refuses skills agents list unless `--force` |
 | | `agents models\|promotion\|add\|remove\|sync\|import …` | Generate subagent files from the vault, rank their models ([Subagents](#subagents)) |
 | | `telemetry summary\|events [--since D] [--json]` | Read the local usage telemetry ([Local telemetry](#local-telemetry)) |
-| **Maintain** | `backup PATH` | Consistent copy of the live database (`VACUUM INTO`; PATH must not exist) |
+| **Maintain** | `update [--check] [--version X.Y.Z] [--no-setup]` | Back up the vault, install the latest release, refresh the configured clients ([Upgrading](#upgrading)) |
+| | `backup PATH` | Consistent copy of the live database (`VACUUM INTO`; PATH must not exist) |
 | | `export [-o FILE]` / `import FILE` | Whole vault as JSON / merge an export back (atomic; a conflict aborts) |
 | | `relocate PATH` | Move the vault and repoint every global client config |
 | | `setup --remove [--client …]` | Uninstall ([Uninstall](#uninstall)) |
@@ -507,6 +509,21 @@ Details: [docs/architecture.md#search-ranking](docs/architecture.md#search-ranki
 </details>
 
 ## Upgrading
+
+```bash
+skillvolution update --check   # is there a newer release?
+skillvolution update           # back up, install it, refresh the configured clients
+```
+
+`update` backs up the vault to `skills.db.before-vX.Y.Z.bak` next to it, then downloads
+and runs the release installer, which verifies the archive and installs into the same
+directory. After that, the new binary runs `doctor --fix`, which migrates the vault and
+refreshes the skills, hooks, and plugin of every configured client. `--version X.Y.Z`
+picks a release (never an older one), and `--no-setup` skips the refresh. Project-level
+installs still need `setup --project DIR`. Details: [docs/cli.md#update](docs/cli.md#update).
+
+`update` only works for a copy the installer put in place, and v0.7.0 and earlier don't
+have it. For those, or for a source build, upgrade by hand once:
 
 ```bash
 skillvolution backup ~/skills-before-upgrade.db   # recommended before upgrading

@@ -222,6 +222,21 @@ enum Command {
         /// New database path.
         path: PathBuf,
     },
+    /// Install the latest release (or --version) over this binary, after backing up the
+    /// vault, then refresh the configured clients with the new binary's `doctor --fix`.
+    /// Only for a copy installed with install.sh / install.ps1.
+    Update {
+        /// Install this release instead of the latest (`0.8.0` or `v0.8.0`); never older
+        /// than the running version.
+        #[arg(long)]
+        version: Option<String>,
+        /// Only say whether a newer release is available.
+        #[arg(long)]
+        check: bool,
+        /// Install without running `doctor --fix` afterwards.
+        #[arg(long)]
+        no_setup: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1578,6 +1593,20 @@ fn main() -> Result<()> {
         }
         Command::Agents(command) => run_agents(&cli.db, command)?,
         Command::Relocate { path } => skillvolution::relocate::run(&db_path(&cli.db)?, &path)?,
+        Command::Update {
+            version,
+            check,
+            no_setup,
+        } => {
+            let args = skillvolution::update::UpdateArgs {
+                version,
+                check,
+                no_setup,
+            };
+            if !skillvolution::update::run(&db_path(&cli.db)?, cli.db.as_deref(), args)? {
+                std::process::exit(1);
+            }
+        }
         Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
         Command::Serve { project, client } => {
             validate_project(&project)?;

@@ -37,6 +37,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --all-targets
 
+  # The release builds these with musl-gcc; C dependencies (SQLite, aws-lc for the
+  # updater's TLS) must build there before a tag finds out.
+  musl:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - run: ./target/${{ matrix.target }}/release/skillvolution update --help
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

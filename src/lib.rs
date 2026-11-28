@@ -10,4 +10,5 @@ pub mod project;
 pub mod relocate;
 pub mod setup;
 pub mod skill_file;
+pub mod update;
 pub mod vault;

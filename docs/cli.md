@@ -705,6 +705,51 @@ built-in version (`agents sync --apply`), agents missing from the vault, files w
 for their tier, and one `agents: catalog` line estimating the description tokens per client.
 The vault is only read, never migrated, for these checks.
 
+## update
+
+```
+skillvolution update [--check] [--version X.Y.Z] [--no-setup]
+```
+
+Replaces the running binary with the latest GitHub release, or with `--version`
+(`0.8.0` or `v0.8.0`). It works only for a copy installed with `install.sh` /
+`install.ps1`: the release installer leaves an install receipt
+(`skillvolution-receipt.json`, see [configuration.md](configuration.md)) naming the install
+directory, and `update` refuses when there is no receipt or when the running binary is
+not the copy in that directory (for example one built with `cargo install`). It also
+refuses a `--version` older than the running one, since a vault this version migrated
+may not open with an older binary; rerun the installer with `SKILLVOLUTION_VERSION` to
+do that on purpose.
+
+In order:
+
+1. Asks GitHub for the target release. Already there: prints `skillvolution vX is up to
+   date.` and exits 0. With `--check`, prints `Update available: vX -> vY.` and stops.
+2. Backs up the vault (when it exists) to `<db>.before-vY.bak` (`.bak.1`, `.bak.2`, … if
+   taken), as `backup` does.
+3. Downloads and runs the release's cargo-dist installer for this platform, which
+   verifies the archive's SHA-256 and installs into the same directory. It leaves `PATH`
+   alone unless the original install changed it. On Windows the running executable is
+   renamed aside first and put back if the installer fails.
+4. Runs the **new** binary's `doctor --fix` (with the same `--db`): the vault migrates,
+   and every configured global client whose files differ from what `setup` would write
+   gets its skills, hooks, and plugin refreshed. Agents past the promotion thresholds
+   are promoted too, as `doctor --fix` always does. `--no-setup` skips this step.
+   Project-level installs are not refreshed; rerun `setup --project DIR` for each.
+
+Exits 1 on any error, or when that `doctor --fix` reports a failure. Set `GITHUB_TOKEN`
+if the anonymous GitHub API rate limit gets in the way.
+
+```bash
+skillvolution update --check
+# Update available: v0.7.0 -> v0.8.0. Run `skillvolution update`.
+skillvolution update
+# Backed up the vault to /home/you/.local/share/skillvolution/skills.db.before-v0.8.0.bak.
+# Installing skillvolution v0.8.0...
+# Installed skillvolution v0.8.0.
+# Refreshing the configured clients (`skillvolution doctor --fix`)...
+```
+
 ## MCP tools
 
 `serve` speaks newline-delimited JSON-RPC 2.0: one request per line, one response per

@@ -25,6 +25,8 @@ Variables the `skillvolution` binary reads:
 | `APPDATA` | `setup`, `doctor` | Devin CLI's config base on Windows (`%APPDATA%\devin`). | — |
 | `LOCALAPPDATA` | every command | Vault base directory on Windows (`%LOCALAPPDATA%\skillvolution`). | falls back to `XDG_DATA_HOME`/`HOME` |
 | `PATH` | `setup`, `doctor` | Client detection (each client's CLI) and resolving the `claude` CLI for MCP registration. | — |
+| `GITHUB_TOKEN` | `update` | Sent with the GitHub release queries, which lifts the unauthenticated API rate limit. | anonymous |
+| `AXOUPDATER_CONFIG_PATH` | `update` | Directory holding the install receipt (`skillvolution-receipt.json`) that the installer wrote. | `$XDG_CONFIG_HOME/skillvolution`, else `~/.config/skillvolution` (`%LOCALAPPDATA%\skillvolution` on Windows) |
 
 Variables the installers read (they are not read by the binary itself):
 

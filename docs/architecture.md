@@ -78,6 +78,7 @@ client hooks.
 |---|---|
 | `doctor.rs` | Health checks (vault + client configuration); read-only unless `--fix` |
 | `relocate.rs` | Move the vault file and repoint client configs |
+| `update.rs` | Self-update: back up the vault, run the release installer through `axoupdater` (install receipt), then the new binary's `doctor --fix` |
 | `project.rs` | Derive the project key from the enclosing git repository |
 
 ## Data model

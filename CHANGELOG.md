@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
+## [Unreleased]
+
+### Added
+
+- `skillvolution update [--check] [--version X.Y.Z] [--no-setup]`: backs up the vault to
+  `<db>.before-vX.Y.Z.bak`, installs the latest release (or `--version`, never an older one)
+  through the release's cargo-dist installer, which verifies the archive, then runs the new
+  binary's `doctor --fix` to migrate the vault and refresh every configured client. It works
+  for copies installed with `install.sh` / `install.ps1` (it reads their install receipt);
+  `GITHUB_TOKEN` is used when set.
+
+### Changed
+
+- CI builds the two musl targets the release ships, so a C dependency that fails under
+  musl-gcc is caught before a tag.
+
 ## [v0.7.0]
 
 _2026-11-27_
