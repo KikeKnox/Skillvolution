@@ -131,7 +131,7 @@ command updates the binary, and setup is idempotent.
 
 | Variable | Effect |
 |---|---|
-| `SKILLVOLUTION_VERSION=0.6.0` | Pin a release (`0.6.0` or `v0.6.0`); default is the latest |
+| `SKILLVOLUTION_VERSION=0.7.0` | Pin a release (`0.7.0` or `v0.7.0`); default is the latest |
 | `SKILLVOLUTION_NO_SETUP=1` | Install only; skip `skillvolution setup` |
 | `SKILLVOLUTION_NO_INPUT=1` | No questions: configure every detected client and keep the default database path |
 | `SKILLVOLUTION_INSTALL_DIR=DIR` | Install somewhere other than `~/.local/bin` |
@@ -210,24 +210,30 @@ Every command accepts `--db PATH`. `-h` prints the full flags for any command, a
 
 ## Subagents
 
-The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`) that
-`skillvolution agents add` generates for Claude Code and OpenCode.
+The vault can also hold subagent definitions (`AGENT.md`, tiered `high|mid|low`). Skillvolution
+turns them into subagent files for Claude Code and OpenCode, either from the CLI
+(`skillvolution agents add`) or from a session through the MCP tools.
 
 - **Tiers and models.** Built-in `sv-high`, `sv-mid`, and `sv-low` ship with the binary.
   Each client and tier has a ranked list of models (`agents models add|remove|enable|disable`,
   or `set` for a single one); the best enabled one goes in the file.
 - **From the agent, too.** `search_agents`, `install_agent`, `list_models`, and
   `publish_agent` let a session find, install, and publish agents itself (see the MCP tools
-  above). Files written inside a project are kept out of git through `.git/info/exclude`,
-  `agents add` included.
-- **Little is automatic.** `agents sync` is a dry run until `--apply`. At session start (Claude
-  Code and OpenCode) the catalog lists the agents, files that are behind the vault are
-  refreshed (never hand-edited ones, and never an update that widens tools, adds skills or
-  changes the tier: that one waits for `agents sync`), and an agent used in most of your projects is promoted
-  to a per-user install, with the project copies retired. The thresholds are in
-  `agents promotion`.
-- **Your edits are safe.** Hand-edited files are never overwritten without `--force`, and
-  then only after a backup.
+  above). `install_agent` can pin a model, and `agents sync` keeps that pin.
+- **Out of git.** Files written inside a project get an anchored line in
+  `.git/info/exclude` (the common git directory in a worktree), whether `install_agent` or
+  `agents add|sync` wrote them; `agents remove` takes the line back out.
+- **At session start** (Claude Code and OpenCode, top-level sessions only):
+  - the catalog lists the installed agents, then the vault agents not installed yet;
+  - managed files behind the vault are refreshed, except hand-edited ones and updates that
+    widen tools, add skills, or change the tier, which the catalog lists as needing review
+    and which wait for `agents sync --apply`;
+  - once a day, an agent used in most of your projects is promoted to a per-user install,
+    and its unedited project copies are retired. `agents promotion` shows and sets the
+    thresholds (default: 30 days, 75% of active projects, more than 5 projects, 3
+    delegations each).
+- **Your edits are safe.** `agents sync` is a dry run until `--apply`. Hand-edited files are
+  never overwritten without `--force`, and then only after a backup.
 - **Pinned skills.** Listed skills are pinned to the version seen when the file was
   generated; `agents sync` flags newer ones.
 - **No nesting.** A Skillvolution agent can never delegate to other subagents.
@@ -405,10 +411,10 @@ root-level `AGENTS.md`, `GEMINI.md`, `opencode.json`, and `.mcp.json`.
 - the database: presence, schema version, `PRAGMA quick_check`, search-index
   completeness, and row counts;
 - every detected client: whether it is configured and up to date, whether each managed
-  skill is current, whether the configured binary path still exists, and whether Claude
-  Code's MCP registration is in place, whether each MCP entry passes `--client`, and
-  whether the client's CLI version moved to another version range since setup, is newer
-  than the last tested, or cannot be read;
+  skill is current, whether the configured binary path still exists, whether Claude
+  Code's MCP registration is in place, and whether each MCP entry passes `--client`;
+- each client's CLI version: whether it moved to another version range since setup, is
+  newer than the last tested version, or cannot be read;
 - leftover project-level installs;
 - managed agent files (warn-only, nothing when there are none): edited by hand, outdated,
   missing from the vault (or deprecated, or a skill rather than an agent), the same id at
@@ -516,7 +522,10 @@ skillvolution doctor                              # anything still stale? doctor
   migrated, the vault no longer opens with an older binary.
 - **Coming from v0.6.x.** After upgrading, rerun `setup` (or `doctor --fix`): the MCP entries
   gain `--client`, which the agent tools need, and the new `agent-evaluation` skill is
-  installed alongside `evolution` v14.
+  installed alongside `evolution` v14. Until then, OpenCode's old plugin calls the hooks
+  without `--client opencode`, so its catalog gets Claude Code's agents block and its events
+  are recorded as Claude Code's. A plugin from before v0.6.1 doesn't load in OpenCode 2.x at
+  all.
 - **Newer vaults.** A vault written by a newer version refuses to open and asks you to
   upgrade skillvolution.
 - **Why rerun `setup`.** The registered configs keep pointing at the same binary path,
@@ -658,10 +667,9 @@ drops the flags.
 <details>
 <summary><b>What does the OpenCode plugin do?</b></summary>
 
-`plugins/skillvolution.js` loads in OpenCode 1.x and 2.x. 1.x runs its `server` hooks; 2.x runs
-`setup`, which uses `session.hook`, `tool.hook` and `event.subscribe` for the same behavior.
-
-`plugins/skillvolution.js` does four things:
+`plugins/skillvolution.js` loads in OpenCode 1.x and 2.x: 1.x runs its `server` hooks, and
+2.x runs `setup`, which gets the same behavior from `session.hook`, `tool.hook`, and
+`event.subscribe`. It does four things:
 
 - **Catalog.** It runs `hook session-start` to inject the skill catalog into the system
   prompt once per session, retrying on the next turn if the load failed.
