@@ -5,7 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
-## [Unreleased]
+## [v0.7.1]
+
+_2026-11-28_
+
+`skillvolution update` replaces rerunning the installer and `setup` by hand. This release
+still has to be installed the old way once (rerun the install command); later releases
+then install with `skillvolution update`.
 
 ### Added
 
@@ -20,6 +26,15 @@ release tooling uses the heading as the GitHub release title.
 
 - CI builds the two musl targets the release ships, so a C dependency that fails under
   musl-gcc is caught before a tag.
+- The release binary is about twice as large (the updater brings an HTTP client with TLS).
+
+### Documentation
+
+- README brought up to date with v0.7.0: the session-start agent upkeep (catalog block,
+  refreshes held for review, daily promotion and its default thresholds), agent files kept
+  out of git through `.git/info/exclude`, the `install_agent` model pin, the version example,
+  and a note that OpenCode plugin files from Skillvolution v0.6.0 or earlier load only in
+  OpenCode 1.x (the current plugin loads in 1.x and 2.x).
 
 ## [v0.7.0]
 

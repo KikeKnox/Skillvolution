@@ -132,7 +132,7 @@ install command also works, and setup is idempotent.
 
 | Variable | Effect |
 |---|---|
-| `SKILLVOLUTION_VERSION=0.7.0` | Pin a release (`0.7.0` or `v0.7.0`); default is the latest |
+| `SKILLVOLUTION_VERSION=0.7.1` | Pin a release (`0.7.1` or `v0.7.1`); default is the latest |
 | `SKILLVOLUTION_NO_SETUP=1` | Install only; skip `skillvolution setup` |
 | `SKILLVOLUTION_NO_INPUT=1` | No questions: configure every detected client and keep the default database path |
 | `SKILLVOLUTION_INSTALL_DIR=DIR` | Install somewhere other than `~/.local/bin` |
