@@ -12,7 +12,7 @@ use skillvolution::{
 use std::{
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 use support::{events, stderr};
@@ -291,8 +291,10 @@ fn install_agent_writes_for_the_server_client_only_and_records_events() {
         )
         .unwrap();
     let line = result["result"].as_str().unwrap();
+    // The path is shown the way the OS writes it (`.claude\agents\...` on Windows).
+    let shown = Path::new(".claude").join("agents").join("reviewer.md");
     assert!(
-        line.contains(".claude/agents/reviewer.md")
+        line.contains(&shown.display().to_string())
             && line.contains("v1")
             && line.contains("\"reviewer\"")
             && line.contains("no restart needed"),
