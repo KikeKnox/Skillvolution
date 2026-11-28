@@ -522,10 +522,11 @@ skillvolution doctor                              # anything still stale? doctor
   migrated, the vault no longer opens with an older binary.
 - **Coming from v0.6.x.** After upgrading, rerun `setup` (or `doctor --fix`): the MCP entries
   gain `--client`, which the agent tools need, and the new `agent-evaluation` skill is
-  installed alongside `evolution` v14. Until then, OpenCode's old plugin calls the hooks
-  without `--client opencode`, so its catalog gets Claude Code's agents block and its events
-  are recorded as Claude Code's. A plugin from before v0.6.1 doesn't load in OpenCode 2.x at
-  all.
+  installed alongside `evolution` v14. Until then, the OpenCode plugin file that an older
+  Skillvolution installed calls the hooks without `--client opencode`, so its catalog gets
+  Claude Code's agents block and its events are recorded as Claude Code's. (The plugin file
+  from Skillvolution v0.6.0 or earlier loads only in OpenCode 1.x; the current one loads in
+  both 1.x and 2.x.)
 - **Newer vaults.** A vault written by a newer version refuses to open and asks you to
   upgrade skillvolution.
 - **Why rerun `setup`.** The registered configs keep pointing at the same binary path,
