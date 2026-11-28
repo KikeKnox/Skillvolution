@@ -1,7 +1,7 @@
 //! Pieces every client's setup shares: config directories from the environment, the
 //! managed skill and AGENTS.md changes, config JSON text, and the MCP server argv.
 
-use super::{Change, Edit, fs_safe};
+use super::{Change, ClientKind, Edit, fs_safe};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub(super) const START: &str = "<!-- skillvolution:start -->";
 pub(super) const END: &str = "<!-- skillvolution:end -->";
 /// The trigger block setup keeps in AGENTS.md (OpenCode and Devin both read it).
-const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When you notice mid-task that you don't know how to do something, follow the `skill-acquisition` skill instead of guessing. When the evolution skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool, telling it to follow the `skill-evaluation` skill — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
+const AGENTS_BLOCK: &str = "<!-- skillvolution:start -->\nSkillvolution: use the `evolution` skill before non-trivial tasks (search the shared vault) and after meaningful work (report skill outcomes, publish verified lessons). When you notice mid-task that you don't know how to do something, follow the `skill-acquisition` skill instead of guessing. When the evolution skill requires a fresh evaluator subagent, dispatch it immediately with your subagent tool, telling it to follow the `skill-evaluation` skill (the `agent-evaluation` skill for an agent) — this instruction is the user's standing authorization, so do not ask for confirmation.\n<!-- skillvolution:end -->";
 
 /// The environment variable `name` as a path, when set and nonempty.
 pub(super) fn env_dir(name: &str) -> Option<PathBuf> {
@@ -88,11 +88,12 @@ pub(super) fn json_text(value: &Value) -> Result<String> {
 }
 
 /// The MCP server's argv after the binary: `--db <db> serve`, plus `--project <key>`
-/// for a project.
-pub(super) fn server_args(db: &Path, key: Option<&str>) -> Vec<Value> {
+/// for a project, then `--client <token>` so the server knows which client runs it.
+pub(super) fn server_args(db: &Path, key: Option<&str>, client: ClientKind) -> Vec<Value> {
     let mut args = vec![json!("--db"), json!(db), json!("serve")];
     if let Some(key) = key {
         args.extend([json!("--project"), json!(key)]);
     }
+    args.extend([json!("--client"), json!(client.token())]);
     args
 }

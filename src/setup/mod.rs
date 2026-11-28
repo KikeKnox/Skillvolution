@@ -1,26 +1,27 @@
-mod claude;
+pub(crate) mod claude;
 mod claude_cli;
 mod client;
-mod codex;
+pub(crate) mod codex;
 mod common;
-mod cursor;
-mod devin;
+pub(crate) mod cursor;
+pub(crate) mod devin;
 mod fs_safe;
 pub(crate) use fs_safe::MANAGED_MARKER;
-mod gemini;
+pub(crate) mod gemini;
 mod global;
 mod hooks;
 mod inspect;
-mod opencode;
+pub(crate) mod opencode;
 mod permissions;
 mod plugin;
 mod prompt;
 mod remove;
 
+pub(crate) use claude_cli::find_on_path;
 pub(crate) use client::{ClientKind, Clients, Scope};
 pub(crate) use inspect::{
-    claude_mcp_registered, configured_bin, double_install_warning, is_configured,
-    missing_configured_bin, skill_marker_version,
+    ClaudeMcp, claude_mcp_registration, configured_bin, double_install_warning, is_configured,
+    mcp_lacks_client, missing_configured_bin, skill_marker_version,
 };
 pub(crate) use remove::Edit;
 
@@ -35,7 +36,8 @@ use std::{
 /// at `<skills dir>/<name>/SKILL.md` and carries the marker
 /// `<!-- skillvolution-managed:<name>:vN -->`. `evolution` drives the vault loop;
 /// `skill-evaluation` is the evaluator subagent's rubric; `skill-acquisition` is what an
-/// agent follows when it notices mid-task that it lacks the know-how.
+/// agent follows when it notices mid-task that it lacks the know-how; `agent-evaluation`
+/// is the evaluator's rubric for a vault agent before `publish_agent`.
 pub(crate) const SKILLS: &[(&str, &str)] = &[
     ("evolution", include_str!("../../assets/evolution/SKILL.md")),
     (
@@ -45,6 +47,10 @@ pub(crate) const SKILLS: &[(&str, &str)] = &[
     (
         "skill-acquisition",
         include_str!("../../assets/skill-acquisition/SKILL.md"),
+    ),
+    (
+        "agent-evaluation",
+        include_str!("../../assets/agent-evaluation/SKILL.md"),
     ),
 ];
 
@@ -132,7 +138,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
             hooks::require_utf8(&db, "--db")?;
             // Before any client config is written, so an unusable --db leaves no config
             // pointing at it.
-            Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+            let vault = Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
             crate::vault::warn_if_unsafe(&db);
             let clients = if args.client.is_empty() {
                 Clients::all()
@@ -140,6 +146,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
                 Clients::parse(&args.client)?
             };
             run_project(project, clients, &bin, &db, args.project_key.as_deref())?;
+            record_client_versions(&vault, clients);
         }
         None => {
             let clients = if args.client.is_empty() {
@@ -151,6 +158,31 @@ pub fn run(args: SetupArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stores the version each client in `clients` reports (`<cli> --version`, detected here
+/// and in `doctor` only) so hooks can read it from the vault. A client whose CLI is
+/// missing or unrecognised has nothing stored: its latest known version is assumed. Never
+/// fails setup; a version newer than the last tested is noted on stderr.
+fn record_client_versions(vault: &Vault, clients: Clients) {
+    for kind in clients.iter() {
+        let Some(version) = kind.detect_version() else {
+            continue;
+        };
+        if let Err(error) = vault.record_client_version(kind, version) {
+            eprintln!(
+                "Could not record the {} version: {error:#}",
+                kind.display_name()
+            );
+        }
+        if kind.is_unverified(version) {
+            eprintln!(
+                "Note: {} {version} is newer than the last version tested with Skillvolution; \
+                 it is unverified.",
+                kind.display_name()
+            );
+        }
+    }
 }
 
 /// `--dry-run` without `--remove`: computes exactly the edits a real run would write and

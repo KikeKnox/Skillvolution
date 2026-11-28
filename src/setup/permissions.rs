@@ -16,11 +16,16 @@ const DEVIN_ALLOW: [&str; 3] = ["run_subagent", "read_subagent", "mcp__skillvolu
 
 /// OpenCode exposes MCP tools as `<server>_<tool>`; each is allowed explicitly
 /// since permission keys are tool ids, not globs.
-const OPENCODE_MCP_TOOLS: [&str; 4] = [
+const OPENCODE_MCP_TOOLS: [&str; 9] = [
     "skillvolution_search_skills",
     "skillvolution_get_skill",
     "skillvolution_report_skill_outcome",
     "skillvolution_publish_skill",
+    "skillvolution_usage_report",
+    "skillvolution_search_agents",
+    "skillvolution_install_agent",
+    "skillvolution_list_models",
+    "skillvolution_publish_agent",
 ];
 
 /// Cursor `permissions.allow` rule: every vault MCP tool, via Cursor's
@@ -243,6 +248,20 @@ mod tests {
         let mut config = json!({"permissions": {"allow": ["Mcp(skillvolution:*)"]}});
         assert!(remove_cursor(&mut config).unwrap());
         assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn opencode_grants_exactly_the_servers_tools() {
+        let mut served: Vec<String> = crate::mcp::tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| format!("skillvolution_{}", tool["name"].as_str().unwrap()))
+            .collect();
+        let mut granted: Vec<String> = OPENCODE_MCP_TOOLS.map(str::to_owned).to_vec();
+        served.sort();
+        granted.sort();
+        assert_eq!(granted, served);
     }
 
     #[test]

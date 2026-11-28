@@ -4,7 +4,7 @@
 //! A client adds removal support by implementing one function, mirroring `changes`:
 //!
 //! ```ignore
-//! pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>>;
+//! pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>>;
 //! ```
 //!
 //! It returns exactly the edits that undo what `changes` would write for that `scope`:
@@ -15,7 +15,7 @@
 //! produces no edit for it. `notes` collects anything worth telling the user that isn't a
 //! file edit: an unowned file skipped instead of deleted, or a generic permission grant
 //! (e.g. Claude Code's `Agent`/`Task`) kept because the user might have granted it
-//! independently of Skillvolution. Dispatch it from `ClientKind::removals`.
+//! independently of Skillvolution. Register it in the client's `ClientSpec` (`src/clients/`).
 //!
 //! A side effect that isn't a file edit, like Claude Code's global MCP registration
 //! (removed via the `claude` CLI, not a file), is handled outside `removals` and run only
@@ -36,7 +36,7 @@ pub(crate) enum Edit {
 }
 
 impl Edit {
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match self {
             Edit::Write(path, _) => path,
             Edit::Delete(path) => path,

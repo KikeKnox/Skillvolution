@@ -130,8 +130,8 @@ correct. Check, in order:
 
 ## A user's own file at `skills/<name>/SKILL.md` blocks setup
 
-`setup` installs three managed skills (`evolution`, `skill-evaluation`,
-`skill-acquisition`) and refuses to overwrite a file at one of those paths that doesn't
+`setup` installs four managed skills (`evolution`, `skill-evaluation`,
+`skill-acquisition`, `agent-evaluation`) and refuses to overwrite a file at one of those paths that doesn't
 carry that skill's `skillvolution-managed:<name>:` marker, failing with
 ``unowned `skill-acquisition` skill conflict: <path>`` (for whichever skill collides).
 Setup stops with that error. Rename or move your file (or merge its

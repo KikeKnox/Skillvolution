@@ -297,6 +297,8 @@ fn installs_both_documented_clients_with_absolute_argv() {
     assert_eq!(command[3], "serve");
     assert_eq!(command[4], "--project");
     assert!(command[5].is_string());
+    assert_eq!(command[6], "--client");
+    assert_eq!(command[7], "opencode");
     assert_eq!(oc["mcp"]["skillvolution"]["type"], "local");
     assert_eq!(oc["mcp"]["skillvolution"]["enabled"], true);
     assert_eq!(
@@ -304,7 +306,7 @@ fn installs_both_documented_clients_with_absolute_argv() {
         json!({
             "type": "stdio",
             "command": command[0],
-            "args": [command[1], command[2], command[3], command[4], command[5]],
+            "args": [command[1], command[2], command[3], command[4], command[5], "--client", "claude-code"],
         })
     );
     for client in [".claude", ".opencode"] {
@@ -364,6 +366,11 @@ fn grants_subagent_and_vault_permissions_without_touching_existing_rules() {
         "skillvolution_get_skill",
         "skillvolution_report_skill_outcome",
         "skillvolution_publish_skill",
+        "skillvolution_usage_report",
+        "skillvolution_search_agents",
+        "skillvolution_install_agent",
+        "skillvolution_list_models",
+        "skillvolution_publish_agent",
     ] {
         assert_eq!(oc["permission"][tool], "allow", "{tool}");
     }

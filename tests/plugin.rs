@@ -6,18 +6,34 @@
 //! the way OpenCode 2.x does. Placeholder-substitution and node-syntax unit tests live in
 //! `src/setup/plugin.rs`, next to the code they test.
 
-use clap::Parser;
-use skillvolution::setup::{self, SetupArgs};
 use std::{
     fs,
     path::Path,
     process::{Command, Output},
 };
 
-#[derive(Parser)]
-struct Cli {
-    #[command(flatten)]
-    setup: SetupArgs,
+/// Runs `skillvolution setup ARGS` as a child process with HOME, the config directories
+/// and an empty PATH inside `sandbox`, so it never reads the developer's config or runs
+/// the host's client CLIs (setup runs `<cli> --version` for every client it configures).
+fn setup_in(sandbox: &Path, args: &[String]) {
+    let empty_path = sandbox.join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_skillvolution"))
+        .arg("setup")
+        .args(args)
+        .env("HOME", sandbox.join("home"))
+        .env("APPDATA", sandbox.join("home/AppData"))
+        .env("XDG_CONFIG_HOME", sandbox.join("home/xdg-config"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .env("PATH", &empty_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Runs `node --check` on `path`, skipping (not failing) when `node` isn't on PATH.
@@ -46,7 +62,6 @@ fn project_mode_plugin_gets_the_same_project_key_as_the_mcp_server() {
     let db = project.join("vault.sqlite3");
 
     let argv = vec![
-        "setup".to_owned(),
         "--project".to_owned(),
         project.to_string_lossy().into_owned(),
         "--project-key".to_owned(),
@@ -58,7 +73,8 @@ fn project_mode_plugin_gets_the_same_project_key_as_the_mcp_server() {
         "--db".to_owned(),
         db.to_string_lossy().into_owned(),
     ];
-    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let sandbox = tempfile::tempdir().unwrap();
+    setup_in(sandbox.path(), &argv);
 
     let plugin_path = project.join(".opencode/plugins/skillvolution.js");
     let plugin = fs::read_to_string(&plugin_path).unwrap();
@@ -207,6 +223,10 @@ const workAfterReview = await idle("o1");
 await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o2" });
 await hooks["tool.execute.after"]({ tool: "skillvolution_report_skill_outcome", sessionID: "o2" });
 const workBeforeReview = await idle("o2");
+// Publishing an agent is a review too.
+await hooks["tool.execute.after"]({ tool: "edit", sessionID: "o3" });
+await hooks["tool.execute.after"]({ tool: "skillvolution_publish_agent", sessionID: "o3" });
+const workBeforeAgentPublish = await idle("o3");
 // A child's session.error must not clear the parent's pending work.
 await hooks["tool.execute.after"]({ tool: "edit", sessionID: "p6" });
 hooks.event({ event: { type: "session.error", properties: { sessionID: "c6" } } });
@@ -217,6 +237,8 @@ await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad1", args: { sub
 const misplaced = await idle("bad1");
 await hooks["tool.execute.after"]({ tool: "task", sessionID: "bad2", args: { subagent_type: "wrongid" } });
 const wrongId = await idle("bad2");
+// A subagent's own delegation is not the top-level session's: not recorded.
+await hooks["tool.execute.after"]({ tool: "task", sessionID: "child", args: { subagent_type: "nested" } });
 // A hook that gets garbage must not throw.
 let threw = false;
 try {
@@ -233,7 +255,7 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 const rootedOut = { system: [] };
 await rooted["experimental.chat.system.transform"]({ sessionID: "n1" }, rootedOut);
 const nonGit = rootedOut.system;
-console.log(JSON.stringify({ workAfterReview, workBeforeReview, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
+console.log(JSON.stringify({ workAfterReview, workBeforeReview, workBeforeAgentPublish, childError, misplaced, wrongId, threw, nonGit, top, child, after, unmanaged, managed, global, childReported, parentReported, childEdit, childLoad }));
 "#;
 
 /// Installs the plugin with a fake `skillvolution` binary (prints `CATALOG` for
@@ -259,16 +281,19 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     fs::write(
         &bin,
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n\
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n\
              *\"hook prompt\"*) cat > '{}'; printf '%s' '{suggested}' ;;\n\
+             *\"hook delegation\"*) printf 'delegation %s\\n' \"$(cat)\" >> '{events}' ;;\n\
+             *\"hook reminder\"*) printf 'reminder %s\\n' \"$(cat)\" >> '{events}' ;;\n\
              *) printf '%s' '{catalog}' ;;\nesac\n",
-            stdin_log.display()
+            project.join("args.log").display(),
+            stdin_log.display(),
+            events = project.join("events.log").display(),
         ),
     )
     .unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
     let argv = vec![
-        "setup".to_owned(),
         "--project".to_owned(),
         project.to_string_lossy().into_owned(),
         "--client".to_owned(),
@@ -278,7 +303,8 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
         "--db".to_owned(),
         project.join("vault.sqlite3").to_string_lossy().into_owned(),
     ];
-    setup::run(Cli::parse_from(argv).setup).unwrap();
+    let sandbox = tempfile::tempdir().unwrap();
+    setup_in(sandbox.path(), &argv);
     // `.mjs` so node loads the plugin as an ES module wherever it sits.
     let plugin = project.join("plugin.mjs");
     fs::copy(project.join(".opencode/plugins/skillvolution.js"), &plugin).unwrap();
@@ -316,7 +342,7 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     fs::create_dir_all(&global_agents).unwrap();
     fs::write(
         global_agents.join("global-reviewer.md"),
-        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12 -->\nbody\n",
+        "---\ndescription: x\n---\n<!-- skillvolution-managed:agent:global-reviewer:v1:abcdef12:model=ollama/llama3:8b -->\nbody\n",
     )
     .unwrap();
     let driver_path = project.join("driver.mjs");
@@ -338,6 +364,111 @@ fn run_plugin_driver(driver: &str) -> Option<(tempfile::TempDir, serde_json::Val
     Some((temp, result))
 }
 
+/// The arguments of every `hook session-start` the plugin ran (from the fake binary's
+/// log), after `--db <path>`.
+#[cfg(unix)]
+fn session_start_calls(temp: &tempfile::TempDir) -> Vec<String> {
+    fs::read_to_string(temp.path().join("args.log"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            line.split_once(" hook session-start")
+                .map(|(_, rest)| rest.trim().to_owned())
+        })
+        .collect()
+}
+
+/// The events the plugin recorded through the fake binary (`hook delegation` and `hook
+/// reminder`), each as (hook, stdin JSON), sorted: the calls are fire and forget, so
+/// they can land in any order. Also checks that every one named `--client opencode` and
+/// the setup's project key.
+#[cfg(unix)]
+fn recorded_events(temp: &tempfile::TempDir) -> Vec<(String, serde_json::Value)> {
+    let args = fs::read_to_string(temp.path().join("args.log")).unwrap();
+    let calls: Vec<&str> = args
+        .lines()
+        .filter(|line| line.contains(" hook delegation") || line.contains(" hook reminder"))
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .all(|line| line.contains(" --client opencode") && line.contains(" --project ")),
+        "{calls:?}"
+    );
+    let log = fs::read_to_string(temp.path().join("events.log")).unwrap_or_default();
+    let mut events: Vec<(String, serde_json::Value)> = log
+        .lines()
+        .map(|line| {
+            let (hook, json) = line.split_once(' ').unwrap();
+            (hook.to_owned(), serde_json::from_str(json).unwrap())
+        })
+        .collect();
+    assert_eq!(events.len(), calls.len(), "{events:?} {calls:?}");
+    events.sort_by_key(event_order);
+    events
+}
+
+/// Orders recorded events by hook, then agent, session and model (the JSON key order
+/// differs between the plugin and the test).
+#[cfg(unix)]
+fn event_order((hook, json): &(String, serde_json::Value)) -> (String, String, String, String) {
+    let field = |key: &str| json[key].as_str().unwrap_or_default().to_owned();
+    (
+        hook.clone(),
+        field("agent"),
+        field("session"),
+        field("model"),
+    )
+}
+
+/// `(hook, stdin)` pairs as `recorded_events` returns them, from (hook, agent or "", session,
+/// model) tuples.
+#[cfg(unix)]
+fn expected_events(
+    events: &[(&str, &str, &str, Option<&str>)],
+) -> Vec<(String, serde_json::Value)> {
+    let mut expected: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .map(|(hook, agent, session, model)| {
+            let mut json = serde_json::json!({ "session": session });
+            if !agent.is_empty() {
+                json["agent"] = (*agent).into();
+            }
+            if let Some(model) = model {
+                json["model"] = (*model).into();
+            }
+            ((*hook).to_owned(), json)
+        })
+        .collect();
+    expected.sort_by_key(event_order);
+    expected
+}
+
+/// A top-level session asks for the full catalog (skills and agents block, after the
+/// agent upkeep); a subagent's session asks for the skills only, so a vault agent running
+/// there is never invited to delegate.
+#[cfg(unix)]
+fn assert_child_sessions_get_no_agents_block(temp: &tempfile::TempDir) {
+    let calls = session_start_calls(temp);
+    let flags = |args: &String| {
+        args.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        calls
+            .iter()
+            .all(|args| flags(args).starts_with(&["--client".into(), "opencode".into()])),
+        "{calls:?}"
+    );
+    let subagent = calls
+        .iter()
+        .filter(|args| flags(args).contains(&"--subagent".to_owned()))
+        .count();
+    assert_eq!(subagent, 1, "only the child session: {calls:?}");
+    assert!(calls.len() > subagent, "{calls:?}");
+}
+
 /// Drives the installed plugin through the OpenCode 1.x loader: a top-level
 /// user message gets the skills `hook prompt` printed for it in that turn's system
 /// prompt, a subagent's message gets none, and a `get_skill` call counts as work that
@@ -352,6 +483,7 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     let stdin_log = temp.path().join("prompt-stdin.json");
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
+    assert_child_sessions_get_no_agents_block(&temp);
     let reminded = result["after"].as_array().unwrap().iter().any(|text| {
         text.as_str().unwrap().starts_with(
             "Skillvolution review: you edited files, loaded vault skills, or delegated",
@@ -405,6 +537,7 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     assert!(reminder_text("childLoad").is_none(), "{result}");
     assert!(has_reminder("workAfterReview"), "{result}");
     assert!(!has_reminder("workBeforeReview"), "{result}");
+    assert!(!has_reminder("workBeforeAgentPublish"), "{result}");
     assert!(has_reminder("childError"), "{result}");
     assert!(!has_reminder("misplaced"), "{result}");
     assert!(!has_reminder("wrongId"), "{result}");
@@ -422,6 +555,50 @@ fn plugin_injects_prompt_suggestions_and_treats_get_skill_as_work() {
     );
     let stdin: serde_json::Value = serde_json::from_slice(&fs::read(&stdin_log).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
+    assert_eq!(stdin["session_id"], "top");
+    assert_prompt_names_opencode(&temp);
+    // Every top-level delegation is recorded (the binary tells the kinds apart), and
+    // every reminder that fired.
+    assert_eq!(
+        recorded_events(&temp),
+        expected_events(&[
+            ("delegation", "unmanaged", "u", None),
+            ("delegation", "reviewer", "m", None),
+            ("delegation", "global-reviewer", "g", None),
+            ("delegation", "reviewer", "m2", None),
+            ("delegation", "global-reviewer", "m2", None),
+            ("delegation", "reviewer", "m2", None),
+            ("delegation", "misplaced", "bad1", None),
+            ("delegation", "wrongid", "bad2", None),
+            ("delegation", "nogit-agent", "n1", None),
+            ("reminder", "", "top", None),
+            ("reminder", "", "m", None),
+            ("reminder", "", "g", None),
+            ("reminder", "", "m2", None),
+            ("reminder", "", "e2", None),
+            ("reminder", "", "o1", None),
+            ("reminder", "", "p6", None),
+            ("reminder", "", "n1", None),
+        ])
+    );
+}
+
+/// The plugin's `hook prompt` calls name OpenCode, so its suggestions are recorded as
+/// OpenCode's.
+#[cfg(unix)]
+fn assert_prompt_names_opencode(temp: &tempfile::TempDir) {
+    let args = fs::read_to_string(temp.path().join("args.log")).unwrap();
+    let prompts: Vec<&str> = args
+        .lines()
+        .filter(|l| l.contains(" hook prompt"))
+        .collect();
+    assert!(!prompts.is_empty());
+    assert!(
+        prompts
+            .iter()
+            .all(|l| l.contains(" hook prompt --client opencode")),
+        "{prompts:?}"
+    );
 }
 
 /// The driver for `plugin_loads_and_works_under_the_opencode_2_loader`: checks the module
@@ -549,6 +726,9 @@ const global = await idle("g");
 // A delegation that failed (e.g. an unknown agent) is not owed a report.
 await tool("subagent", "f", { agent: "reviewer", description: "d", prompt: "p" }, "error");
 const failedDelegation = await idle("f");
+// A per-call model is recorded with the delegation.
+await tool("subagent", "sm", { agent: "sv-low", model: "ollama/llama3", description: "d", prompt: "p" });
+await idle("sm");
 // OpenCode 2 renamed apply_patch/multiedit: its `patch` tool edits files too.
 await tool("patch", "p2", { patch: "x" });
 const patched = await idle("p2");
@@ -626,6 +806,7 @@ fn plugin_loads_and_works_under_the_opencode_2_loader() {
     );
     assert_eq!(result["top"], serde_json::json!(["CATALOG", "SUGGESTED"]));
     assert_eq!(result["child"], serde_json::json!(["CATALOG"]));
+    assert_child_sessions_get_no_agents_block(&temp);
     assert_eq!(
         reminder("after").as_deref(),
         Some(skillvolution::hook::STOP_REASON),
@@ -656,4 +837,21 @@ fn plugin_loads_and_works_under_the_opencode_2_loader() {
     let stdin: serde_json::Value =
         serde_json::from_slice(&fs::read(temp.path().join("prompt-stdin.json")).unwrap()).unwrap();
     assert_eq!(stdin["prompt"], "fix the flaky cargo tests");
+    assert_prompt_names_opencode(&temp);
+    // The failed delegation is not recorded; the built-in one carries its model.
+    assert_eq!(
+        recorded_events(&temp),
+        expected_events(&[
+            ("delegation", "unmanaged", "u", None),
+            ("delegation", "reviewer", "m", None),
+            ("delegation", "global-reviewer", "g", None),
+            ("delegation", "sv-low", "sm", Some("ollama/llama3")),
+            ("reminder", "", "top", None),
+            ("reminder", "", "m", None),
+            ("reminder", "", "g", None),
+            ("reminder", "", "p2", None),
+            ("reminder", "", "e2", None),
+            ("reminder", "", "d1", None),
+        ])
+    );
 }

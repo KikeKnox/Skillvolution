@@ -389,6 +389,83 @@ fn doctor_reports_outdated_and_missing_agent_files() {
 }
 
 #[test]
+fn project_installs_are_kept_out_of_git_and_removal_cleans_up() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code,opencode");
+    let exclude = sandbox.repo.join(".git/info/exclude");
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, "*.log\n").unwrap();
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    let text = read(&exclude);
+    assert!(text.starts_with("*.log\n# skillvolution:start"), "{text}");
+    for line in ["/.claude/agents/sv-low.md", "/.opencode/agents/sv-low.md"] {
+        assert_eq!(text.matches(&format!("\n{line}\n")).count(), 1, "{text}");
+    }
+    assert!(!sandbox.repo.join(".gitignore").exists());
+    sandbox.ok(&["agents", "remove", "sv-low"]);
+    assert_eq!(read(&exclude), "*.log\n");
+}
+
+#[test]
+fn sync_apply_adds_the_exclude_lines_of_the_files_it_writes() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.ok(&["agents", "add", "sv-low"]);
+    let exclude = sandbox.repo.join(".git/info/exclude");
+    fs::remove_file(&exclude).unwrap();
+    sandbox.ok(&["agents", "models", "set", "claude-code", "low", "sonnet"]);
+    // A dry run writes nothing, so no exclude either.
+    sandbox.ok(&["agents", "sync"]);
+    assert!(!exclude.exists());
+    let synced = sandbox.ok(&["agents", "sync", "--apply"]);
+    assert!(synced.contains("1 file(s) updated"), "{synced}");
+    assert!(
+        read(&exclude).contains("\n/.claude/agents/sv-low.md\n"),
+        "{}",
+        read(&exclude)
+    );
+}
+
+#[test]
+fn global_installs_never_touch_an_exclude_file() {
+    let sandbox = Sandbox::new();
+    sandbox.setup_global("claude-code");
+    sandbox.ok(&["agents", "add", "--global", "sv-low"]);
+    assert!(sandbox.user_claude("sv-low").exists());
+    assert!(!sandbox.repo.join(".git/info/exclude").exists());
+    sandbox.ok(&["agents", "remove", "--global", "sv-low"]);
+    assert!(!sandbox.repo.join(".git/info/exclude").exists());
+}
+
+#[test]
+fn outside_a_git_repository_add_notes_the_exclude_was_skipped() {
+    let sandbox = Sandbox::new();
+    let plain = sandbox.home.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let setup = sandbox.run_in(
+        &plain,
+        &[
+            "setup",
+            "--project",
+            plain.to_str().unwrap(),
+            "--client",
+            "claude-code",
+            "--bin",
+            sandbox.bin.to_str().unwrap(),
+        ],
+    );
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let out = sandbox.run_in(&plain, &["agents", "add", "sv-low"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = stdout(&out);
+    assert!(
+        out.contains("[added] Claude Code sv-low") && out.contains("not a git repository"),
+        "{out}"
+    );
+}
+
+#[test]
 fn remove_deletes_only_marked_files() {
     let sandbox = Sandbox::new();
     sandbox.setup("claude-code,opencode");
@@ -474,6 +551,110 @@ fn models_set_changes_the_generated_model() {
     sandbox.ok(&["agents", "add", "sv-mid"]);
     assert!(read(&sandbox.claude("sv-mid")).contains("model: claude-sonnet-4-5\n"));
     assert!(read(&sandbox.opencode("sv-mid")).contains("model: anthropic/claude-sonnet-4\n"));
+}
+
+#[test]
+fn models_add_rank_disable_and_remove_drive_the_generated_model() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code,opencode");
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "add",
+        "claude-code",
+        "mid",
+        "opus",
+        "--priority",
+        "5",
+        "--effort",
+        "high",
+    ]);
+    let table = sandbox.ok(&["agents", "models"]);
+    let sonnet = table.find("claude-sonnet-4-5").unwrap();
+    let opus = table.find("(set, priority 5)").unwrap();
+    assert!(sonnet < opus, "{table}");
+    sandbox.ok(&["agents", "add", "sv-mid"]);
+    assert!(read(&sandbox.claude("sv-mid")).contains("model: claude-sonnet-4-5\n"));
+
+    let out = sandbox.ok(&[
+        "agents",
+        "models",
+        "disable",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    assert!(out.contains("Disabled 1 row"), "{out}");
+    assert!(
+        sandbox
+            .ok(&["agents", "models"])
+            .contains("(set, disabled)")
+    );
+    sandbox.ok(&["agents", "add", "sv-mid", "--force"]);
+    assert!(read(&sandbox.claude("sv-mid")).contains("model: opus\n"));
+
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "enable",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    sandbox.ok(&[
+        "agents",
+        "models",
+        "remove",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    let gone = sandbox.run(&[
+        "agents",
+        "models",
+        "remove",
+        "claude-code",
+        "mid",
+        "claude-sonnet-4-5",
+    ]);
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stdout).contains("No stored model"));
+    // A bare OpenCode model needs a provider; one with a prefix derives it.
+    sandbox.err(&["agents", "models", "add", "opencode", "mid", "sonnet"]);
+    let out = sandbox.ok(&["agents", "models", "add", "opencode", "mid", "openai/gpt-5"]);
+    assert!(out.contains("openai"), "{out}");
+}
+
+#[test]
+fn models_set_replaces_the_priority_zero_model_across_providers_and_unknown_ones_list() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("opencode");
+    sandbox.ok(&["agents", "models", "set", "opencode", "mid", "anthropic/a"]);
+    sandbox.ok(&["agents", "models", "set", "opencode", "mid", "openai/b"]);
+    sandbox.ok(&["agents", "add", "sv-mid"]);
+    let file = read(&sandbox.opencode("sv-mid"));
+    assert!(file.contains("model: openai/b\n"), "{file}");
+    assert!(!sandbox.ok(&["agents", "models"]).contains("anthropic/a"));
+
+    let out = sandbox.ok(&["agents", "models", "set", "opencode", "mid", "sonnet"]);
+    assert!(out.contains("warning:"), "{out}");
+    let table = sandbox.ok(&["agents", "models"]);
+    assert!(table.contains("(set, unknown provider)"), "{table}");
+    let out = sandbox.ok(&["agents", "models", "disable", "opencode", "mid", "sonnet"]);
+    assert!(out.contains("Disabled 1 row"), "{out}");
+    assert!(
+        sandbox
+            .ok(&["agents", "models"])
+            .contains("(set, unknown provider, disabled)")
+    );
 }
 
 #[test]
@@ -1273,9 +1454,9 @@ fn a_symlinked_home_still_counts_as_the_user_dir() {
 }
 
 #[test]
-fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_nothing() {
+fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_only_delegation() {
     let sandbox = Sandbox::new();
-    sandbox.setup("claude-code");
+    sandbox.setup("claude-code,opencode");
     sandbox.publish("[read]", "", false);
     sandbox.ok(&["agents", "add", "reviewer", "sv-mid"]);
     let claude = read(&sandbox.claude("reviewer"));
@@ -1284,8 +1465,18 @@ fn a_read_only_agent_denies_everything_else_and_sv_mid_denies_nothing() {
             == "disallowedTools: Edit, Write, NotebookEdit, MultiEdit, Bash, PowerShell, Monitor, WebFetch, WebSearch, mcp__*, Agent, Task"),
         "{claude}"
     );
+    // An agent with every tool still never delegates.
     let mid = read(&sandbox.claude("sv-mid"));
-    assert!(!mid.contains("disallowedTools"), "{mid}");
+    assert!(
+        mid.lines().any(|l| l == "disallowedTools: Agent, Task"),
+        "{mid}"
+    );
+    let mid = read(&sandbox.opencode("sv-mid"));
+    assert!(
+        mid.contains("  edit: allow\n") && mid.contains("  task: deny\n"),
+        "{mid}"
+    );
+    assert!(!mid.contains("task: allow"), "{mid}");
 }
 
 /// Skill `helper` v1 and an agent `reviewer` using it, added to the sandbox.
@@ -1597,5 +1788,88 @@ fn purging_the_current_agent_version_warns_about_skills_the_older_one_lists() {
     assert!(
         out.contains("[warning] agent reviewer: skill helper is not available"),
         "{out}"
+    );
+}
+
+#[test]
+fn agents_add_sync_and_remove_record_events_without_paths() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.publish("[read]", "", false);
+    sandbox.ok(&["agents", "add", "reviewer"]);
+    sandbox.publish("[read, shell]", "", true);
+    sandbox.ok(&["agents", "sync"]);
+    assert!(
+        support::events(&sandbox.db, Some("agent_update")).is_empty(),
+        "a dry run changes nothing"
+    );
+    sandbox.ok(&["agents", "sync", "--apply"]);
+    sandbox.ok(&["agents", "remove", "reviewer"]);
+
+    let events = support::events(&sandbox.db, None);
+    let agent_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind.starts_with("agent_"))
+        .map(|event| {
+            (
+                event.kind.as_str(),
+                event.client.as_deref(),
+                event.subject.as_deref(),
+                event.version,
+            )
+        })
+        .collect();
+    let claude = Some("claude-code");
+    let reviewer = Some("reviewer");
+    assert_eq!(
+        agent_events,
+        [
+            ("agent_install", claude, reviewer, Some(1)),
+            ("agent_update", claude, reviewer, Some(2)),
+            ("agent_remove", claude, reviewer, None),
+        ]
+    );
+    let install = &support::events(&sandbox.db, Some("agent_install"))[0];
+    assert_eq!(install.data["scope"], "project");
+    let home = sandbox.home.to_str().unwrap();
+    let repo = sandbox.repo.to_str().unwrap();
+    for event in &events {
+        let text = format!("{:?}", event);
+        assert!(!text.contains(home) && !text.contains(repo), "{text}");
+    }
+}
+
+#[test]
+fn forced_overwrites_and_same_version_rerenders_record_the_version_written() {
+    let sandbox = Sandbox::new();
+    sandbox.setup("claude-code");
+    sandbox.publish("[read]", "", false);
+    sandbox.publish("[read, shell]", "", true); // v2
+    let file = sandbox.claude("reviewer");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+    // A foreign file replaced with --force counts as an install, at the vault version.
+    fs::write(&file, "mine\n").unwrap();
+    sandbox.ok(&["agents", "add", "reviewer", "--force"]);
+    // A hand-edited generated file replaced with --force counts as an update.
+    let edited = read(&file).replace("Reviews diffs.", "Reviews diffs, my way.");
+    fs::write(&file, edited).unwrap();
+    sandbox.ok(&["agents", "add", "reviewer", "--force"]);
+    // A same-version re-render (the tier's model changed) is an update at that version.
+    sandbox.ok(&["agents", "models", "set", "claude-code", "mid", "opus"]);
+    sandbox.ok(&["agents", "sync", "--apply"]);
+
+    let got: Vec<_> = support::events(&sandbox.db, None)
+        .into_iter()
+        .filter(|e| e.kind.starts_with("agent_"))
+        .map(|e| (e.kind, e.version))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("agent_install".to_string(), Some(2)),
+            ("agent_update".to_string(), Some(2)),
+            ("agent_update".to_string(), Some(2)),
+        ]
     );
 }

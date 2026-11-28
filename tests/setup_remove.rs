@@ -285,7 +285,8 @@ fn rollback_restores_earlier_edits_on_a_failing_write() {
 
 /// A `#!/bin/sh` script; unix-only, like the one test that calls it (unregistering
 /// needs a `claude` that can actually be run, and a shebang script isn't a valid
-/// executable on Windows).
+/// executable on Windows). `claude --version`, which setup runs to record the version,
+/// is not logged: the log is the `mcp` calls.
 #[cfg(unix)]
 fn write_fake_claude(dir: &Path, log: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -294,7 +295,10 @@ fn write_fake_claude(dir: &Path, log: &Path) {
     let claude = dir.join("claude");
     fs::write(
         &claude,
-        format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\necho \"$@\" >> {}\nexit 0\n",
+            log.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
@@ -372,7 +376,7 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
             "mcp get skillvolution".to_owned(),
             format!(
                 "mcp add-json --scope user skillvolution {}",
-                json!({"type": "stdio", "command": bin, "args": ["--db", &db, "serve"]})
+                json!({"type": "stdio", "command": bin, "args": ["--db", &db, "serve", "--client", "claude-code"]})
             ),
             "mcp remove --scope user skillvolution".to_owned(),
         ]
@@ -383,7 +387,12 @@ fn global_remove_restores_foreign_content_deletes_owned_files_and_unregisters_mc
 }
 
 /// Every managed skill, as installed under a client's `skills/` directory.
-const MANAGED_SKILLS: [&str; 3] = ["evolution", "skill-evaluation", "skill-acquisition"];
+const MANAGED_SKILLS: [&str; 4] = [
+    "evolution",
+    "skill-evaluation",
+    "skill-acquisition",
+    "agent-evaluation",
+];
 
 #[test]
 fn every_managed_skill_is_installed_per_client_and_removed_with_its_directory() {
@@ -420,6 +429,7 @@ fn every_managed_skill_is_installed_per_client_and_removed_with_its_directory() 
     let agents = fs::read_to_string(p.join("AGENTS.md")).unwrap();
     assert!(agents.contains("`skill-acquisition` skill"), "{agents}");
     assert!(agents.contains("`skill-evaluation` skill"), "{agents}");
+    assert!(agents.contains("`agent-evaluation` skill"), "{agents}");
 
     remove_project(p, &db, None, false).unwrap();
     for client_dir in [

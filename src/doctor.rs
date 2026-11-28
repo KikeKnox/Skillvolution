@@ -8,7 +8,8 @@
 //! then every check runs again.
 
 use crate::agents::{self, FileState, Target};
-use crate::setup::{self, Change, ClientKind, Edit, Scope};
+use crate::clients::Version;
+use crate::setup::{self, Change, ClaudeMcp, ClientKind, Edit, Scope};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -60,6 +61,13 @@ enum Fix {
         changes: Vec<Change>,
     },
     RegisterClaudeMcp(PathBuf),
+    /// Store the version the client reports now as the one setup saw.
+    RecordVersion {
+        kind: ClientKind,
+        version: Version,
+    },
+    /// Install the current promotion candidates per user (`agent_session::promote`).
+    PromoteAgents,
     /// Not auto-fixable; `--fix` prints this guidance instead.
     Manual(&'static str),
 }
@@ -143,7 +151,52 @@ fn all_checks(db: &Path) -> Result<Vec<Check>> {
         checks.push(Check::warn("legacy install", detail));
     }
     checks.extend(agent_checks(db));
+    checks.extend(promotion_checks(db));
     Ok(checks)
+}
+
+/// The agents promoted to a per-user install and the current candidates (read-only;
+/// `--fix` promotes the candidates). Nothing when the vault is not at the current schema
+/// or there is neither.
+fn promotion_checks(db: &Path) -> Vec<Check> {
+    let name = "agents: promotion";
+    let Some(status) = current_schema_conn(db).and_then(|conn| vault::promotion_status(&conn).ok())
+    else {
+        return Vec::new();
+    };
+    let mut checks = Vec::new();
+    if !status.promoted.is_empty() {
+        checks.push(Check::ok(
+            name,
+            format!(
+                "promoted to a per-user install: {}",
+                status.promoted.join(", ")
+            ),
+        ));
+    }
+    if !status.candidates.is_empty() {
+        let candidates: Vec<String> = status.candidates.iter().map(|c| c.render()).collect();
+        let candidates = candidates.join(", ");
+        checks.push(if agents::configured_targets(None).is_empty() {
+            Check::warn(
+                name,
+                format!(
+                    "candidates for a per-user install: {candidates}; no client with subagents is \
+                     set up per user (`skillvolution setup`), so they stay per project"
+                ),
+            )
+        } else {
+            Check::warn(
+                name,
+                format!(
+                    "candidates for a per-user install: {candidates}; `skillvolution doctor --fix` \
+                     installs them per user (a session start does it once a day)"
+                ),
+            )
+            .with_fix(Some(Fix::PromoteAgents))
+        });
+    }
+    checks
 }
 
 /// The `agents sync --apply` command for level `at` (0 is the per-user directory).
@@ -162,17 +215,10 @@ fn agent_checks(db: &Path) -> Vec<Check> {
     let cwd = std::env::current_dir().ok();
     let project_dir = cwd.as_deref().and_then(crate::project::repo_dir);
     let key = cwd.as_deref().and_then(crate::project::detect);
-    let conn = db
-        .is_file()
-        .then(|| open_readonly(db).ok())
-        .flatten()
-        .filter(|conn| {
-            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .is_ok_and(|v| v == vault::schema_version())
-        });
+    let conn = current_schema_conn(db);
     let (mut checks, mut seen) = (Vec::new(), Vec::new());
     let mut catalog = Vec::new();
-    for target in Target::ALL {
+    for target in Target::all() {
         let name = format!("agents: {}", target.display_name());
         let mut no_model: Vec<(usize, String, Vec<String>)> = Vec::new();
         let mut user_ids: Vec<String> = Vec::new();
@@ -432,6 +478,35 @@ fn apply(fix: &Fix, db: &Path) -> Result<String> {
             Ok(done)
         }
         Fix::RegisterClaudeMcp(bin) => setup::register_claude_code_mcp(bin, db),
+        Fix::RecordVersion { kind, version } => {
+            let vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            vault.record_client_version(*kind, *version)?;
+            Ok(format!("recorded {} {version}", kind.display_name()))
+        }
+        Fix::PromoteAgents => {
+            let vault = Vault::open(db).with_context(|| format!("open {}", db.display()))?;
+            let status = vault.promotion_status()?;
+            let mut errors = Vec::new();
+            let promoted =
+                crate::agent_session::promote(&vault, &status.candidates, &mut |e| errors.push(e));
+            if let Some(error) = errors.into_iter().next() {
+                return Err(error);
+            }
+            let left: Vec<&str> = status
+                .candidates
+                .iter()
+                .map(|c| c.id.as_str())
+                .filter(|id| !promoted.iter().any(|p| p == id))
+                .collect();
+            let mut message = format!("installed per user: {}", promoted.join(", "));
+            if !left.is_empty() {
+                message.push_str(&format!(
+                    "; still candidates (no per-user copy of ours: edited by hand, or no client set up per user): {}",
+                    left.join(", ")
+                ));
+            }
+            Ok(message)
+        }
         Fix::Manual(guidance) => Ok((*guidance).to_owned()),
     }
 }
@@ -615,7 +690,7 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
     if !kind.detect() {
         return Ok((vec![Check::ok(display, "not installed")], false));
     }
-    let mut checks = Vec::new();
+    let mut checks = version_check(kind, db).into_iter().collect::<Vec<_>>();
     // The binary the client stays configured with when it still exists, else this
     // one (global setup's own default), so a fix never points at a missing binary.
     let mut bin = bin.to_owned();
@@ -637,11 +712,19 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
     } else if !configured {
         checks.push(Check::ok(display, "installed but not configured"));
     } else {
+        let lacks_client = if setup::mcp_lacks_client(&changes) {
+            format!(
+                " (its MCP server is registered without `--client {}`)",
+                kind.token()
+            )
+        } else {
+            String::new()
+        };
         checks.push(
             Check::warn(
                 display,
                 format!(
-                    "differs from what `skillvolution setup --client {}` would write: {}",
+                    "differs from what `skillvolution setup --client {}` would write{lacks_client}: {}",
                     kind.token(),
                     mismatched.join(", ")
                 ),
@@ -678,20 +761,98 @@ fn client_check(kind: ClientKind, bin: &Path, db: &Path) -> Result<(Vec<Check>, 
         ));
     }
 
-    if kind == ClientKind::ClaudeCode
-        && let Some(registered) = setup::claude_mcp_registered()?
-        && !registered
-    {
-        // Re-applying the client already registers it, like setup does.
-        checks.push(
-            Check::warn(
-                "Claude Code MCP registration",
-                "`claude mcp get skillvolution` reports no registration; rerun setup",
-            )
-            .with_fix((configured && !reapply).then(|| Fix::RegisterClaudeMcp(bin.clone()))),
-        );
+    if kind == ClientKind::ClaudeCode {
+        let problem = match setup::claude_mcp_registration()? {
+            Some(ClaudeMcp::Missing) => {
+                Some("`claude mcp get skillvolution` reports no registration; rerun setup")
+            }
+            Some(ClaudeMcp::Registered { lacks_client: true }) => Some(
+                "registered without `--client claude-code` (from before v0.7.0); `doctor --fix` or setup re-registers it",
+            ),
+            _ => None,
+        };
+        if let Some(problem) = problem {
+            // Re-applying the client already registers it, like setup does.
+            checks.push(
+                Check::warn("Claude Code MCP registration", problem).with_fix(
+                    (configured && !reapply).then(|| Fix::RegisterClaudeMcp(bin.clone())),
+                ),
+            );
+        }
     }
     Ok((checks, configured || mismatched.is_empty()))
+}
+
+/// A read-only connection to `db` when it exists and is at the current schema (never
+/// `Vault::open`, which migrates).
+fn current_schema_conn(db: &Path) -> Option<Connection> {
+    db.is_file()
+        .then(|| open_readonly(db).ok())
+        .flatten()
+        .filter(|conn| {
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .is_ok_and(|v| v == vault::schema_version())
+        })
+}
+
+/// The check of an installed client's version against the one setup stored and the last
+/// one tested: warns when it moved to another version range since setup (another range
+/// has other capabilities; `--fix` records any new version, warned or not) or is newer
+/// than tested in the newest range. Detects with `<cli> --version`, as setup does; a client whose CLI
+/// is missing is "not detected", not a failure, while one on PATH whose version cannot be
+/// read (it failed, timed out or printed none) is a warning.
+fn version_check(kind: ClientKind, db: &Path) -> Option<Check> {
+    let name = format!("{} version", kind.display_name());
+    let Some(version) = kind.detect_version() else {
+        let on_path = kind
+            .spec()
+            .clis
+            .iter()
+            .find(|cli| setup::find_on_path(cli).is_some());
+        return Some(match on_path {
+            Some(cli) => Check::warn(
+                name,
+                format!(
+                    "unreadable: `{cli} --version` failed, timed out or printed no version; \
+                     assuming the latest known version"
+                ),
+            ),
+            None => Check::ok(name, "not detected; assuming the latest known version"),
+        });
+    };
+    let stored = current_schema_conn(db)
+        .and_then(|conn| vault::stored_client_version(&conn, kind).ok())
+        .map(|stored| stored.map(|stored| stored.version));
+    let mut problems = Vec::new();
+    let mut fix = None;
+    match stored {
+        Some(Some(saved)) if saved != version => {
+            if !kind.same_range(saved, version) {
+                problems.push(format!(
+                    "changed since setup (was {saved}); `doctor --fix` records it, rerun setup to refresh the client's files"
+                ));
+            }
+            fix = Some(Fix::RecordVersion { kind, version });
+        }
+        Some(None) => fix = Some(Fix::RecordVersion { kind, version }),
+        _ => {}
+    }
+    if kind.is_unverified(version) {
+        problems.push("newer than the last version tested with Skillvolution (unverified)".into());
+    }
+    let check = if problems.is_empty() {
+        let note = match stored {
+            Some(None) => " (not recorded yet)".to_owned(),
+            Some(Some(saved)) if saved != version => {
+                format!(" (setup recorded {saved}, same capabilities; `doctor --fix` records it)")
+            }
+            _ => String::new(),
+        };
+        Check::ok(name, format!("{version}{note}"))
+    } else {
+        Check::warn(name, format!("{version}: {}", problems.join("; ")))
+    };
+    Some(check.with_fix(fix))
 }
 
 /// Compares every `changes()` path against the file on disk. Returns the paths

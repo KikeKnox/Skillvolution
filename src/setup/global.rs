@@ -2,7 +2,10 @@
 //! project, and registers the Claude Code MCP server via the `claude` CLI instead of
 //! editing `~/.claude.json` (see `claude_cli`).
 
-use super::{ClientKind, Clients, Scope, claude, hooks, prompt, resolve_db, write_clients};
+use super::{
+    ClientKind, Clients, Scope, claude, hooks, prompt, record_client_versions, resolve_db,
+    write_clients,
+};
 use crate::vault::{self, Vault};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -22,7 +25,7 @@ pub fn run(clients: Option<Clients>, bin: &Path, db_flag: Option<PathBuf>) -> Re
     let db = resolve_global_db(db_flag)?;
     hooks::require_utf8(bin, "--bin")?;
     hooks::require_utf8(&db, "--db")?;
-    Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
+    let vault = Vault::open(&db).with_context(|| format!("open {}", db.display()))?;
     vault::warn_if_unsafe(&db);
 
     if selected.is_empty() {
@@ -32,6 +35,7 @@ pub fn run(clients: Option<Clients>, bin: &Path, db_flag: Option<PathBuf>) -> Re
         claude::warn_about_project_install();
     }
     write_clients(selected, Scope::Global, bin, &db)?;
+    record_client_versions(&vault, selected);
     for kind in selected.iter() {
         println!("{}", summary(kind));
         if kind == ClientKind::ClaudeCode {

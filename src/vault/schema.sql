@@ -113,12 +113,55 @@ JOIN revisions r ON r.id = s.id
 WHERE r.status = 'published'
     AND r.version = (SELECT MAX(p.version) FROM revisions p WHERE p.id = r.id AND p.status = 'published');
 
--- Which model each agent tier maps to, per client. Machine-local configuration
+-- The models each client's tiers map to, ranked: file generation uses the enabled row
+-- with the lowest `priority` (ties by insertion order). `effort` is '' when none; an
+-- OpenCode provider is the `provider/` prefix of its model; `provider` is '' when
+-- unknown (a bare model from `set`, or pre-v9 data). Machine-local configuration
 -- (model availability depends on the machine): not exported or imported.
-CREATE TABLE agent_models (
+CREATE TABLE client_models (
+    id INTEGER PRIMARY KEY,
     client TEXT NOT NULL,
-    tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+    provider TEXT NOT NULL,
     model TEXT NOT NULL,
-    effort TEXT,
-    PRIMARY KEY (client, tier)
+    tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+    effort TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    UNIQUE (client, tier, provider, model, effort)
+);
+
+-- The version each client reported when setup last ran, so hooks can pick version-
+-- dependent behavior without running the client's CLI. Machine-local: not exported or
+-- imported.
+CREATE TABLE client_versions (
+    client TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- Local usage telemetry: what was searched, suggested, loaded, delegated to, and where
+-- hooks or the MCP server failed. Never prompt text, file contents, or absolute paths;
+-- nothing leaves the machine. Machine-local: not exported or imported. Rows older than
+-- 180 days are deleted when the vault is opened.
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    client TEXT,
+    client_version TEXT,
+    project TEXT,
+    session TEXT,
+    kind TEXT NOT NULL,
+    subject TEXT,
+    version INTEGER,
+    data TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(data))
+);
+
+CREATE INDEX events_at ON events(at);
+CREATE INDEX events_kind_at ON events(kind, at);
+
+-- Machine-local housekeeping state (e.g. the day events were last pruned). Not exported
+-- or imported.
+CREATE TABLE vault_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );

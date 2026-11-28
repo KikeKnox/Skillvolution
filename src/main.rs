@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use skillvolution::{hook, setup, vault::Vault};
-use std::{io::Read, path::PathBuf};
+use skillvolution::{
+    clients::{ClientKind, ContinueOutput, HookCommand, HookCommands, SessionOutput, StopJudgment},
+    hook, setup,
+    vault::Vault,
+};
+use std::{io::Read, path::PathBuf, sync::LazyLock};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -15,6 +19,44 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum TelemetryCommand {
+    /// Summarize usage: searches without results, skills loaded without a report, usage by
+    /// client, agent and model, and errors, over all projects.
+    ///
+    /// --json prints one object: since (UTC start of the window), events, searches,
+    /// searches_empty, searches_without_results [{name, count}], loaded_without_report
+    /// [{id, version, unreported, loaded}], usage {sessions_by_client, loads_by_client,
+    /// delegations_by_agent, delegations_by_model, delegations_by_client} (each
+    /// [{name, count}]), and errors [{kind, source, class, count}]. Each list keeps its top 10.
+    Summary {
+        /// Window start: YYYY-MM-DD, or a number of days such as 7d.
+        #[arg(long, default_value = skillvolution::vault::DEFAULT_SINCE, value_name = "DATE|Nd")]
+        since: String,
+        /// Print the summary as JSON instead of the readable form.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List recorded events, newest first.
+    ///
+    /// --json prints an array of {at, kind, client, client_version, project, session,
+    /// subject, version, data}.
+    Events {
+        /// Only events of this kind (search, suggest, load, delegation, mcp_error, ...).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only events since YYYY-MM-DD or a number of days such as 7d.
+        #[arg(long, value_name = "DATE|Nd")]
+        since: Option<String>,
+        /// Most events to list.
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+        /// Print the events as JSON instead of one line each.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Start the MCP server on stdio.
     Serve {
@@ -23,6 +65,10 @@ enum Command {
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
+        /// The client that runs this server (setup passes it): the one `install_agent`
+        /// and `list_models` act for, and the client recorded on its usage events.
+        #[arg(long, value_enum)]
+        client: Option<AnyClient>,
     },
     /// Show one revision: its status, evidence, and a diff against its base.
     Show {
@@ -60,6 +106,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read the local usage telemetry (nothing is ever sent anywhere).
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
     /// Hook entry points for Claude Code, Devin CLI, Codex CLI, Gemini CLI, and Cursor.
     #[command(subcommand)]
     Hook(HookEvent),
@@ -224,6 +273,28 @@ enum AgentsCommand {
         #[arg(long, requires = "apply")]
         force: bool,
     },
+    /// Show or change when a global-scope vault agent is promoted to a per-user install,
+    /// and list the current candidates and the agents already promoted. Within the
+    /// window, an agent is promoted when it was used (delegated to after its install in
+    /// that project) in at least --min-share percent of the active projects (those with
+    /// any Skillvolution event), in at least --min-projects projects, with a mean of at
+    /// least --min-delegations delegations per using project. Checked once a day at
+    /// session start, and by `doctor` (which promotes only with --fix). Without options,
+    /// shows the current values.
+    Promotion {
+        /// Window: a number of days such as `30d` (1 to 180). Default 30d.
+        #[arg(long)]
+        window: Option<String>,
+        /// Percent of the active projects that must use the agent (1 to 100). Default 75.
+        #[arg(long)]
+        min_share: Option<i64>,
+        /// Distinct projects that must use the agent. Default 6 (more than 5).
+        #[arg(long)]
+        min_projects: Option<i64>,
+        /// Mean delegations per using project. Default 3.
+        #[arg(long)]
+        min_delegations: Option<i64>,
+    },
     /// Turn a Claude Code agent file (or a directory of them) into AGENT.md for `publish`.
     Import {
         /// A Claude Code agent file, or a directory of *.md files.
@@ -250,13 +321,67 @@ enum ModelsAction {
         #[arg(long)]
         effort: Option<String>,
     },
-    /// Delete a stored mapping so the tier reverts to its default (or to none).
+    /// Delete the priority-0 mapping so the tier reverts to the next ranked model, its
+    /// default, or none.
     Unset {
         /// `claude-code` or `opencode`.
         client: String,
         /// `high`, `mid` or `low`.
         tier: String,
     },
+    /// Add a ranked model for a tier (lower priority is preferred).
+    Add {
+        /// `claude-code` or `opencode`.
+        client: String,
+        /// `high`, `mid` or `low`.
+        tier: String,
+        /// Model as written to the file, e.g. `opus` or `anthropic/claude-sonnet-4-5`.
+        model: String,
+        /// Provider; `anthropic` for Claude Code, else the `provider/` of an OpenCode model.
+        #[arg(long)]
+        provider: Option<String>,
+        /// `low`, `medium`, `high`, `xhigh` or `max`.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Lower is preferred. Default: after the tier's last model.
+        #[arg(long)]
+        priority: Option<i64>,
+    },
+    /// Delete the stored model rows matching CLIENT TIER MODEL.
+    Remove(ModelRef),
+    /// Let a disabled model be chosen again.
+    Enable(ModelRef),
+    /// Stop choosing a model without deleting it.
+    Disable(ModelRef),
+}
+
+/// Names the stored rows `models remove`, `enable` and `disable` act on.
+#[derive(clap::Args)]
+struct ModelRef {
+    /// `claude-code` or `opencode`.
+    client: String,
+    /// `high`, `mid` or `low`.
+    tier: String,
+    /// The model exactly as stored.
+    model: String,
+    /// Only the row with this provider.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Only the row with this effort.
+    #[arg(long)]
+    effort: Option<String>,
+}
+
+impl ModelRef {
+    fn selector(&self) -> skillvolution::vault::ModelSelector<'_> {
+        skillvolution::vault::ModelSelector {
+            client: &self.client,
+            tier: &self.tier,
+            model: &self.model,
+            provider: self.provider.as_deref(),
+            effort: self.effort.as_deref(),
+        }
+    }
 }
 
 /// The vault project key and the directory agent files go in: `--global` is the per-user
@@ -273,11 +398,74 @@ fn agent_scope(global: bool, project: Option<String>) -> Result<(Option<String>,
     Ok((key, Some(dir)))
 }
 
+fn scope_name(global: bool) -> &'static str {
+    if global { "global" } else { "project" }
+}
+
+/// The line `models remove/enable/disable` print; no matching row is a failure.
+fn model_rows_report(
+    reference: &ModelRef,
+    verb: &str,
+    count: usize,
+    failed: &mut bool,
+) -> Vec<String> {
+    if count == 0 {
+        *failed = true;
+        return vec![format!(
+            "No stored model `{}` for {} {}.",
+            reference.model, reference.client, reference.tier
+        )];
+    }
+    vec![format!(
+        "{verb} {count} row{} for {} {} `{}`.",
+        if count == 1 { "" } else { "s" },
+        reference.client,
+        reference.tier,
+        reference.model
+    )]
+}
+
+/// `30d` or `30` as a number of days.
+fn parse_days(text: &str) -> Result<i64> {
+    let digits = text.trim().strip_suffix('d').unwrap_or(text.trim());
+    digits
+        .parse()
+        .ok()
+        .with_context(|| format!("invalid --window {text:?}: use a number of days like 30d"))
+}
+
+/// What `agents promotion` prints.
+fn promotion_report(status: &skillvolution::vault::PromotionStatus, changed: bool) -> Vec<String> {
+    let s = &status.settings;
+    let mut lines = Vec::new();
+    if changed {
+        lines.push("Saved the promotion thresholds.".to_owned());
+    }
+    lines.push(format!(
+        "Promotion thresholds: window {}d, min share {}%, min projects {}, min delegations {} (mean per using project).",
+        s.window_days, s.min_share, s.min_projects, s.min_delegations
+    ));
+    lines.push(format!("Active projects in the window: {}.", status.active));
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            "none".to_owned()
+        } else {
+            items.join(", ")
+        }
+    };
+    lines.push(format!(
+        "Candidates: {}.",
+        list(status.candidates.iter().map(|c| c.render()).collect())
+    ));
+    lines.push(format!("Promoted: {}.", list(status.promoted.clone())));
+    lines
+}
+
 fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
     use skillvolution::agents;
     let mut failed = false;
     let lines = match command {
-        AgentsCommand::Models { action: None } => agents::models_table(&open(db)?.agent_models()?),
+        AgentsCommand::Models { action: None } => agents::models_table(&open(db)?.client_models()?),
         AgentsCommand::Models {
             action:
                 Some(ModelsAction::Set {
@@ -288,7 +476,7 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
                 }),
         } => {
             let vault = open(db)?;
-            let stored = vault.agent_models()?;
+            let stored = vault.client_models()?;
             let kept = effort.is_none();
             let effort = effort.or_else(|| agents::current_effort(&stored, &client, &tier));
             vault.set_agent_model(&client, &tier, &model, effort.as_deref())?;
@@ -320,6 +508,50 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
                 format!("No stored mapping for {client} {tier}; nothing to remove.")
             }]
         }
+        AgentsCommand::Models {
+            action:
+                Some(ModelsAction::Add {
+                    client,
+                    tier,
+                    model,
+                    provider,
+                    effort,
+                    priority,
+                }),
+        } => {
+            let row = open(db)?.add_client_model(
+                &client,
+                &tier,
+                &model,
+                provider.as_deref(),
+                effort.as_deref(),
+                priority,
+            )?;
+            let mut lines = vec![format!(
+                "Added {client} {tier} {} `{model}` (priority {}).",
+                row.provider, row.priority
+            )];
+            lines.extend(agents::model_warning(&client, &model).map(|w| format!("warning: {w}")));
+            lines
+        }
+        AgentsCommand::Models {
+            action: Some(ModelsAction::Remove(r)),
+        } => {
+            let count = open(db)?.remove_client_model(&r.selector())?;
+            model_rows_report(&r, "Removed", count, &mut failed)
+        }
+        AgentsCommand::Models {
+            action: Some(ModelsAction::Enable(r)),
+        } => {
+            let count = open(db)?.set_client_model_enabled(&r.selector(), true)?;
+            model_rows_report(&r, "Enabled", count, &mut failed)
+        }
+        AgentsCommand::Models {
+            action: Some(ModelsAction::Disable(r)),
+        } => {
+            let count = open(db)?.set_client_model_enabled(&r.selector(), false)?;
+            model_rows_report(&r, "Disabled", count, &mut failed)
+        }
         AgentsCommand::Add {
             ids,
             global,
@@ -327,12 +559,21 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             force,
         } => {
             let (key, dir) = agent_scope(global, project)?;
-            agents::add(&open(db)?, &ids, key.as_deref(), dir.as_deref(), force)?
+            let vault = open(db)?;
+            let (lines, changes) =
+                agents::add_with_changes(&vault, &ids, key.as_deref(), dir.as_deref(), force)?;
+            agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
+            lines
         }
         AgentsCommand::Remove { ids, global } => {
-            let (_, dir) = agent_scope(global, None)?;
-            let (lines, missing) = agents::remove(&ids, dir.as_deref())?;
+            let (key, dir) = agent_scope(global, None)?;
+            let (lines, missing, changes) = agents::remove_with_changes(&ids, dir.as_deref())?;
             failed = missing > 0;
+            // Recording is best effort: removing needs no vault, so a vault that
+            // cannot be opened must not fail it.
+            if let Ok(vault) = open(db) {
+                agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
+            }
             lines
         }
         AgentsCommand::Sync {
@@ -342,7 +583,34 @@ fn run_agents(db: &Option<PathBuf>, command: AgentsCommand) -> Result<()> {
             force,
         } => {
             let (key, dir) = agent_scope(global, project)?;
-            agents::sync(&open(db)?, key.as_deref(), dir.as_deref(), apply, force)?
+            let vault = open(db)?;
+            let (lines, changes) =
+                agents::sync_with_changes(&vault, key.as_deref(), dir.as_deref(), apply, force)?;
+            agents::log_agent_events(&vault, &changes, scope_name(global), key.as_deref());
+            lines
+        }
+        AgentsCommand::Promotion {
+            window,
+            min_share,
+            min_projects,
+            min_delegations,
+        } => {
+            let vault = open(db)?;
+            let mut settings = vault.promotion_settings()?;
+            let changed = window.is_some()
+                || min_share.is_some()
+                || min_projects.is_some()
+                || min_delegations.is_some();
+            if let Some(window) = window {
+                settings.window_days = parse_days(&window)?;
+            }
+            settings.min_share = min_share.unwrap_or(settings.min_share);
+            settings.min_projects = min_projects.unwrap_or(settings.min_projects);
+            settings.min_delegations = min_delegations.unwrap_or(settings.min_delegations);
+            if changed {
+                vault.set_promotion_settings(&settings)?;
+            }
+            promotion_report(&vault.promotion_status()?, changed)
         }
         AgentsCommand::Import { path, output } => {
             anyhow::ensure!(
@@ -597,6 +865,33 @@ fn publish_file(
     }))
 }
 
+/// Records a `publish` event for a published file, or a `publish_rejected` one with
+/// the (scrubbed) problems for a rejected one. A skipped file is neither.
+fn log_publish(vault: &Vault, result: &std::result::Result<Published, Vec<String>>) {
+    use skillvolution::vault::{Event, MAX_REASON_CHARS, scrub_text};
+    match result {
+        Ok(Published::Done {
+            id,
+            version,
+            scope,
+            agent,
+        }) => vault.log_event(Event::new("publish").subject(id, Some(*version)).data(
+            serde_json::json!({
+                "scope": scope,
+                "agent": agent,
+            }),
+        )),
+        Ok(Published::Skipped { .. }) => {}
+        Err(problems) => vault.log_event(Event::new("publish_rejected").data(serde_json::json!({
+            "reasons": problems
+                .iter()
+                .take(5)
+                .map(|problem| scrub_text(problem, MAX_REASON_CHARS))
+                .collect::<Vec<_>>(),
+        }))),
+    }
+}
+
 fn publish(
     db: &Option<PathBuf>,
     path: PathBuf,
@@ -649,6 +944,7 @@ fn publish(
         for file in &files {
             let result = publish_file(&mut vault, file, None, &opts)
                 .unwrap_or_else(|e| Err(vec![format!("{e:#}")]));
+            log_publish(&vault, &result);
             match result {
                 Ok(Published::Done {
                     id,
@@ -697,7 +993,9 @@ fn publish(
         path
     };
     let mut vault = open(db)?;
-    match publish_file(&mut vault, &path, id, &opts)? {
+    let result = publish_file(&mut vault, &path, id, &opts)?;
+    log_publish(&vault, &result);
+    match result {
         Ok(Published::Done {
             id,
             version,
@@ -766,40 +1064,45 @@ fn print_skills(page: &skillvolution::vault::SearchPage, json: bool) -> Result<(
 /// `hookSpecificOutput.additionalContext` JSON on stdout; every other client
 /// tracks per-session flags from `tool-use` and asks to continue with its own
 /// JSON on stdout (`{"decision":"block"}` for Devin and Codex, `{"decision":"deny"}`
-/// for Gemini CLI's AfterAgent, `{"followup_message"}` for Cursor).
-#[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-enum HookClient {
-    #[default]
-    ClaudeCode,
-    Devin,
-    Codex,
-    Gemini,
-    Cursor,
-}
+/// for Gemini CLI's AfterAgent, `{"followup_message"}` for Cursor). Each of these
+/// conventions is read from the client's `HookSpec`; the accepted `--client` tokens
+/// are those of the clients whose hooks are `hook` commands (every client but
+/// OpenCode, whose plugin handles its own events).
+#[derive(Clone, Copy)]
+struct HookClient(ClientKind);
 
 impl HookClient {
+    const CLAUDE_CODE: Self = Self(ClientKind::ClaudeCode);
+    const DEVIN: Self = Self(ClientKind::Devin);
+
+    /// The `hook` commands of this client; every `HookClient` has them.
+    fn commands(self) -> &'static HookCommands {
+        self.0
+            .spec()
+            .hooks
+            .commands
+            .as_ref()
+            .expect("a HookClient's hooks are hook commands")
+    }
+
     /// The file-editing tool names `tool-use` counts as work for this client.
     fn work_tools(self) -> &'static [&'static str] {
-        match self {
-            Self::ClaudeCode => hook::WORK_TOOLS,
-            Self::Devin => hook::DEVIN_WORK_TOOLS,
-            Self::Codex => hook::CODEX_WORK_TOOLS,
-            Self::Gemini => hook::GEMINI_WORK_TOOLS,
-            Self::Cursor => hook::CURSOR_WORK_TOOLS,
-        }
+        self.0.spec().hooks.work_tools
     }
 
     /// The SessionStart output that injects `context` into this client's session.
     fn session_context(self, context: String) -> String {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex | Self::Gemini => serde_json::json!({
+        match self.commands().session_output {
+            SessionOutput::HookSpecificOutput => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
                     "additionalContext": context,
                 }
             })
             .to_string(),
-            Self::Cursor => serde_json::json!({ "additional_context": context }).to_string(),
+            SessionOutput::AdditionalContext => {
+                serde_json::json!({ "additional_context": context }).to_string()
+            }
         }
     }
 
@@ -808,38 +1111,102 @@ impl HookClient {
     /// BeforeAgent for Gemini CLI. `None` for Cursor, whose beforeSubmitPrompt can only
     /// allow or block the prompt, not add context to it.
     fn prompt_event(self) -> Option<&'static str> {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex => Some("UserPromptSubmit"),
-            Self::Gemini => Some("BeforeAgent"),
-            Self::Cursor => None,
+        self.commands().event(HookCommand::Prompt)
+    }
+}
+
+/// The Stop output asking a flag-tracked client to continue with `reason`.
+fn continue_with(output: ContinueOutput, reason: &str) -> serde_json::Value {
+    match output {
+        ContinueOutput::Block => serde_json::json!({"decision": "block", "reason": reason}),
+        ContinueOutput::Deny => serde_json::json!({"decision": "deny", "reason": reason}),
+        ContinueOutput::FollowupMessage => serde_json::json!({ "followup_message": reason }),
+    }
+}
+
+/// Any client's `--client` token (`serve`, `hook session-start`).
+#[derive(Clone, Copy)]
+struct AnyClient(ClientKind);
+
+impl AnyClient {
+    const CLAUDE_CODE: Self = Self(ClientKind::ClaudeCode);
+
+    /// The SessionStart output that injects `context`: the client's own hook convention,
+    /// or `hookSpecificOutput` for a client whose hooks are not `hook` commands (the
+    /// OpenCode plugin reads that form).
+    fn session_context(self, context: String) -> String {
+        if self.0.spec().hooks.commands.is_some() {
+            return HookClient(self.0).session_context(context);
         }
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        })
+        .to_string()
     }
 
-    /// The Stop output asking a flag-tracked client to continue with `reason`.
-    fn continue_with(self, reason: &str) -> serde_json::Value {
-        match self {
-            Self::ClaudeCode | Self::Devin | Self::Codex => {
-                serde_json::json!({"decision": "block", "reason": reason})
-            }
-            Self::Gemini => serde_json::json!({"decision": "deny", "reason": reason}),
-            Self::Cursor => serde_json::json!({ "followup_message": reason }),
+    /// The prompt-submit event `hook prompt` names in its output: the client's own
+    /// (`HookClient::prompt_event`), or `UserPromptSubmit` for a client whose hooks are not
+    /// `hook` commands (the OpenCode plugin reads only `additionalContext`).
+    fn prompt_event(self) -> Option<&'static str> {
+        if self.0.spec().hooks.commands.is_some() {
+            return HookClient(self.0).prompt_event();
         }
+        Some("UserPromptSubmit")
+    }
+}
+
+impl clap::ValueEnum for AnyClient {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: LazyLock<Vec<AnyClient>> =
+            LazyLock::new(|| ClientKind::ALL.into_iter().map(AnyClient).collect());
+        &VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.0.token()))
+    }
+}
+
+impl clap::ValueEnum for HookClient {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: LazyLock<Vec<HookClient>> = LazyLock::new(|| {
+            ClientKind::ALL
+                .into_iter()
+                .filter(|kind| kind.spec().hooks.commands.is_some())
+                .map(HookClient)
+                .collect()
+        });
+        &VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.0.token()))
     }
 }
 
 #[derive(Subcommand)]
 enum HookEvent {
-    /// Print the skill catalog as session context.
+    /// Print the skill catalog (and, for clients with subagents, the agents block) as
+    /// session context, after updating stale managed agent files, retiring project copies
+    /// of promoted agents and, once a day, promoting heavily used agents to per-user.
     SessionStart {
         /// Project key for project-scoped skills.
         /// Detected automatically from the working directory's git root when omitted,
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
-        /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
-        /// Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
-        client: HookClient,
+        /// The client emitting the hook: claude-code, devin, codex, gemini, cursor, or
+        /// opencode (its plugin). Defaults to claude-code.
+        #[arg(long, value_enum, default_value_t = AnyClient::CLAUDE_CODE)]
+        client: AnyClient,
+        /// The session is a subagent's (the OpenCode plugin passes it for child
+        /// sessions): print the skills catalog only, with no agents block and no agent
+        /// upkeep.
+        #[arg(long)]
+        subagent: bool,
     },
     /// Suggest the vault skills matching the submitted prompt (UserPromptSubmit, or
     /// Gemini CLI's BeforeAgent); prints nothing when none is relevant.
@@ -849,17 +1216,37 @@ enum HookEvent {
         /// or from CLAUDE_PROJECT_DIR.
         #[arg(long)]
         project: Option<String>,
-        /// The client emitting the hook: claude-code, devin, codex, or gemini (cursor
-        /// cannot inject prompt context). Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
-        client: HookClient,
+        /// The client emitting the hook: claude-code, devin, codex, gemini, or opencode
+        /// (its plugin); cursor cannot inject prompt context. Defaults to claude-code.
+        #[arg(long, value_enum, default_value_t = AnyClient::CLAUDE_CODE)]
+        client: AnyClient,
+    },
+    /// Record a delegation a client's plugin saw (the OpenCode plugin): reads
+    /// `{"agent", "model"?, "session"?}` JSON on stdin and prints nothing.
+    Delegation {
+        /// Project key. Detected like `hook prompt` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// The client whose plugin saw the delegation (opencode).
+        #[arg(long, value_enum)]
+        client: AnyClient,
+    },
+    /// Record a review reminder a client's plugin added (the OpenCode plugin): reads
+    /// `{"session"?}` JSON on stdin and prints nothing.
+    Reminder {
+        /// Project key. Detected like `hook prompt` when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// The client whose plugin added the reminder (opencode).
+        #[arg(long, value_enum)]
+        client: AnyClient,
     },
     /// Record work/review tool calls for a session (PostToolUse of the flag-tracked
     /// clients: Devin, Codex, Gemini CLI, Cursor).
     ToolUse {
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to devin.
-        #[arg(long, value_enum, default_value_t = HookClient::Devin)]
+        #[arg(long, value_enum, default_value_t = HookClient::DEVIN)]
         client: HookClient,
     },
     /// Ask for an evolution review after unreviewed work.
@@ -870,13 +1257,49 @@ enum HookEvent {
         project: Option<String>,
         /// The client emitting the hook: claude-code, devin, codex, gemini, or cursor.
         /// Defaults to claude-code.
-        #[arg(long, value_enum, default_value_t = HookClient::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = HookClient::CLAUDE_CODE)]
         client: HookClient,
     },
     /// Drop a session's hook state (Devin SessionEnd).
     SessionEnd,
     /// Approve the tools the evolution flow needs (Devin PermissionRequest).
     Approve,
+}
+
+impl HookEvent {
+    /// The hook's name and the client that emitted it, for `hook_error` events.
+    fn origin(&self) -> (&'static str, Option<ClientKind>) {
+        match self {
+            HookEvent::SessionStart { client, .. } => ("session-start", Some(client.0)),
+            HookEvent::Prompt { client, .. } => ("prompt", Some(client.0)),
+            HookEvent::Delegation { client, .. } => ("delegation", Some(client.0)),
+            HookEvent::Reminder { client, .. } => ("reminder", Some(client.0)),
+            HookEvent::ToolUse { client } => ("tool-use", Some(client.0)),
+            HookEvent::Stop { client, .. } => ("stop", Some(client.0)),
+            HookEvent::SessionEnd => ("session-end", None),
+            HookEvent::Approve => ("approve", None),
+        }
+    }
+}
+
+/// Records a `hook_error` event (hook and error class, never the message). Best effort:
+/// when the vault itself cannot be opened there is nowhere to record it.
+fn log_hook_error(
+    db: &Option<PathBuf>,
+    hook: &str,
+    client: Option<ClientKind>,
+    error: &anyhow::Error,
+) {
+    if let Ok(vault) = open(db) {
+        vault.log_event(
+            skillvolution::vault::Event::new("hook_error")
+                .client(client)
+                .data(serde_json::json!({
+                    "hook": hook,
+                    "class": skillvolution::vault::error_class(error),
+                })),
+        );
+    }
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
@@ -912,6 +1335,37 @@ fn resolve_project(explicit: Option<String>) -> Result<Option<String>> {
     })
 }
 
+/// The directory `serve` installs project agents in: the git repository holding the
+/// current directory, else that of `CLAUDE_PROJECT_DIR` (or that directory itself), else
+/// the current directory; the same order as `resolve_project`.
+fn resolve_project_dir() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("determine current directory")?;
+    if let Some(repo) = skillvolution::project::repo_dir(&cwd) {
+        return Ok(repo);
+    }
+    Ok(match std::env::var("CLAUDE_PROJECT_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            let dir = PathBuf::from(dir);
+            skillvolution::project::repo_dir(&dir).unwrap_or(dir)
+        }
+        _ => cwd,
+    })
+}
+
+/// The project directory a hook works in: the git repository holding the current
+/// directory, else `CLAUDE_PROJECT_DIR`.
+fn hook_project_dir() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .as_deref()
+        .and_then(skillvolution::project::repo_dir)
+        .or_else(|| {
+            std::env::var_os("CLAUDE_PROJECT_DIR")
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
 /// The database at `--db`, or the default location.
 fn db_path(db: &Option<PathBuf>) -> Result<PathBuf> {
     db.clone()
@@ -937,10 +1391,21 @@ fn read_stdin() -> Result<String> {
 
 fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
     match event {
-        HookEvent::SessionStart { project, client } => {
+        HookEvent::SessionStart {
+            project,
+            client,
+            subagent,
+        } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let context = hook::session_start(&open(db)?, project.as_deref())?;
+            let project_dir = hook_project_dir();
+            let context = hook::session_start_recorded(
+                &open(db)?,
+                project.as_deref(),
+                project_dir.as_deref(),
+                client.0,
+                subagent,
+            )?;
             print!("{}", client.session_context(context));
         }
         HookEvent::Prompt { project, client } => {
@@ -952,7 +1417,9 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                 .prompt_event()
                 .context("this client's prompt hook cannot inject context")?;
             let project = resolve_project(project)?;
-            if let Some(context) = hook::prompt(&open(db)?, project.as_deref(), &input)? {
+            if let Some(context) =
+                hook::prompt_recorded(&open(db)?, project.as_deref(), &input, client.0)?
+            {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -964,27 +1431,38 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                 );
             }
         }
+        HookEvent::Delegation { project, client } => {
+            let input = read_stdin()?;
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            hook::plugin_delegation(&open(db)?, project.as_deref(), &input, client.0)?;
+        }
+        HookEvent::Reminder { project, client } => {
+            let input = read_stdin()?;
+            validate_project(&project)?;
+            let project = resolve_project(project)?;
+            hook::plugin_reminder(&open(db)?, project.as_deref(), &input, client.0)?;
+        }
         HookEvent::ToolUse { client } => {
             hook::tool_use(&open(db)?, &read_stdin()?, client.work_tools())?
         }
         HookEvent::Stop { project, client } => {
             let input = read_stdin()?;
             validate_project(&project)?;
-            match client {
-                HookClient::ClaudeCode => {
+            match client.commands().stop {
+                StopJudgment::Transcript => {
                     let project = resolve_project(project)?;
-                    let cwd = std::env::current_dir().ok();
-                    let project_dir = cwd
-                        .as_deref()
-                        .and_then(skillvolution::project::repo_dir)
-                        .or_else(|| {
-                            std::env::var_os("CLAUDE_PROJECT_DIR")
-                                .filter(|d| !d.is_empty())
-                                .map(PathBuf::from)
-                        });
+                    let project_dir = hook_project_dir();
                     let dirs = skillvolution::agents::claude_agent_dirs(project_dir.as_deref());
-                    if let Some(reason) = hook::stop(&open(db)?, &input, project.as_deref(), &dirs)?
-                    {
+                    let hooks = &client.0.spec().hooks;
+                    if let Some(reason) = hook::transcript_stop_as(
+                        &open(db)?,
+                        &input,
+                        project.as_deref(),
+                        &dirs,
+                        hooks,
+                        Some(client.0),
+                    )? {
                         // additionalContext on stdout (exit 0) makes Claude continue the
                         // same turn, like decision:block, and the continued stop arrives
                         // with stop_hook_active=true; unlike decision:block, it shows no
@@ -1000,9 +1478,12 @@ fn run_hook(event: HookEvent, db: &Option<PathBuf>) -> Result<()> {
                         );
                     }
                 }
-                flagged => {
-                    if let Some(reason) = hook::devin_stop(&open(db)?, &input)? {
-                        println!("{}", flagged.continue_with(reason));
+                StopJudgment::Flags(output) => {
+                    let project = resolve_project(project).ok().flatten();
+                    if let Some(reason) =
+                        hook::devin_stop_as(&open(db)?, &input, project.as_deref(), Some(client.0))?
+                    {
+                        println!("{}", continue_with(output, reason));
                     }
                 }
             }
@@ -1098,14 +1579,21 @@ fn main() -> Result<()> {
         Command::Agents(command) => run_agents(&cli.db, command)?,
         Command::Relocate { path } => skillvolution::relocate::run(&db_path(&cli.db)?, &path)?,
         Command::Setup(args) => setup::run(args.with_default_db(cli.db))?,
-        Command::Serve { project } => {
+        Command::Serve { project, client } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
             eprintln!(
                 "skillvolution: project = {}",
                 project.as_deref().unwrap_or("none")
             );
-            skillvolution::mcp::serve(open(&cli.db)?, project)?;
+            skillvolution::mcp::serve(
+                open(&cli.db)?,
+                skillvolution::mcp::ServerContext {
+                    project,
+                    project_dir: resolve_project_dir()?,
+                    client: client.map(|c| c.0),
+                },
+            )?;
         }
         Command::Show { id, version, json } => {
             let vault = open(&cli.db)?;
@@ -1183,7 +1671,17 @@ fn main() -> Result<()> {
         } => {
             validate_project(&project)?;
             let project = resolve_project(project)?;
-            let page = open(&cli.db)?.search(&query, project.as_deref(), limit, 0)?;
+            let vault = open(&cli.db)?;
+            let page = vault.search(&query, project.as_deref(), limit, 0)?;
+            vault.log_event(
+                skillvolution::vault::Event::new("search")
+                    .project(project.as_deref())
+                    .data(serde_json::json!({
+                        "query": skillvolution::vault::search_query_for_event(&query),
+                        "total": page.total,
+                        "ids": page.skills.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                    })),
+            );
             print_skills(&page, json)?;
         }
         Command::List {
@@ -1293,13 +1791,56 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Telemetry(TelemetryCommand::Summary { since, json }) => {
+            let report = open(&cli.db)?.usage_report(&since)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", report.render());
+            }
+        }
+        Command::Telemetry(TelemetryCommand::Events {
+            kind,
+            since,
+            limit,
+            json,
+        }) => {
+            let events = open(&cli.db)?.list_events(kind.as_deref(), since.as_deref(), limit)?;
+            if json {
+                print_json(&events)?;
+            } else {
+                for event in events {
+                    println!("{}", event.render());
+                }
+            }
+        }
         // Hooks fail open: a hook error must never block or break the client's
         // session, so it is reported on stderr and the process still exits 0.
         Command::Hook(event) => {
+            let (hook, client) = event.origin();
             if let Err(error) = run_hook(event, &cli.db) {
                 eprintln!("skillvolution hook: {error:#}");
+                log_hook_error(&cli.db, hook, client, &error);
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookClient;
+    use clap::ValueEnum;
+
+    #[test]
+    fn hook_clients_are_the_registry_clients_with_hook_commands() {
+        let tokens: Vec<String> = HookClient::value_variants()
+            .iter()
+            .map(|client| client.to_possible_value().unwrap().get_name().to_owned())
+            .collect();
+        assert_eq!(
+            tokens,
+            ["claude-code", "devin", "codex", "gemini", "cursor"]
+        );
+    }
 }

@@ -170,7 +170,9 @@ fn write_fake_claude_already_registered(
     )
 }
 
-/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`.
+/// Unix-only: a `#!/bin/sh` script, made executable with `chmod`. `claude --version` (run
+/// by setup to record the client's version) answers nothing and is not logged: the logs
+/// are the `mcp` calls setup makes.
 #[cfg(unix)]
 fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -178,7 +180,11 @@ fn write_fake_claude_script(dir: &Path, body_template: &str, log: &Path) -> Path
     fs::create_dir_all(dir).unwrap();
     let claude = dir.join("claude");
     let body = body_template.replace("{log}", &log.display().to_string());
-    fs::write(&claude, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::write(
+        &claude,
+        format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\n{body}"),
+    )
+    .unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_owned()
 }
@@ -227,11 +233,13 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     // OpenCode: opencode.json entry with no --project, skill, AGENTS.md, plugin.
     let oc = read_json(env.opencode_dir().join("opencode.json"));
     let command = oc["mcp"]["skillvolution"]["command"].as_array().unwrap();
-    assert_eq!(command.len(), 4, "{command:?}");
+    assert_eq!(command.len(), 6, "{command:?}");
     assert_eq!(command[0], env.bin.to_str().unwrap());
     assert_eq!(command[1], "--db");
     assert_eq!(command[2], env.db.to_str().unwrap());
     assert_eq!(command[3], "serve");
+    assert_eq!(command[4], "--client");
+    assert_eq!(command[5], "opencode");
     assert_eq!(oc["mcp"]["skillvolution"]["type"], "local");
     assert_eq!(oc["permission"]["task"], "allow");
     assert_eq!(oc["permission"]["skillvolution_publish_skill"], "allow");
@@ -266,7 +274,7 @@ fn global_both_clients_write_expected_files_and_register_mcp() {
     assert_eq!(mcp_json["command"], env.bin.to_str().unwrap());
     assert_eq!(
         mcp_json["args"],
-        serde_json::json!(["--db", env.db, "serve"])
+        serde_json::json!(["--db", env.db, "serve", "--client", "claude-code"])
     );
 }
 
@@ -452,7 +460,7 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
                     serde_json::json!({
                         "type": "stdio",
                         "command": env.bin,
-                        "args": ["--db", &env.db, "serve"],
+                        "args": ["--db", &env.db, "serve", "--client", "claude-code"],
                     })
                 ),
                 "mcp remove --scope user skillvolution".to_owned(),
@@ -461,7 +469,7 @@ fn global_mcp_update_of_existing_registration_removes_then_readds() {
                     serde_json::json!({
                         "type": "stdio",
                         "command": env.bin,
-                        "args": ["--db", &env.db, "serve"],
+                        "args": ["--db", &env.db, "serve", "--client", "claude-code"],
                     })
                 ),
             ],
@@ -490,7 +498,7 @@ fn write_fake_claude_with_registration(
                 "  Status: ✔ Connected".to_owned(),
                 "  Type: stdio".to_owned(),
                 format!("  Command: {}", bin.display()),
-                format!("  Args: --db {} serve", db.display()),
+                format!("  Args: --db {} serve --client claude-code", db.display()),
                 String::new(),
                 "To remove this server, run: claude mcp remove skillvolution -s user".to_owned(),
             ];
@@ -601,7 +609,7 @@ fn manual_registration_command_is_shell_quoted() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let json =
-        serde_json::json!({"type": "stdio", "command": bin, "args": ["--db", &env.db, "serve"]})
+        serde_json::json!({"type": "stdio", "command": bin, "args": ["--db", &env.db, "serve", "--client", "claude-code"]})
             .to_string();
     let quoted = format!("'{}'", json.replace('\'', r"'\''"));
     assert!(
@@ -640,7 +648,7 @@ fn global_mcp_update_failure_reports_removal_and_the_exact_recovery_command() {
             serde_json::json!({
                 "type": "stdio",
                 "command": env.bin,
-                "args": ["--db", &env.db, "serve"],
+                "args": ["--db", &env.db, "serve", "--client", "claude-code"],
             })
         )),
         "{stderr}"
@@ -942,7 +950,7 @@ fn global_devin_writes_expected_files() {
         mcp["mcpServers"]["skillvolution"],
         serde_json::json!({
             "command": env.bin,
-            "args": ["--db", env.db, "serve"],
+            "args": ["--db", env.db, "serve", "--client", "devin"],
         })
     );
 

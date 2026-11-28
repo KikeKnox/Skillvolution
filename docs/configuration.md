@@ -39,8 +39,9 @@ Variables the installers read (they are not read by the binary itself):
 ## File locations
 
 `setup` writes into each client's own config directory (global mode) or into the project
-directory (`--project DIR`, project mode). Every client also gets three managed skills at
-`<dir>/skills/<name>/SKILL.md`: `evolution`, `skill-evaluation`, and `skill-acquisition`.
+directory (`--project DIR`, project mode). Every client also gets four managed skills at
+`<dir>/skills/<name>/SKILL.md`: `evolution`, `skill-evaluation`, `skill-acquisition`, and
+`agent-evaluation`.
 
 | Client | Global config directory | Global files | Project files (under `DIR`) |
 |---|---|---|---|
@@ -57,8 +58,8 @@ Notes:
 
 - The managed skill files live at `<config dir>/skills/<name>/SKILL.md` globally and
   `.<dir>/skills/<name>/SKILL.md` in a project (e.g. `.claude/skills/…`,
-  `.codex/skills/…`), for each of `evolution`, `skill-evaluation`, and
-  `skill-acquisition`. Each carries its own `skillvolution-managed:<name>:vN` marker;
+  `.codex/skills/…`), for each of `evolution`, `skill-evaluation`,
+  `skill-acquisition`, and `agent-evaluation`. Each carries its own `skillvolution-managed:<name>:vN` marker;
   a file at one of those paths without it is refused by `setup` and skipped by
   `setup --remove`.
 - `AGENTS.md` carries the same marker block for OpenCode, Devin, and Codex — shared, so

@@ -56,7 +56,7 @@ fn resolve_git_file(dir: &Path, git_path: &Path) -> Option<PathBuf> {
 /// Joins `base` and `target` the way git does: absolute `target` replaces `base`
 /// outright, otherwise `target`'s components (including `..`) are applied on top
 /// of `base` without touching the filesystem.
-fn resolve_relative(base: &Path, target: &str) -> PathBuf {
+pub(crate) fn resolve_relative(base: &Path, target: &str) -> PathBuf {
     let target = Path::new(target);
     let mut result = if target.is_absolute() {
         PathBuf::new()

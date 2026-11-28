@@ -12,7 +12,7 @@ const LEGACY_INSTRUCTION: &str = ".opencode/skills/evolution/SKILL.md";
 
 /// `$XDG_CONFIG_HOME/opencode` when `XDG_CONFIG_HOME` is an absolute, nonempty path;
 /// otherwise `$HOME/.config/opencode` (`$USERPROFILE` if `$HOME` is unset).
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     if let Some(dir) = common::env_dir("XDG_CONFIG_HOME").filter(|path| path.is_absolute()) {
         return Ok(dir.join("opencode"));
     }
@@ -21,7 +21,7 @@ pub(super) fn global_dir() -> Result<PathBuf> {
         .context("set XDG_CONFIG_HOME or HOME")
 }
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".opencode")),
         Scope::Global => {
@@ -34,7 +34,11 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
     let mut config = load_config(&config_path)?;
     let mut command = vec![json!(bin)];
-    command.extend(common::server_args(db, scope.key()));
+    command.extend(common::server_args(
+        db,
+        scope.key(),
+        super::ClientKind::OpenCode,
+    ));
     let entry = json!({"type": "local", "command": command, "enabled": true});
     fs_safe::merge_server(&mut config, "mcp", entry, scope)?;
     if let Scope::Project { .. } = scope {
@@ -95,7 +99,7 @@ fn load_config(path: &Path) -> Result<Value> {
 /// strips our `mcp` server entry and permission grants from the config (config selection
 /// mirrors `changes`: `config_path` refuses an unsupported `opencode.jsonc` setup the
 /// same way it does when installing), and removes our trigger block from AGENTS.md.
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".opencode")),
         Scope::Global => {

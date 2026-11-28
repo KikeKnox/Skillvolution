@@ -5,6 +5,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com), except that
 each version heading is `## [vX.Y.Z]` with the date on the next line: the
 release tooling uses the heading as the GitHub release title.
 
+## [v0.7.0]
+
+_2026-11-27_
+
+Agents over MCP, a client registry with per-version capabilities, and local usage telemetry.
+The vault migrates from schema v6 to v9 on first use: run `skillvolution backup <path>` before
+upgrading (an older binary can't open it afterwards). Then rerun `skillvolution setup` (or
+`skillvolution doctor --fix`): existing MCP entries need the new `--client` argument for the
+agent tools, and the `evolution` v14 skill and the new `agent-evaluation` skill are installed.
+Until then, an OpenCode plugin from an earlier release calls the hooks without
+`--client opencode`: its catalog gets Claude Code's agents block and its events are recorded
+as Claude Code's.
+
+### Added
+
+- MCP tools `search_agents`, `install_agent`, `list_models` and `publish_agent`, and
+  `usage_report` (nine tools in all). None returns an agent's body. `install_agent` runs the
+  same code as `agents add` and can pin a model, which the file's marker records
+  (`:model=`) so `agents sync` keeps it. `publish_agent` needs an evaluator following the new
+  `agent-evaluation` skill, requires `tools`, and refuses an agent that can delegate.
+- `serve --client <token>`: setup writes it into every MCP entry so the server knows which
+  client it acts for (`doctor` flags an entry without it, `doctor --fix` adds it).
+- Managed skill `agent-evaluation` (hard gates and a 16-point rubric for a vault agent), and
+  `evolution` v14: the MCP agent flow (search, install, delegate, report), when to use
+  `usage_report`, and the review reminders mention `agent-evaluation` and `publish_agent`.
+- Client registry (`src/clients/`): one spec per client, with version ranges and capabilities
+  (OpenCode 1.x and 2.x differ in the delegation tool, plugin export, per-call models and hot
+  reload). `<cli> --version` is run only by `setup` and `doctor`, stored in `client_versions`
+  (schema v7); `doctor` warns when it changed since setup or is newer than the last tested
+  version, and hooks only read the stored value.
+- Local usage telemetry (`events` table, schema v8): searches, suggestions, loads, outcomes,
+  publishes and rejections, delegations, reminders, agent installs, updates, removals and
+  promotions, MCP and hook errors, with the client and its version. Queries are truncated and
+  credential-filtered, and no prompt text, file contents or absolute paths are stored. Rows are
+  kept 180 days (pruned at most once a day), never exported, never sent anywhere.
+  `skillvolution telemetry summary|events [--since D] [--json]` and the `usage_report` tool read it.
+- `agents models add|remove|enable|disable CLIENT TIER MODEL` over ranked `client_models`
+  (schema v9, replacing `agent_models`; existing rows become priority 0). File generation takes
+  the best enabled model of the tier. `set` and `unset` keep working; a model with an unknown
+  provider is listed as such.
+- Session start for Claude Code and OpenCode: the catalog gets an agents block (installed agents,
+  then vault agents not installed), except in subagent sessions; managed agent files behind the
+  vault are refreshed (never hand-edited ones, nor an update that `sync` flags for a tier change,
+  added skills or widened tools: the catalog lists it as needing review); and an agent used in most projects is promoted to
+  a per-user install once a day, with its managed project copies retired. `agents promotion`
+  shows and sets the thresholds (default: 30 days, 75% of active projects, more than 5 projects,
+  3 delegations each); `doctor` reports candidates and promotes them with `--fix`.
+- `publish_rejected` events are also recorded for refused `publish_skill` calls.
+- `hook delegation` and `hook reminder`: the OpenCode plugin records its delegations and fired
+  review reminders through them, so OpenCode delegations count toward promotion.
+
+### Changed
+
+- Agent files written inside a project are kept out of git through anchored lines in
+  `.git/info/exclude` (the common git directory in a worktree), and `agents remove` takes them
+  back out. This applies to `agents add/remove/sync` too, so those commands now edit that file.
+- `publish_agent` counts as a review for the Stop hook and the OpenCode plugin, and the review
+  reminder names `agent-evaluation` and `publish_agent`.
+- `hook session-start --client` and `hook prompt --client` accept `opencode`, which the
+  plugin now passes, so OpenCode's catalog and `suggest` events are its own.
+- Generated agent files always deny delegation (Claude Code `disallowedTools: Agent, Task`,
+  OpenCode `task: deny`), not only when the agent declares `tools`; files regenerate on the next
+  sync or session start.
+
 ## [v0.6.1]
 
 _2026-11-27_

@@ -31,14 +31,14 @@ use std::path::{Path, PathBuf};
 
 /// `~/.gemini`, computed from `$GEMINI_CLI_HOME` when set (it substitutes for the home
 /// directory, not for the whole config dir — see the module doc comment), else `$HOME`.
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     common::env_dir("GEMINI_CLI_HOME")
         .or_else(common::home)
         .map(|home| home.join(".gemini"))
         .context("set HOME")
 }
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".gemini")),
         Scope::Global => {
@@ -50,7 +50,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
     let settings_path = dir.join("settings.json");
     let mut settings = fs_safe::load_json(&settings_path)?;
-    let entry = json!({"command": bin, "args": common::server_args(db, scope.key())});
+    let entry = json!({"command": bin, "args": common::server_args(db, scope.key(), super::ClientKind::Gemini)});
     fs_safe::merge_server(&mut settings, "mcpServers", entry, scope)?;
     default_trust(&mut settings);
     merge_hooks(&mut settings, bin, db, scope.key())?;
@@ -63,7 +63,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     Ok(changes)
 }
 
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".gemini")),
         Scope::Global => {
@@ -90,8 +90,9 @@ pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit
 
 /// Sets `mcpServers.skillvolution.trust: true` unless the entry already has a `trust`
 /// value: the only way Gemini's config exposes to skip the tool-confirmation prompt for
-/// just our server's tools (search_skills/get_skill/report_skill_outcome/publish_skill),
-/// without touching any other server or granting the broader `trust` any server can set.
+/// just our server's tools (every tool in `mcp::tools()`: the skill tools, `usage_report`
+/// and the agent tools), without touching any other server or granting the broader
+/// `trust` any server can set.
 /// Only sets it when absent, like `merge_opencode`'s permission grants, so a user who
 /// explicitly turned it off (`trust: false`) keeps that choice across global reruns (a
 /// project entry is always recreated by `merge_server`, so it always gets `true`).
@@ -115,13 +116,17 @@ fn default_trust(settings: &mut Value) {
 ///
 /// Every flag-tracked hook here passes `--client gemini` explicitly, unlike Devin's
 /// `tool-use`/reuses of the default: `HookEvent::ToolUse`'s `--client` defaults to Devin
-/// (see `main.rs`), so omitting it here would read `DEVIN_WORK_TOOLS` instead of
-/// `GEMINI_WORK_TOOLS`.
+/// (see `main.rs`), so omitting it here would read Devin's work tools instead of
+/// Gemini's.
 fn merge_hooks(settings: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> Result<()> {
     let session_start_extra = format!(" --client gemini{}", hooks::project_flag(key));
     let after_tool_matcher = format!(
         "^({}|mcp_skillvolution_.*)$",
-        crate::hook::GEMINI_WORK_TOOLS.join("|")
+        crate::clients::ClientKind::Gemini
+            .spec()
+            .hooks
+            .work_tools
+            .join("|")
     );
     let entries = [
         (

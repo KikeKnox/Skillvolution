@@ -1,39 +1,41 @@
-use crate::vault::{SkillMetadata, Vault};
+use crate::{
+    agent_session,
+    agents::Target,
+    clients::{ClientKind, HookSpec},
+    vault::{Event, SkillMetadata, Vault},
+};
 use anyhow::Result;
 use serde_json::Value;
+use serde_json::json;
 use std::{
     borrow::Cow,
     collections::HashSet,
     fmt::Write as _,
     fs::File,
     io::{Read, Seek, SeekFrom},
+    path::Path,
 };
 
 const CATALOG_LIMIT: i64 = 30;
-pub const WORK_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
-const REVIEW_TOOLS: [&str; 2] = ["publish_skill", "report_skill_outcome"];
+const REVIEW_TOOLS: [&str; 3] = ["publish_skill", "publish_agent", "report_skill_outcome"];
 // Loading a skill is work too: whoever applied it owes an outcome report. Matched by
 // suffix, like the review tools, since each client prefixes MCP tool names its own way.
 const LOAD_TOOL: &str = "get_skill";
-// Devin tool names are lowercase and its hook payloads carry no transcript path,
-// so the same worked/reviewed judgment is kept as per-session flags instead.
-pub const DEVIN_WORK_TOOLS: &[&str] = &["write", "edit", "apply_patch", "notebook_edit"];
-// The file-editing tool names of the other flag-tracked clients, as their
-// PostToolUse-style hook payloads report them in `tool_name`.
-pub const CODEX_WORK_TOOLS: &[&str] = &["apply_patch"];
-pub const GEMINI_WORK_TOOLS: &[&str] = &["write_file", "replace"];
-// Cursor's documented native tools are Shell, Read, Write, Grep, Delete, and Task; file
-// edits (not just whole-file writes) go through the same "Write" tool, with no separate
-// "Edit"/"MultiEdit" name. https://cursor.com/docs/hooks
-pub const CURSOR_WORK_TOOLS: &[&str] = &["Write"];
+// Each client's file-editing tool names, from its `HookSpec` in the registry
+// (`src/clients/`), which also holds its delegation tools.
+pub const WORK_TOOLS: &[&str] = ClientKind::ClaudeCode.spec().hooks.work_tools;
+pub const DEVIN_WORK_TOOLS: &[&str] = ClientKind::Devin.spec().hooks.work_tools;
+pub const CODEX_WORK_TOOLS: &[&str] = ClientKind::Codex.spec().hooks.work_tools;
+pub const GEMINI_WORK_TOOLS: &[&str] = ClientKind::Gemini.spec().hooks.work_tools;
+pub const CURSOR_WORK_TOOLS: &[&str] = ClientKind::Cursor.spec().hooks.work_tools;
 
 // Keep in sync with REVIEW_REMINDER in assets/opencode/skillvolution.js (a test in
 // setup/plugin.rs checks it).
 pub const STOP_REASON: &str = "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. \
 Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) \
 (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, \
-dispatch a fresh subagent that follows the skill-evaluation skill now \
-— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. \
+dispatch a fresh subagent that follows the skill-evaluation skill now (agent-evaluation for an agent) \
+— do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill (publish_agent for an agent) with the verdict and its reason. \
 If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 /// Prompt retrieval limits: at most `PROMPT_TERMS` keywords of at most
@@ -509,13 +511,69 @@ pub fn relevant_skills(
 /// the `prompt` field of `input` (the field Claude Code, Codex, Devin, and Gemini CLI
 /// all use), or `None` when nothing is relevant, so the client adds nothing.
 pub fn prompt(vault: &Vault, project: Option<&str>, input: &str) -> Result<Option<String>> {
+    Ok(suggest(vault, project, input)?.text)
+}
+
+/// `prompt`, recording a `suggest` event (the ids and scores suggested, never the
+/// prompt) for the `client` that emitted it. A prompt with enough keywords to be searched
+/// but no match records an empty list: what goes unmatched is the signal.
+pub fn prompt_recorded(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<Option<String>> {
+    let suggestion = suggest(vault, project, input)?;
+    if suggestion.searched {
+        let session = serde_json::from_str::<Value>(input)
+            .ok()
+            .and_then(|input| session_of(&input).map(str::to_owned));
+        vault.log_event(
+            Event::new("suggest")
+                .client(Some(client))
+                .project(project)
+                .session(session.as_deref())
+                .data(json!({
+                    "suggested": suggestion.skills
+                        .iter()
+                        .map(|skill| json!({
+                            "id": skill.id,
+                            "version": skill.version,
+                            "score": skill.score,
+                        }))
+                        .collect::<Vec<_>>(),
+                })),
+        );
+    }
+    Ok(suggestion.text)
+}
+
+/// What the prompt hook found for a prompt.
+struct Suggestion {
+    /// The context to inject; `None` when nothing is relevant.
+    text: Option<String>,
+    skills: Vec<SkillMetadata>,
+    /// Whether the prompt had enough keywords to be searched at all.
+    searched: bool,
+}
+
+fn suggest(vault: &Vault, project: Option<&str>, input: &str) -> Result<Suggestion> {
     let input: Value = serde_json::from_str(input)?;
     let Some(prompt) = input["prompt"].as_str() else {
-        return Ok(None);
+        return Ok(Suggestion {
+            text: None,
+            skills: Vec::new(),
+            searched: false,
+        });
     };
+    let searched = keywords(prompt).len() >= MIN_PROMPT_TERMS;
     let skills = relevant_skills(vault, project, prompt)?;
     if skills.is_empty() {
-        return Ok(None);
+        return Ok(Suggestion {
+            text: None,
+            skills,
+            searched,
+        });
     }
     let mut text = String::from("Skillvolution: vault skills matching this request:\n");
     for skill in &skills {
@@ -530,10 +588,68 @@ pub fn prompt(vault: &Vault, project: Option<&str>, input: &str) -> Result<Optio
          which vault skill you are applying (id and version), or that none fits. After \
          applying it, call report_skill_outcome.",
     );
-    Ok(Some(text))
+    Ok(Suggestion {
+        text: Some(text),
+        skills,
+        searched,
+    })
 }
 
 pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
+    Ok(catalog(vault, project)?.0)
+}
+
+/// `session_start` for the `client` that emitted it, after the session-start agent
+/// upkeep for `project_dir` (`agent_session::upkeep`): with the agents block when the
+/// client has subagents, and recording a `session_start` event (the catalog size). An
+/// upkeep or agents-block failure is reported like a hook error and the skills catalog
+/// is still returned. A `subagent` session (one a vault agent may be running in) gets
+/// the skills catalog only: no agents block, which would invite it to delegate, and no
+/// upkeep, which its parent session already ran.
+pub fn session_start_recorded(
+    vault: &Vault,
+    project: Option<&str>,
+    project_dir: Option<&Path>,
+    client: ClientKind,
+    subagent: bool,
+) -> Result<String> {
+    let mut report =
+        |error: anyhow::Error| report_hook_error(vault, "session-start", client, &error);
+    let refreshed = if subagent {
+        crate::agents::Refresh::default()
+    } else {
+        agent_session::upkeep(vault, project, project_dir, &mut report)
+    };
+    let (mut text, visible) = catalog(vault, project)?;
+    if let Some(target) = Target::from_kind(client).filter(|_| !subagent) {
+        match agent_session::catalog_block(vault, project, project_dir, target, &refreshed) {
+            Ok(Some(block)) => text.push_str(&block),
+            Ok(None) => {}
+            Err(error) => report(error),
+        }
+    }
+    vault.log_event(
+        Event::new("session_start")
+            .client(Some(client))
+            .project(project)
+            .data(json!({"catalog": visible})),
+    );
+    Ok(text)
+}
+
+/// Reports a failure that must not fail the hook: on stderr and as a `hook_error` event
+/// (hook and error class, never the message), like a hook that failed outright.
+fn report_hook_error(vault: &Vault, hook: &str, client: ClientKind, error: &anyhow::Error) {
+    eprintln!("skillvolution hook: {error:#}");
+    vault.log_event(
+        Event::new("hook_error")
+            .client(Some(client))
+            .data(json!({"hook": hook, "class": crate::vault::error_class(error)})),
+    );
+}
+
+/// The session-start context and how many skills are visible to `project`.
+fn catalog(vault: &Vault, project: Option<&str>) -> Result<(String, i64)> {
     let page = vault.search("", project, CATALOG_LIMIT, 0)?;
     let mut text = String::from(
         "Skillvolution vault (shared procedural memory). Before any non-trivial task, follow \
@@ -545,7 +661,7 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
     );
     if page.skills.is_empty() {
         text.push_str("No published skills are visible to this project yet.\n");
-        return Ok(text);
+        return Ok((text, 0));
     }
     writeln!(text, "Published skills ({} visible):", page.total)?;
     for skill in &page.skills {
@@ -567,17 +683,44 @@ pub fn session_start(vault: &Vault, project: Option<&str>) -> Result<String> {
             page.total - shown
         )?;
     }
-    Ok(text)
+    Ok((text, page.total))
 }
 
-/// Returns a reason to block the stop when the transcript shows work not
-/// followed by an outcome report or proposal. Each transcript span is judged
-/// once, and a stop already continued by this hook is never blocked.
+/// Claude Code Stop: `transcript_stop` with Claude Code's work and delegation tools.
 pub fn stop(
     vault: &Vault,
     input: &str,
     project: Option<&str>,
     agent_dirs: &[std::path::PathBuf],
+) -> Result<Option<Cow<'static, str>>> {
+    let hooks = &ClientKind::ClaudeCode.spec().hooks;
+    transcript_stop(vault, input, project, agent_dirs, hooks)
+}
+
+/// Returns a reason to block the stop when the transcript shows work not
+/// followed by an outcome report or proposal, judged with the work and delegation
+/// tools of `hooks` (the spec of the client that wrote the transcript). Each
+/// transcript span is judged once, and a stop already continued by this hook is
+/// never blocked.
+pub fn transcript_stop(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    agent_dirs: &[std::path::PathBuf],
+    hooks: &HookSpec,
+) -> Result<Option<Cow<'static, str>>> {
+    transcript_stop_as(vault, input, project, agent_dirs, hooks, None)
+}
+
+/// `transcript_stop`, recording `delegation` and `review_reminder` events for the
+/// `client` that wrote the transcript (`None` records none, for callers without one).
+pub fn transcript_stop_as(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    agent_dirs: &[std::path::PathBuf],
+    hooks: &HookSpec,
+    client: Option<ClientKind>,
 ) -> Result<Option<Cow<'static, str>>> {
     let input: Value = serde_json::from_str(input)?;
     let stop_hook_active = input["stop_hook_active"].as_bool() == Some(true);
@@ -605,10 +748,28 @@ pub fn stop(
     // (e.g. a report_skill_outcome call) get re-read on the next real stop,
     // mixed in with new unreviewed work, and mask it as already reviewed.
     vault.set_transcript_offset(session, offset + complete as u64)?;
+    let scan = scan_span(&bytes[..complete], hooks);
+    if client.is_some() {
+        for (agent, model) in &scan.delegations {
+            record_delegation(
+                vault,
+                project,
+                client,
+                Some(session),
+                agent,
+                model.as_deref(),
+            );
+        }
+    }
     if stop_hook_active {
+        // We reminded and the agent continued: the reminder was ignored unless the
+        // span since shows a review.
+        if client.is_some() && !scan.reviewed {
+            log_reminder(vault, client, project, Some(session), "ignored");
+        }
         return Ok(None);
     }
-    let Some(delegated) = has_unreviewed_work(&bytes[..complete], |id| {
+    let Some(delegated) = has_unreviewed_work(&bytes[..complete], hooks, |id| {
         if !matches!(vault.get(id, None, project), Ok(view) if view.kind == "agent") {
             return None;
         }
@@ -616,7 +777,157 @@ pub fn stop(
     }) else {
         return Ok(None);
     };
+    if client.is_some() {
+        log_reminder(vault, client, project, Some(session), "fired");
+    }
     Ok(Some(reason_with_delegations(&delegated)))
+}
+
+fn log_reminder(
+    vault: &Vault,
+    client: Option<ClientKind>,
+    project: Option<&str>,
+    session: Option<&str>,
+    state: &str,
+) {
+    vault.log_event(
+        Event::new("review_reminder")
+            .client(client)
+            .project(project)
+            .session(session)
+            .data(json!({"state": state})),
+    );
+}
+
+/// A `delegation` event: which agent, whether it is a built-in or a vault agent
+/// (anything else is the client's own), its tier when it has one, and the model when
+/// the tool call named it.
+fn record_delegation(
+    vault: &Vault,
+    project: Option<&str>,
+    client: Option<ClientKind>,
+    session: Option<&str>,
+    agent: &str,
+    model: Option<&str>,
+) {
+    let (source, tier, version) = if let Some(builtin) = crate::agents::builtin(agent) {
+        ("builtin", Some(builtin.meta.tier), None)
+    } else {
+        match vault.get(agent, None, project) {
+            Ok(view) if view.kind == "agent" => {
+                ("vault", view.meta.map(|meta| meta.tier), Some(view.version))
+            }
+            _ => ("other", None, None),
+        }
+    };
+    vault.log_event(
+        Event::new("delegation")
+            .client(client)
+            .project(project)
+            .session(session)
+            .subject(agent, version)
+            .data(json!({"source": source, "level": tier, "model": model})),
+    );
+}
+
+/// A delegation a client's plugin saw (the OpenCode plugin's `hook delegation`):
+/// `{"agent": id, "model"?: model, "session"?: id}` in `input`, recorded as a
+/// `delegation` event exactly like the ones the Claude Code Stop hook records.
+pub fn plugin_delegation(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<()> {
+    let input: Value = serde_json::from_str(input)?;
+    let agent = input["agent"]
+        .as_str()
+        .filter(|agent| !agent.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("delegation input needs an `agent` string"))?;
+    record_delegation(
+        vault,
+        project,
+        Some(client),
+        input["session"].as_str(),
+        agent,
+        input["model"].as_str(),
+    );
+    Ok(())
+}
+
+/// A review reminder a client's plugin added (the OpenCode plugin's `hook reminder`):
+/// `{"session"?: id}` in `input`, recorded as a `fired` `review_reminder` event.
+pub fn plugin_reminder(
+    vault: &Vault,
+    project: Option<&str>,
+    input: &str,
+    client: ClientKind,
+) -> Result<()> {
+    let input: Value = serde_json::from_str(input)?;
+    log_reminder(
+        vault,
+        Some(client),
+        project,
+        input["session"].as_str(),
+        "fired",
+    );
+    Ok(())
+}
+
+/// What one transcript span shows, for telemetry.
+struct SpanScan {
+    /// Successful delegations (agent, model named in the call), in order.
+    delegations: Vec<(String, Option<String>)>,
+    /// Whether a review tool call succeeded in the span.
+    reviewed: bool,
+}
+
+fn scan_span(span: &[u8], hooks: &HookSpec) -> SpanScan {
+    // (tool_use id, delegation (agent, model) if it is one, whether it is a review)
+    type Call = (String, Option<(String, Option<String>)>, bool);
+    let mut calls: Vec<Call> = Vec::new();
+    let mut failed = HashSet::new();
+    for line in span.split(|b| *b == b'\n') {
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        visit_objects(&entry, &mut |object| match object["type"].as_str() {
+            Some("tool_use") => {
+                let name = object["name"].as_str().unwrap_or_default();
+                let id = object["id"].as_str().unwrap_or_default().to_owned();
+                let delegation = hooks
+                    .delegation_tools
+                    .iter()
+                    .find(|delegation| delegation.tool == name)
+                    .and_then(|delegation| object["input"][delegation.agent_field].as_str())
+                    .map(|agent| {
+                        (
+                            agent.to_owned(),
+                            object["input"]["model"].as_str().map(str::to_owned),
+                        )
+                    });
+                calls.push((id, delegation, is_review_tool(name)));
+            }
+            Some("tool_result") if object["is_error"].as_bool() == Some(true) => {
+                if let Some(id) = object["tool_use_id"].as_str() {
+                    failed.insert(id.to_owned());
+                }
+            }
+            _ => {}
+        });
+    }
+    let mut scan = SpanScan {
+        delegations: Vec::new(),
+        reviewed: false,
+    };
+    for (id, delegation, review) in calls {
+        if failed.contains(&id) {
+            continue;
+        }
+        scan.reviewed |= review;
+        scan.delegations.extend(delegation);
+    }
+    scan
 }
 
 /// `STOP_REASON`, followed by a line naming the vault agents delegated to (so the
@@ -636,15 +947,17 @@ fn reason_with_delegations(delegated: &[(String, i64)]) -> Cow<'static, str> {
 }
 
 /// Whether the transcript lines in `span` contain a work tool call after the
-/// last review tool call. Work is a file edit, a skill load (`get_skill`) or a
-/// delegation (`Agent`/`Task`) to a vault agent that has a generated file
-/// (`is_vault_agent`), whose outcome is owed. A review or load whose tool_result is an error (a rejected
-/// publish, an unknown skill id) did nothing, so it does not count.
+/// last review tool call. Work is a file edit (one of `hooks.work_tools`), a skill
+/// load (`get_skill`) or a delegation (one of `hooks.delegation_tools`) to a vault
+/// agent that has a generated file (`vault_agent_version`), whose outcome is owed.
+/// A review or load whose tool_result is an error (a rejected publish, an unknown
+/// skill id) did nothing, so it does not count.
 ///
 /// `None` when nothing is owed; otherwise the vault agents (id, installed version, in
 /// order of first delegation) delegated to since the last review.
 fn has_unreviewed_work(
     span: &[u8],
+    hooks: &HookSpec,
     vault_agent_version: impl Fn(&str) -> Option<i64>,
 ) -> Option<Vec<(String, i64)>> {
     let mut position = 0;
@@ -662,13 +975,15 @@ fn has_unreviewed_work(
                 position += 1;
                 let name = object["name"].as_str().unwrap_or_default();
                 let id = object["id"].as_str().unwrap_or_default();
-                if WORK_TOOLS.contains(&name) {
+                if hooks.work_tools.contains(&name) {
                     last_edit = Some(position);
                 } else if is_load_tool(name) {
                     loads.push((position, id.to_owned()));
-                } else if let Some((agent, version)) = matches!(name, "Agent" | "Task")
-                    .then(|| object["input"]["subagent_type"].as_str())
-                    .flatten()
+                } else if let Some((agent, version)) = hooks
+                    .delegation_tools
+                    .iter()
+                    .find(|delegation| delegation.tool == name)
+                    .and_then(|delegation| object["input"][delegation.agent_field].as_str())
                     .and_then(|agent| Some((agent, vault_agent_version(agent)?)))
                 {
                     loads.push((position, id.to_owned()));
@@ -772,15 +1087,37 @@ pub fn tool_use(vault: &Vault, input: &str, work_tools: &[&str]) -> Result<()> {
 /// blocked and leaves the flags alone.
 /// The same judgment serves every flag-tracked client.
 pub fn devin_stop(vault: &Vault, input: &str) -> Result<Option<&'static str>> {
+    devin_stop_as(vault, input, None, None)
+}
+
+/// `devin_stop`, recording `review_reminder` events for the `client` (`None` records
+/// none).
+pub fn devin_stop_as(
+    vault: &Vault,
+    input: &str,
+    project: Option<&str>,
+    client: Option<ClientKind>,
+) -> Result<Option<&'static str>> {
     let input: Value = serde_json::from_str(input)?;
+    let session = session_of(&input);
     if input["stop_hook_active"].as_bool() == Some(true) {
+        // We reminded and the agent continued: ignored unless it reviewed since.
+        if let (Some(session), Some(_)) = (session, client)
+            && !vault.peek_devin_hook_state(session)?.1
+        {
+            log_reminder(vault, client, project, Some(session), "ignored");
+        }
         return Ok(None);
     }
-    let Some(session) = session_of(&input) else {
+    let Some(session) = session else {
         return Ok(None);
     };
     let (worked, reviewed) = vault.take_devin_hook_state(session)?;
-    Ok((worked && !reviewed).then_some(STOP_REASON))
+    let reminder = (worked && !reviewed).then_some(STOP_REASON);
+    if reminder.is_some() && client.is_some() {
+        log_reminder(vault, client, project, Some(session), "fired");
+    }
+    Ok(reminder)
 }
 
 /// Devin SessionEnd: drops the session's flag row so the table does not grow

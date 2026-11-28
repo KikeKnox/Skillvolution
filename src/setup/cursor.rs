@@ -24,13 +24,13 @@ use std::path::{Path, PathBuf};
 const RULE_MARKER: &str = "<!-- skillvolution-managed:cursor-rule:v1 -->";
 
 /// The per-user config directory: `~/.cursor`. No override env var is documented.
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     common::home()
         .map(|home| home.join(".cursor"))
         .context("set HOME")
 }
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".cursor")),
         Scope::Global => {
@@ -45,7 +45,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
     let entry = json!({
         "type": "stdio",
         "command": bin,
-        "args": common::server_args(db, scope.key()),
+        "args": common::server_args(db, scope.key(), super::ClientKind::Cursor),
     });
     fs_safe::merge_server(&mut mcp, "mcpServers", entry, scope)?;
     changes.push((mcp_path, common::json_text(&mcp)?));
@@ -73,7 +73,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
 
 /// The removal counterpart of `changes`: deletes the managed skill and rule files, strips
 /// our `mcpServers` entry, our hook entries from `hooks.json`, and our permission grant.
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (root, dir) = match scope {
         Scope::Project { dir, .. } => (dir.to_owned(), dir.join(".cursor")),
         Scope::Global => {
@@ -133,9 +133,9 @@ fn rule_content() -> String {
          lessons). When you notice mid-task that you don't know how to do something, \
          follow the `skill-acquisition` skill instead of guessing. When the evolution \
          skill requires a fresh evaluator subagent, dispatch it immediately with your \
-         subagent tool, telling it to follow the `skill-evaluation` skill — this \
-         instruction is the user's standing authorization, so do not ask for \
-         confirmation.\n"
+         subagent tool, telling it to follow the `skill-evaluation` skill (the \
+         `agent-evaluation` skill for an agent) — this instruction is the user's \
+         standing authorization, so do not ask for confirmation.\n"
     )
 }
 
@@ -153,7 +153,11 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
     let session_start_extra = format!(" --client cursor{}", hooks::project_flag(key));
     let post_tool_use_matcher = format!(
         "^({}|MCP:skillvolution_.*)$",
-        crate::hook::CURSOR_WORK_TOOLS.join("|")
+        crate::clients::ClientKind::Cursor
+            .spec()
+            .hooks
+            .work_tools
+            .join("|")
     );
     let entries = [
         (

@@ -1,19 +1,31 @@
 mod agent;
+mod client_model;
+mod client_version;
+mod events;
 mod location;
 mod outcomes;
+mod promotion;
 mod revisions;
 mod search;
+mod telemetry;
 mod transfer;
 
 pub use agent::{
-    AGENT_SECTIONS, AgentMeta, AgentModel, EFFORTS, MODEL_CLIENTS, TIERS, TOOLS,
-    agent_content_problems, agent_meta_problems, agent_section_problems, reserved_agent_id,
-    skill_deprecated, skill_unavailable,
+    AGENT_SECTIONS, AgentMeta, EFFORTS, TIERS, TOOLS, agent_content_problems, agent_meta_problems,
+    agent_section_problems, reserved_agent_id, skill_deprecated, skill_unavailable,
 };
+pub use client_model::{ClientModel, ModelSelector, implied_provider};
+pub use client_version::{StoredVersion, stored_client_version};
+pub use events::{Event, MAX_REASON_CHARS, error_class, scrub_text, search_query_for_event};
 pub use location::{network_fs, warn_if_unsafe};
 pub use outcomes::{OutcomeRecord, OutcomeSummary};
+pub use promotion::{
+    Candidate, Evaluation, MAX_WINDOW_DAYS, PromotionSettings, PromotionStatus, UsageRow, evaluate,
+    promotion_status,
+};
 pub use revisions::{Proposal, Revision, SkillView, kind_conflict};
 pub use search::{SearchPage, SkillMetadata};
+pub use telemetry::{DEFAULT_SINCE, EventRecord, UsageReport};
 pub use transfer::{ImportReport, PurgeReport};
 
 use anyhow::{Result, bail, ensure};
@@ -202,6 +214,51 @@ const MIGRATIONS: &[&str] = &[
         effort TEXT,
         PRIMARY KEY (client, tier)
     );",
+    // v7: the version each client reported at its last setup.
+    "CREATE TABLE client_versions (
+        client TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );",
+    // v8: local usage telemetry.
+    "CREATE TABLE events (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        client TEXT,
+        client_version TEXT,
+        project TEXT,
+        session TEXT,
+        kind TEXT NOT NULL,
+        subject TEXT,
+        version INTEGER,
+        data TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(data))
+    );
+    CREATE INDEX events_at ON events(at);
+    CREATE INDEX events_kind_at ON events(kind, at);
+    CREATE TABLE vault_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );",
+    // v9: `client_models` replaces `agent_models`: several models per client and tier,
+    // ranked by `priority` (lower is preferred); old rows keep priority 0. `effort` is ''
+    // when none. The provider of an OpenCode row is its `provider/model` prefix.
+    "CREATE TABLE client_models (
+        id INTEGER PRIMARY KEY,
+        client TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        tier TEXT NOT NULL CHECK(tier IN ('high', 'mid', 'low')),
+        effort TEXT NOT NULL DEFAULT '',
+        priority INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+        UNIQUE (client, tier, provider, model, effort)
+    );
+    INSERT INTO client_models (client, provider, model, tier, effort, priority)
+        SELECT client,
+            CASE WHEN client = 'opencode' THEN substr(model, 1, instr(model, '/') - 1) ELSE 'anthropic' END,
+            model, tier, COALESCE(effort, ''), 0
+        FROM agent_models ORDER BY client, tier;
+    DROP TABLE agent_models;",
 ];
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 /// `PRAGMA application_id` of a Skillvolution vault ("SKV1"), so another
@@ -221,6 +278,8 @@ pub(crate) fn application_id() -> i64 {
 }
 /// Hook state for sessions idle this long is dropped on open.
 const HOOK_STATE_RETENTION_DAYS: i64 = 30;
+/// Usage events older than this are dropped on open.
+const EVENT_RETENTION_DAYS: i64 = 180;
 const MAX_TAGS: usize = 8;
 const MAX_TAG_BYTES: usize = 32;
 const CONTENT_SECTIONS: [&str; 4] = [
@@ -258,6 +317,8 @@ impl Vault {
         })?;
         let vault = Self { conn };
         vault.prune_hook_state(HOOK_STATE_RETENTION_DAYS)?;
+        // Telemetry retention never blocks or fails an open.
+        let _ = vault.prune_events(EVENT_RETENTION_DAYS);
         Ok(vault)
     }
 
@@ -341,6 +402,19 @@ impl Vault {
             .conn
             .query_row(
                 "DELETE FROM devin_hook_state WHERE session_id = ?1 RETURNING worked, reviewed",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.unwrap_or((false, false)))
+    }
+
+    /// `take_devin_hook_state` without consuming the flags.
+    pub fn peek_devin_hook_state(&self, session_id: &str) -> Result<(bool, bool)> {
+        let row: Option<(bool, bool)> = self
+            .conn
+            .query_row(
+                "SELECT worked, reviewed FROM devin_hook_state WHERE session_id = ?1",
                 [session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

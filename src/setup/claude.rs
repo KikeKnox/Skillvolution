@@ -17,13 +17,13 @@ const LEGACY_END: &str = "<!-- skillvolution:evolution:end -->";
 
 /// `$CLAUDE_CONFIG_DIR` when set and nonempty, else `$HOME/.claude` (`$USERPROFILE` if
 /// `$HOME` is unset).
-pub(super) fn global_dir() -> Result<PathBuf> {
+pub(crate) fn global_dir() -> Result<PathBuf> {
     common::env_dir("CLAUDE_CONFIG_DIR")
         .or_else(|| common::home().map(|home| home.join(".claude")))
         .context("set CLAUDE_CONFIG_DIR or HOME")
 }
 
-pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
+pub(crate) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>> {
     let (dir, settings_name) = match scope {
         Scope::Project { dir, .. } => (dir.join(".claude"), "settings.local.json"),
         Scope::Global => (global_dir()?, "settings.json"),
@@ -36,7 +36,7 @@ pub(super) fn changes(scope: Scope, bin: &Path, db: &Path) -> Result<Vec<Change>
         let entry = json!({
             "type": "stdio",
             "command": bin,
-            "args": common::server_args(db, Some(key)),
+            "args": common::server_args(db, Some(key), super::ClientKind::ClaudeCode),
         });
         fs_safe::merge_server(&mut config, "mcpServers", entry, scope)?;
         changes.push((path, common::json_text(&config)?));
@@ -81,7 +81,7 @@ fn merge_hooks(config: &mut Value, bin: &Path, db: &Path, key: Option<&str>) -> 
 /// removes the `.mcp.json` server entry. The global MCP registration itself has no file
 /// to edit here; it's removed separately, via the `claude` CLI (see `unregister_mcp`),
 /// only after every edit `write_all` returns has already succeeded.
-pub(super) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
+pub(crate) fn removals(scope: Scope, notes: &mut Vec<String>) -> Result<Vec<Edit>> {
     let (dir, settings_name) = match scope {
         Scope::Project { dir, .. } => (dir.join(".claude"), "settings.local.json"),
         Scope::Global => (global_dir()?, "settings.json"),

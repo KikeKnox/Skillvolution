@@ -29,6 +29,16 @@ pub struct OutcomeSummary {
     pub unreported: i64,
 }
 
+/// SQL condition on a `loads` row aliased `l`: no outcome was reported for that revision
+/// from the same project on the same UTC day. Shared by `outcomes --unreported` and the
+/// telemetry summary so both count "loaded without report" the same way.
+pub(super) const UNREPORTED_LOAD: &str = "NOT EXISTS (
+    SELECT 1 FROM outcomes o
+    WHERE o.id = l.id AND o.version = l.version
+      AND COALESCE(o.project, '') = COALESCE(l.project, '')
+      AND substr(o.created_at, 1, 10) = substr(l.created_at, 1, 10)
+)";
+
 impl Vault {
     /// Records that `get_skill` returned `id` v`version` to `project`, at most
     /// once per revision, project and UTC day (later loads that day are
@@ -92,24 +102,19 @@ impl Vault {
         failing_only: bool,
         unreported_only: bool,
     ) -> Result<Vec<OutcomeSummary>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT id, version, scope, helped, failed, not_applicable, loaded, unreported FROM (
                  SELECT c.id, c.version, c.scope, c.helped, c.failed, c.not_applicable,
                      (SELECT COUNT(*) FROM loads l
                       WHERE l.id = c.id AND l.version = c.version) AS loaded,
                      (SELECT COUNT(*) FROM loads l
                       WHERE l.id = c.id AND l.version = c.version
-                        AND NOT EXISTS (
-                            SELECT 1 FROM outcomes o
-                            WHERE o.id = l.id AND o.version = l.version
-                              AND COALESCE(o.project, '') = COALESCE(l.project, '')
-                              AND substr(o.created_at, 1, 10) = substr(l.created_at, 1, 10)
-                        )) AS unreported
+                        AND {UNREPORTED_LOAD}) AS unreported
                  FROM current_skills c
              )
              WHERE (?1 = 0 OR failed > 0) AND (?2 = 0 OR unreported > 0)
-             ORDER BY failed DESC, helped DESC, id",
-        )?;
+             ORDER BY failed DESC, helped DESC, id"
+        ))?;
         Ok(statement
             .query_map(params![failing_only, unreported_only], |row| {
                 Ok(OutcomeSummary {

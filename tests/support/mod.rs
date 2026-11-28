@@ -244,3 +244,43 @@ impl Draft {
         self.propose(vault).version
     }
 }
+
+/// A recorded usage event, read straight from the `events` table.
+#[derive(Debug)]
+pub struct StoredEvent {
+    pub client: Option<String>,
+    pub client_version: Option<String>,
+    pub project: Option<String>,
+    pub session: Option<String>,
+    pub kind: String,
+    pub subject: Option<String>,
+    pub version: Option<i64>,
+    pub data: serde_json::Value,
+}
+
+/// The events of `kind` (every kind when `None`) in `db`, oldest first.
+pub fn events(db: &Path, kind: Option<&str>) -> Vec<StoredEvent> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT client, client_version, project, session, kind, subject, version, data
+             FROM events WHERE ?1 IS NULL OR kind = ?1 ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([kind], |row| {
+            Ok(StoredEvent {
+                client: row.get(0)?,
+                client_version: row.get(1)?,
+                project: row.get(2)?,
+                session: row.get(3)?,
+                kind: row.get(4)?,
+                subject: row.get(5)?,
+                version: row.get(6)?,
+                data: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+            })
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}

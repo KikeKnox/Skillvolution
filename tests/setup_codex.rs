@@ -123,7 +123,15 @@ fn project_install_writes_expected_config_toml_and_hooks_json() {
     let key = skillvolution::project::key_from_dir(&fs::canonicalize(p).unwrap()).unwrap();
     assert_eq!(
         args,
-        vec!["--db", db.to_str().unwrap(), "serve", "--project", &key]
+        vec![
+            "--db",
+            db.to_str().unwrap(),
+            "serve",
+            "--project",
+            &key,
+            "--client",
+            "codex"
+        ]
     );
     // A fresh project entry carries the trust-note comment right above its header.
     assert!(
@@ -416,7 +424,7 @@ fn global_install_writes_to_home_codex_dir() {
         .as_array()
         .unwrap();
     // Global setup carries no --project.
-    assert_eq!(args.len(), 3, "{args:?}");
+    assert_eq!(args.len(), 5, "{args:?}");
     // A global entry is always trusted, so it never gets the project trust note.
     assert!(!toml_text.contains("Skillvolution: Codex only loads"));
 }

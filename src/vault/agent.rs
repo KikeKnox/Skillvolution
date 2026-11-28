@@ -1,9 +1,8 @@
-//! Agent entries: the metadata an agent revision carries, its validation, and
-//! the machine-local tier-to-model mapping (`agent_models`).
+//! Agent entries: the metadata an agent revision carries and its validation.
 
-use super::{Vault, validate_id, validate_single_line};
+use super::{Vault, validate_id};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const TIERS: [&str; 3] = ["high", "mid", "low"];
@@ -13,7 +12,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const TOOLS: [&str; 5] = ["read", "edit", "shell", "web", "mcp"];
 /// Client built-in agent names and our managed skills; a vault agent with one of these ids
 /// would shadow the client's native agent or a managed skill.
-const RESERVED_AGENT_IDS: [&str; 13] = [
+const RESERVED_AGENT_IDS: [&str; 14] = [
     "general-purpose",
     "statusline-setup",
     "claude-code-guide",
@@ -27,6 +26,7 @@ const RESERVED_AGENT_IDS: [&str; 13] = [
     "evolution",
     "skill-evaluation",
     "skill-acquisition",
+    "agent-evaluation",
 ];
 
 /// Why no vault agent may use `id` (agents only; skills may), or `None` when it is free.
@@ -39,8 +39,6 @@ pub fn reserved_agent_id(id: &str) -> Option<&'static str> {
         None
     }
 }
-/// Clients `agent_models` can hold a mapping for.
-pub const MODEL_CLIENTS: [&str; 2] = ["claude-code", "opencode"];
 /// Headings an agent body may use, in this order; only `## Output contract`
 /// is required (it is what the orchestrator gets back).
 pub const AGENT_SECTIONS: [&str; 4] =
@@ -228,92 +226,6 @@ pub(super) fn parse_meta(text: Option<String>) -> rusqlite::Result<Option<AgentM
         })
     })
     .transpose()
-}
-
-/// One stored `agent_models` row.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AgentModel {
-    pub client: String,
-    pub tier: String,
-    pub model: String,
-    pub effort: Option<String>,
-}
-
-impl Vault {
-    /// Every stored tier mapping, ordered by client then tier.
-    pub fn agent_models(&self) -> Result<Vec<AgentModel>> {
-        let mut statement = self.conn.prepare(
-            "SELECT client, tier, model, effort FROM agent_models ORDER BY client, tier",
-        )?;
-        Ok(statement
-            .query_map([], |row| {
-                Ok(AgentModel {
-                    client: row.get(0)?,
-                    tier: row.get(1)?,
-                    model: row.get(2)?,
-                    effort: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Maps `tier` to `model` (and optionally `effort`) for `client`.
-    pub fn set_agent_model(
-        &self,
-        client: &str,
-        tier: &str,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Result<()> {
-        ensure!(
-            MODEL_CLIENTS.contains(&client),
-            "client must be one of {}",
-            MODEL_CLIENTS.join(", ")
-        );
-        ensure!(
-            TIERS.contains(&tier),
-            "tier must be one of {}",
-            TIERS.join(", ")
-        );
-        validate_single_line("model", model, 128)?;
-        ensure!(
-            !model.contains(char::is_whitespace),
-            "model must not contain whitespace"
-        );
-        if let Some(effort) = effort {
-            ensure!(
-                EFFORTS.contains(&effort),
-                "effort must be one of {}",
-                EFFORTS.join(", ")
-            );
-        }
-        self.conn.execute(
-            "INSERT INTO agent_models (client, tier, model, effort) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(client, tier) DO UPDATE SET model = excluded.model, effort = excluded.effort",
-            params![client, tier, model, effort],
-        )?;
-        Ok(())
-    }
-
-    /// Deletes the stored mapping of `tier` for `client`, so it reverts to the compiled
-    /// default (or to none); `false` when there was no row.
-    pub fn unset_agent_model(&self, client: &str, tier: &str) -> Result<bool> {
-        ensure!(
-            MODEL_CLIENTS.contains(&client),
-            "client must be one of {}",
-            MODEL_CLIENTS.join(", ")
-        );
-        ensure!(
-            TIERS.contains(&tier),
-            "tier must be one of {}",
-            TIERS.join(", ")
-        );
-        let removed = self.conn.execute(
-            "DELETE FROM agent_models WHERE client = ?1 AND tier = ?2",
-            params![client, tier],
-        )?;
-        Ok(removed > 0)
-    }
 }
 
 #[cfg(test)]

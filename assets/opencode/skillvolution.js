@@ -4,6 +4,7 @@
 // that did work (file edits or get_skill loads) ends without a report or
 // publication, adds a review reminder to the system prompt of the following
 // turns until the work is reviewed. It never prompts the session itself, so no extra turn is spent.
+// Delegations and fired reminders are recorded in the local telemetry through the binary.
 // One default export loads in both plugin systems: OpenCode 1.x calls `server`
 // (its hooks object), OpenCode 2.x calls `setup` (hooks registered on its context)
 // and ignores the other key.
@@ -22,7 +23,7 @@ const PROJECT_KEY = __SKILLVOLUTION_PROJECT_KEY__;
 // Keep in sync with STOP_REASON in src/hook.rs (a test in src/setup/plugin.rs
 // checks that this literal matches it exactly).
 const REVIEW_REMINDER =
-  "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
+  "Skillvolution review: you edited files, loaded vault skills, or delegated to vault agents since the last review. Follow the Report and Reflect steps of the evolution skill now: first call report_skill_outcome for every skill you loaded with get_skill and every vault agent you delegated to (not the built-in sv-high/sv-mid/sv-low) (helped, failed with the wrong step, or not_applicable); then, for any candidate lesson that meets every lesson criterion, dispatch a fresh subagent that follows the skill-evaluation skill now (agent-evaluation for an agent) — do not ask the user first — to judge it (global scope, project scope, or discard), then call publish_skill (publish_agent for an agent) with the verdict and its reason. If there is nothing to report or evaluate, say so in a single short line with no elaboration and no heading.";
 
 // OpenCode built-in tool ids that edit files: 1.x has edit, write, multiedit, patch
 // and apply_patch; 2.x has edit, write and patch.
@@ -31,7 +32,7 @@ const WORK_TOOLS = new Set(["edit", "write", "multiedit", "patch", "apply_patch"
 // `subagent`/`agent` in 2.x.
 const DELEGATION_TOOLS = { task: "subagent_type", subagent: "agent" };
 // MCP tools are exposed as `<server>_<tool>`, so match by substring.
-const REVIEW_TOOLS = ["publish_skill", "report_skill_outcome"];
+const REVIEW_TOOLS = ["publish_skill", "publish_agent", "report_skill_outcome"];
 // Loading a vault skill is work too: its outcome must be reported.
 const LOAD_TOOL = "get_skill";
 
@@ -47,7 +48,8 @@ const MAX_TRACKED_SESSIONS = 500;
 const managedAgentVersion = (root, id) => {
   if (typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id) || id.startsWith("sv-")) return null;
   const globalDir = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "agents");
-  const marker = new RegExp(`^<!-- skillvolution-managed:agent:${id}:v(\\d+):[0-9a-f]{8} -->$`);
+  // An optional `:model=<model>` pin (install_agent with a model) follows the hash.
+  const marker = new RegExp(`^<!-- skillvolution-managed:agent:${id}:v(\\d+):[0-9a-f]{8}(?::model=\\S+)? -->$`);
   for (const dir of [join(root, ".opencode", "agents"), globalDir]) {
     try {
       // Same strict form as the Rust side: the marker is the line right after the
@@ -107,9 +109,14 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
     return stdout.trim();
   };
 
-  const loadCatalog = (sessionID) =>
+  // The catalog (skills and the agents block) comes from the binary, the single
+  // source for every client; `--client opencode` lists OpenCode's agents. A subagent
+  // session (`subagent`) gets the skills only: a vault agent running there must not be
+  // invited to delegate, and its parent already ran the agent upkeep.
+  const loadCatalog = (sessionID, subagent) =>
     new Promise((resolve) => {
-      const args = ["--db", DB, "hook", "session-start"];
+      const args = ["--db", DB, "hook", "session-start", "--client", "opencode"];
+      if (subagent) args.push("--subagent");
       if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
       execFile(BIN, args, options, (error, stdout) => {
@@ -127,9 +134,9 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
   // `hook prompt` reads the prompt from stdin and prints the matching skills,
   // or nothing when none is relevant. A failure only costs this turn's
   // suggestions, like a failed catalog load.
-  const loadSuggestions = (prompt) =>
+  const loadSuggestions = (prompt, sessionID) =>
     new Promise((resolve) => {
-      const args = ["--db", DB, "hook", "prompt"];
+      const args = ["--db", DB, "hook", "prompt", "--client", "opencode"];
       if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
       const options = { cwd: directory, env, timeout: 15000 };
       const child = execFile(BIN, args, options, (error, stdout) => {
@@ -140,8 +147,25 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
         resolve(contextText(stdout));
       });
       child.stdin?.on("error", () => {});
-      child.stdin?.end(JSON.stringify({ prompt }));
+      child.stdin?.end(JSON.stringify({ prompt, session_id: sessionID }));
     });
+
+  // `hook delegation` and `hook reminder` record a telemetry event for OpenCode from
+  // the JSON on their stdin. Fire and forget: a failure only loses that event.
+  const record = (hook, payload) => {
+    try {
+      const args = ["--db", DB, "hook", hook, "--client", "opencode"];
+      if (PROJECT_KEY) args.push("--project", PROJECT_KEY);
+      const options = { cwd: directory, env, timeout: 15000 };
+      const child = execFile(BIN, args, options, (error) => {
+        if (error) log("warn", `${hook} event not recorded: ${error.message}`);
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(JSON.stringify(payload));
+    } catch (error) {
+      log("warn", `${hook} event not recorded: ${error?.message ?? error}`);
+    }
+  };
 
   // Subagent sessions hand their work and reviews to the parent:
   // flags always live on the top-level session so delegated edits still get
@@ -164,7 +188,10 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
     // The texts to add to `sessionID`'s system prompt for this model request.
     system: async (sessionID) => {
       if (!catalogs.has(sessionID)) {
-        catalogs.set(sessionID, loadCatalog(sessionID));
+        catalogs.set(
+          sessionID,
+          parentOf(sessionID).then((parent) => loadCatalog(sessionID, parent !== undefined)),
+        );
         capped(catalogs);
       }
       const texts = [];
@@ -189,7 +216,7 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       suggestions.set(
         sessionID,
         parentOf(sessionID)
-          .then((parent) => (parent ? "" : loadSuggestions(text)))
+          .then((parent) => (parent ? "" : loadSuggestions(text, sessionID)))
           .catch(() => ""),
       );
       capped(suggestions);
@@ -209,6 +236,13 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       if (tool.endsWith(LOAD_TOOL)) s.worked = true;
       if (Object.hasOwn(DELEGATION_TOOLS, tool)) {
         const id = args?.[DELEGATION_TOOLS[tool]];
+        // Every delegation is recorded (the binary tells built-in, vault and other
+        // agents apart), like the Claude Code Stop hook does.
+        if (typeof id === "string" && id) {
+          const delegation = { agent: id, session: sessionID };
+          if (typeof args?.model === "string") delegation.model = args.model;
+          record("delegation", delegation);
+        }
         const version = managedAgentVersion(agentRoot, id);
         if (version !== null) {
           s.worked = true;
@@ -241,8 +275,10 @@ const createTracker = ({ directory, agentRoot, getParent, log }) => {
       // done after the last review (same ordering as the Stop hook) and earns a
       // reminder on the following turns. Error: aborted or failed turns are not
       // reviewed; a pending reminder survives either way.
-      if (kind === "idle" && s.worked) s.remind = true;
-      else if (!s.remind) s.delegated.clear();
+      if (kind === "idle" && s.worked) {
+        s.remind = true;
+        record("reminder", { session: sessionID });
+      } else if (!s.remind) s.delegated.clear();
       s.worked = false;
     },
   };
