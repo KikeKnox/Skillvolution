@@ -266,7 +266,7 @@ fn placement_error(target: Target, agent: &Agent, project_dir: Option<&Path>) ->
 
 /// The path with its nearest existing ancestor canonicalized (so a symlinked $HOME
 /// compares equal to its target) and the not-yet-created tail re-appended.
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut current = path;
     loop {

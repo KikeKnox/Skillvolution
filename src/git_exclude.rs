@@ -3,7 +3,7 @@
 //! `info/exclude` (never `.gitignore`, which the user versions). A generated agent must
 //! not end up in a commit by accident.
 
-use crate::project;
+use crate::{agents, project};
 use std::{
     fs,
     path::{Component, Path, PathBuf},
@@ -78,7 +78,10 @@ fn update(project_dir: &Path, files: &[PathBuf], add: bool) -> Option<String> {
 
 /// The `info/exclude` of the repository whose work tree root is `root`: under `.git`
 /// when it is a directory; otherwise (a worktree or submodule, where `.git` is a file)
-/// under the common git directory git reports.
+/// under the common git directory git reports. Git prints that directory relative to
+/// `root` (`.git`, `../main/.git`) or absolute, with `/` even on Windows; it is applied
+/// component by component, since a verbatim `root` (`\\?\C:\...`, from
+/// `canonicalize`) takes neither `/` nor `..` literally.
 fn exclude_path(root: &Path) -> Option<PathBuf> {
     let git = root.join(".git");
     if git.is_dir() {
@@ -94,8 +97,11 @@ fn exclude_path(root: &Path) -> Option<PathBuf> {
         .ok()?;
     let dir = String::from_utf8(output.stdout).ok()?;
     let dir = dir.trim();
-    (output.status.success() && !dir.is_empty())
-        .then(|| root.join(dir).join("info").join("exclude"))
+    (output.status.success() && !dir.is_empty()).then(|| {
+        project::resolve_relative(root, dir)
+            .join("info")
+            .join("exclude")
+    })
 }
 
 /// The work tree roots of the repository whose work tree `root` is, as `git worktree list
@@ -125,9 +131,18 @@ fn worktrees(root: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// `/`-anchored path of `file` relative to `root`, `None` when it is not inside it.
+/// `/`-anchored path of `file` relative to `root`, `None` when it is not inside it. The
+/// separator is always `/`, which is what git reads on every OS. When `file` and `root`
+/// are not spelled alike (one canonicalized to `\\?\C:\...`, another drive-letter case,
+/// a symlinked ancestor), their real paths are compared instead.
 fn pattern(root: &Path, file: &Path) -> Option<String> {
-    let relative = file.strip_prefix(root).ok()?;
+    let relative = match file.strip_prefix(root) {
+        Ok(relative) => relative.to_path_buf(),
+        Err(_) => agents::canonical(file)
+            .strip_prefix(agents::canonical(root))
+            .ok()?
+            .to_path_buf(),
+    };
     let parts: Vec<&str> = relative
         .components()
         .map(|c| match c {
@@ -141,7 +156,8 @@ fn pattern(root: &Path, file: &Path) -> Option<String> {
 /// `text` with our block holding its previous lines minus `remove` plus `add` (in that
 /// order, without duplicates); the block is dropped when that leaves it empty and
 /// appended at the end when there was none. A start marker without an end marker opens a
-/// block that runs to the end of the file.
+/// block that runs to the end of the file. A file with `\r\n` line ends (edited on
+/// Windows) keeps them.
 fn with_lines(text: &str, add: &[String], remove: &[String]) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|l| l.trim_end() == START);
@@ -183,7 +199,8 @@ fn with_lines(text: &str, add: &[String], remove: &[String]) -> String {
     if out.is_empty() {
         return String::new();
     }
-    let joined = out.join("\n") + "\n";
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let joined = out.join(eol) + eol;
     // Leave the file byte-identical when nothing changed (e.g. no trailing newline).
     if joined.trim_end() == text.trim_end() {
         text.to_owned()
@@ -243,6 +260,49 @@ mod tests {
             Some("/.opencode/agents/x.md")
         );
         assert_eq!(pattern(root, Path::new("/elsewhere/x.md")), None);
+    }
+
+    #[test]
+    fn patterns_compare_real_paths_when_root_and_file_are_spelled_differently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(dir.path().join("other")).unwrap();
+        // Not a textual prefix, but the same directory.
+        let file = dir.path().join("other/../proj/.claude/agents/x.md");
+        assert_eq!(
+            pattern(&root, &file).as_deref(),
+            Some("/.claude/agents/x.md")
+        );
+        // A canonicalized root (`\\?\C:\...` on Windows) against a plain file path.
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            pattern(&canonical_root, &root.join(".claude/agents/x.md")).as_deref(),
+            Some("/.claude/agents/x.md")
+        );
+        assert_eq!(pattern(&root, &dir.path().join("other/x.md")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_patterns_use_forward_slashes() {
+        assert_eq!(
+            pattern(
+                Path::new(r"C:\repo"),
+                Path::new(r"C:\repo\.claude\agents\x.md")
+            )
+            .as_deref(),
+            Some("/.claude/agents/x.md")
+        );
+    }
+
+    #[test]
+    fn a_crlf_exclude_file_keeps_its_line_ends() {
+        let original = "*.log\r\n";
+        let added = with_lines(original, &s(&["/a.md"]), &[]);
+        assert_eq!(added, format!("*.log\r\n{START}\r\n/a.md\r\n{END}\r\n"));
+        assert_eq!(with_lines(&added, &s(&["/a.md"]), &[]), added);
+        assert_eq!(with_lines(&added, &[], &s(&["/a.md"])), original);
     }
 
     #[test]
